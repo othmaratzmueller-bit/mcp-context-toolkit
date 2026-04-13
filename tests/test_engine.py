@@ -212,3 +212,58 @@ class TestFingerprint:
         )
         assert matches_none == []
         assert fp_none == "0"
+
+
+class TestValidateAndFallback:
+    def _write_example(self, rules_dir: Path) -> None:
+        src = Path(__file__).parent.parent / "examples" / "s1_user_isolation.yaml"
+        (rules_dir / "s1.yaml").write_text(src.read_text(encoding="utf-8"))
+
+    def test_validate_directory_ok(self, tmp_path: Path):
+        rules = tmp_path / ".claude" / "rules" / "security"
+        rules.mkdir(parents=True)
+        self._write_example(rules)
+
+        result = RulesEngine.validate_directory(tmp_path / ".claude" / "rules")
+        assert result["ok"] is True
+        assert result["rule_count"] == 1
+        assert result["errors"] == []
+
+    def test_validate_directory_reports_parse_error(self, tmp_path: Path):
+        rules = tmp_path / ".claude" / "rules" / "security"
+        rules.mkdir(parents=True)
+        (rules / "broken.yaml").write_text("not: valid: yaml:\n  - [unclosed")
+
+        result = RulesEngine.validate_directory(tmp_path / ".claude" / "rules")
+        assert result["ok"] is False
+        assert len(result["errors"]) == 1
+        assert "parse error" in result["errors"][0].lower() or "YAML" in result["errors"][0]
+
+    def test_load_directory_lenient_skips_broken(self, tmp_path: Path):
+        rules = tmp_path / ".claude" / "rules" / "security"
+        rules.mkdir(parents=True)
+        self._write_example(rules)
+        (rules / "broken.yaml").write_text("not: valid: yaml:\n  - [unclosed")
+
+        engine = RulesEngine()
+        stats = engine.load_directory(tmp_path / ".claude" / "rules", strict=False)
+        assert stats["loaded"] == 1  # only s1 loaded
+        assert len(stats["errors"]) == 1
+        assert len(engine.rules) == 1
+        assert engine.rules[0].key == "s1_user_isolation"
+
+    def test_write_fallback_markdown(self, tmp_path: Path):
+        rules = tmp_path / ".claude" / "rules" / "security"
+        rules.mkdir(parents=True)
+        self._write_example(rules)
+
+        engine = RulesEngine.from_directory(tmp_path / ".claude" / "rules")
+        target = tmp_path / ".claude" / "rules" / "_meta" / "fallback_rules.md"
+        result = engine.write_fallback_markdown(target)
+
+        assert target.exists()
+        content = target.read_text(encoding="utf-8")
+        assert "claude-rules Fallback" in content
+        assert "S1" in content
+        assert "User Isolation" in content
+        assert result["written"] == 1

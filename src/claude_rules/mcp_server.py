@@ -74,6 +74,32 @@ def build_server(engine: RulesEngine):
         return json.dumps(keys, indent=2)
 
     @mcp.tool()
+    def validate_rules() -> str:
+        """Re-validate all rules from disk. Returns {ok, rule_count, errors, warnings}.
+
+        Use this to check whether a recent YAML edit broke the rule set,
+        or whether any `conflicts_with` references point to non-existent
+        rules. Does NOT mutate the running engine's rule cache — it reads
+        fresh from disk.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        # Re-run validation against the directory the engine was loaded from.
+        # We pull rules_dir from the first rule's source_path (all rules live
+        # under the same root).
+        if not engine.rules:
+            return _json.dumps({"ok": False, "error": "no rules loaded"})
+        source = engine.rules[0].source_path
+        if source is None:
+            return _json.dumps({"ok": False, "error": "no source_path on rules"})
+        root = _Path(source).parent
+        while root.name and root.name != "rules":
+            root = root.parent
+        result = RulesEngine.validate_directory(root)
+        return _json.dumps(result, indent=2)
+
+    @mcp.tool()
     def query_rules(
         type: str | None = None,
         scope: str | None = None,
@@ -126,6 +152,19 @@ def main() -> None:
         f"[claude-rules] loaded {len(engine.rules)} rules from {rules_dir}",
         file=sys.stderr,
     )
+
+    # Auto-write fallback markdown so there's always a plain-text reference
+    # for the MCP-outage case. Silent on failure — fallback is nice-to-have.
+    try:
+        fallback_target = rules_dir / "_meta" / "fallback_rules.md"
+        stats = engine.write_fallback_markdown(fallback_target)
+        print(
+            f"[claude-rules] wrote fallback with {stats['written']} critical rules to "
+            f"{fallback_target}",
+            file=sys.stderr,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[claude-rules] fallback write skipped: {e}", file=sys.stderr)
 
     server = build_server(engine)
     server.run()

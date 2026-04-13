@@ -99,7 +99,18 @@ class RulesEngine:
         engine.load_directory(root)
         return engine
 
-    def load_directory(self, root: Path | str) -> dict:
+    def load_directory(
+        self, root: Path | str, *, strict: bool = True
+    ) -> dict:
+        """Load all rule YAMLs under root.
+
+        strict=True (default): raises RuleLoadError if any file fails to parse
+        or validate. Used for CI, pytest, manual validation.
+
+        strict=False: skips broken files, loads the valid ones, returns stats
+        including the list of errors. Used by the hook path so a single broken
+        YAML does not blind the user to all other rules.
+        """
         root_path = Path(root)
         if not root_path.exists():
             raise FileNotFoundError(f"Rules directory not found: {root_path}")
@@ -114,18 +125,29 @@ class RulesEngine:
             except RuleLoadError as e:
                 errors.append(e)
 
-        if errors:
+        if errors and strict:
             details = "\n".join(str(e) for e in errors)
             raise RuleLoadError(root_path, f"{len(errors)} rule(s) failed to load:\n{details}")
 
         keys_seen: set[str] = set()
+        deduped: list[Rule] = []
+        duplicate_errors: list[str] = []
         for rule in loaded:
             if rule.key in keys_seen:
-                raise RuleLoadError(root_path, f"duplicate rule key: {rule.key}")
+                msg = f"duplicate rule key: {rule.key} (source: {rule.source_path})"
+                if strict:
+                    raise RuleLoadError(root_path, msg)
+                duplicate_errors.append(msg)
+                continue
             keys_seen.add(rule.key)
+            deduped.append(rule)
 
-        self._rules = loaded
-        return {"loaded": len(loaded), "root": str(root_path)}
+        self._rules = deduped
+        return {
+            "loaded": len(deduped),
+            "root": str(root_path),
+            "errors": [str(e) for e in errors] + duplicate_errors,
+        }
 
     @staticmethod
     def _iter_rule_files(root: Path) -> Iterable[Path]:
@@ -154,6 +176,113 @@ class RulesEngine:
 
     def get_rule(self, key: str) -> Rule | None:
         return next((r for r in self._rules if r.key == key), None)
+
+    @classmethod
+    def validate_directory(cls, root: Path | str) -> dict:
+        """Dry-run validation over a rules directory.
+
+        Walks every *.yaml, tries to parse + validate, collects errors
+        without mutating engine state. Also checks for duplicate keys and
+        conflicts_with references that point to nonexistent rules.
+
+        Returns {"ok": bool, "rule_count": N, "errors": [...], "warnings": [...]}.
+        Used by the validate_rules MCP tool and by `claude-rules-query validate`.
+        """
+        root_path = Path(root)
+        if not root_path.exists():
+            return {
+                "ok": False,
+                "rule_count": 0,
+                "errors": [f"Rules directory not found: {root_path}"],
+                "warnings": [],
+            }
+
+        loaded: list[Rule] = []
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        for yaml_file in cls._iter_rule_files(root_path):
+            try:
+                loaded.append(cls._load_file(yaml_file))
+            except RuleLoadError as e:
+                errors.append(str(e))
+
+        seen: set[str] = set()
+        for rule in loaded:
+            if rule.key in seen:
+                errors.append(
+                    f"duplicate key {rule.key} (source: {rule.source_path})"
+                )
+            seen.add(rule.key)
+
+        valid_keys = {r.key for r in loaded}
+        for rule in loaded:
+            for conflict in rule.conflicts_with:
+                if conflict.rule not in valid_keys:
+                    warnings.append(
+                        f"{rule.key} conflicts_with unknown rule "
+                        f"'{conflict.rule}' (source: {rule.source_path})"
+                    )
+
+        return {
+            "ok": len(errors) == 0,
+            "rule_count": len(loaded),
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    def write_fallback_markdown(self, target: Path | str) -> dict:
+        """Generate a plain-markdown fallback file for MCP-outage scenarios.
+
+        Writes only non_negotiable + mandatory rules, grouped by type.
+        The target should be a path under .claude/rules/_meta/ (git-ignored
+        or manually committed — caller decides). Used as the last-resort
+        reference when the claude-rules MCP server is unreachable.
+        """
+        target_path = Path(target)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        critical = [
+            r for r in self._rules
+            if r.priority in ("non_negotiable", "mandatory")
+        ]
+        critical.sort(
+            key=lambda r: (
+                {"non_negotiable": 0, "mandatory": 1, "recommended": 2}[r.priority],
+                r.type,
+                r.key,
+            )
+        )
+
+        lines: list[str] = [
+            "# claude-rules Fallback (auto-generated)",
+            "",
+            "Used as the last-resort reference when the claude-rules MCP",
+            "server is unreachable. Contains only non_negotiable + mandatory",
+            "rules from `.claude/rules/**/*.yaml`. Regenerated on every",
+            "engine load. Do not edit by hand.",
+            "",
+            f"Generated {len(critical)} critical rules from "
+            f"{len(self._rules)} total loaded.",
+            "",
+        ]
+
+        current_type = None
+        for rule in critical:
+            if rule.type != current_type:
+                lines.append(f"## {rule.type}")
+                lines.append("")
+                current_type = rule.type
+            short = f"[{rule.short_id}] " if rule.short_id else ""
+            lines.append(f"### {short}{rule.title} ({rule.priority})")
+            lines.append("")
+            lines.append(rule.summary.strip())
+            lines.append("")
+            lines.append(f"**Applies to:** `{', '.join(rule.applies_to.files)}`")
+            lines.append("")
+
+        target_path.write_text("\n".join(lines), encoding="utf-8")
+        return {"written": len(critical), "target": str(target_path)}
 
     def list_keys(
         self,

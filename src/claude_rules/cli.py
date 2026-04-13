@@ -6,7 +6,11 @@ import os
 import sys
 from pathlib import Path
 
-from claude_rules.engine import RulesEngine, fingerprint_rules
+from claude_rules.engine import (
+    RuleLoadError,
+    RulesEngine,
+    fingerprint_rules,
+)
 
 
 def _discover_rules_dir() -> Path:
@@ -54,69 +58,204 @@ def _format_markdown(rules: list, file_path: str) -> str:
     return "\n".join(lines)
 
 
+def _rule_to_summary_dict(r) -> dict:
+    return {
+        "key": r.key,
+        "short_id": r.short_id,
+        "title": r.title,
+        "priority": r.priority,
+        "scope": r.scope,
+        "type": r.type,
+        "summary": r.summary.strip(),
+    }
+
+
+def _resolve_rules_dir(arg: str | None) -> Path:
+    if arg:
+        return Path(arg).expanduser().resolve()
+    return _discover_rules_dir()
+
+
+def _cmd_validate(rules_dir: Path) -> int:
+    result = RulesEngine.validate_directory(rules_dir)
+    print(json.dumps(result, indent=2))
+    return 0 if result["ok"] else 1
+
+
+def _cmd_write_fallback(rules_dir: Path, target: Path | None) -> int:
+    engine = RulesEngine()
+    stats = engine.load_directory(rules_dir, strict=False)
+    if stats.get("errors"):
+        for err in stats["errors"]:
+            print(f"[claude-rules-query] WARN: {err}", file=sys.stderr)
+    target_path = target or (rules_dir / "_meta" / "fallback_rules.md")
+    write_stats = engine.write_fallback_markdown(target_path)
+    print(json.dumps({**stats, **write_stats}, indent=2))
+    return 0
+
+
+def _cmd_bulk_query(
+    engine: RulesEngine,
+    rtype: str | None,
+    scope: str | None,
+    priority: str | None,
+    module: str | None,
+    fmt: str,
+) -> int:
+    matches = engine.query(
+        type=rtype,  # type: ignore[arg-type]
+        scope=scope,  # type: ignore[arg-type]
+        module=module,
+        priority=priority,  # type: ignore[arg-type]
+    )
+    matches.sort(
+        key=lambda r: (
+            {"non_negotiable": 0, "mandatory": 1, "recommended": 2}[r.priority],
+            r.key,
+        )
+    )
+    if fmt == "keys":
+        for r in matches:
+            print(r.key)
+    elif fmt == "json":
+        print(json.dumps([_rule_to_summary_dict(r) for r in matches], indent=2))
+    else:
+        if not matches:
+            print("(no rules match filter)")
+            return 0
+        for r in matches:
+            short = f"[{r.short_id}] " if r.short_id else ""
+            print(f"- {short}{r.key} ({r.priority}, {r.scope}/{r.type}) — {r.title}")
+    return 0
+
+
+def _cmd_file_query(
+    engine: RulesEngine,
+    file_path: str,
+    fmt: str,
+    warnings: list[str],
+) -> int:
+    matches = engine.query_for_file(file_path)
+
+    if fmt == "bundle":
+        markdown = _format_markdown(matches, file_path)
+        out = {
+            "fingerprint": fingerprint_rules(matches),
+            "markdown": markdown if markdown else None,
+            "rule_count": len(matches),
+            "warnings": warnings,
+        }
+        print(json.dumps(out))
+    elif fmt == "fingerprint":
+        print(fingerprint_rules(matches))
+    elif fmt == "json":
+        print(json.dumps([_rule_to_summary_dict(r) for r in matches], indent=2))
+    elif fmt == "keys":
+        for r in matches:
+            print(r.key)
+    else:
+        text = _format_markdown(matches, file_path)
+        if text:
+            print(text)
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="claude-rules-query",
-        description="Query rules for a file path (one-shot, used by hooks).",
+        description=(
+            "Query, validate, or export rules from a claude-rules directory. "
+            "Used by hooks, shell scripts, and manual debugging."
+        ),
     )
-    parser.add_argument("file_path", help="File path to match against rule globs")
+    parser.add_argument(
+        "file_path",
+        nargs="?",
+        help=(
+            "File path to match against rule globs. Omit to use bulk-query "
+            "mode with --type/--scope/--priority/--module filters."
+        ),
+    )
     parser.add_argument(
         "--format",
         choices=["markdown", "json", "keys", "bundle", "fingerprint"],
         default="markdown",
         help=(
-            "Output format. 'bundle' emits JSON with fingerprint + markdown "
-            "in one call (used by hooks for live-reload dedup). 'fingerprint' "
-            "emits just the 16-char hex string."
+            "Output format. 'bundle' emits JSON with fingerprint + markdown + "
+            "warnings in one call (used by hooks). 'fingerprint' emits just "
+            "the 16-char hex string. 'keys' prints rule keys line by line."
         ),
     )
+    parser.add_argument("--type", default=None, help="Filter by rule type")
+    parser.add_argument("--scope", default=None, help="Filter by scope")
+    parser.add_argument("--priority", default=None, help="Filter by priority")
+    parser.add_argument("--module", default=None, help="Filter by module")
     parser.add_argument(
         "--rules-dir",
         default=None,
         help="Override rules directory (else CLAUDE_RULES_DIR or .claude/rules auto-discovery)",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate all rules, print result as JSON, exit 1 if any error",
+    )
+    parser.add_argument(
+        "--write-fallback",
+        nargs="?",
+        const="DEFAULT",
+        help=(
+            "Write _meta/fallback_rules.md containing non_negotiable + mandatory "
+            "rules as plain markdown. Default target is <rules-dir>/_meta/fallback_rules.md."
+        ),
+    )
     args = parser.parse_args()
 
     try:
-        rules_dir = Path(args.rules_dir).expanduser().resolve() if args.rules_dir else _discover_rules_dir()
+        rules_dir = _resolve_rules_dir(args.rules_dir)
     except FileNotFoundError as e:
         print(f"[claude-rules-query] {e}", file=sys.stderr)
         sys.exit(2)
 
-    engine = RulesEngine.from_directory(rules_dir)
-    matches = engine.query_for_file(args.file_path)
+    # Validate subcommand
+    if args.validate:
+        sys.exit(_cmd_validate(rules_dir))
 
-    if args.format == "bundle":
-        markdown = _format_markdown(matches, args.file_path)
-        out = {
-            "fingerprint": fingerprint_rules(matches),
-            "markdown": markdown if markdown else None,
-            "rule_count": len(matches),
-        }
-        print(json.dumps(out))
-    elif args.format == "fingerprint":
-        print(fingerprint_rules(matches))
-    elif args.format == "json":
-        out = [
-            {
-                "key": r.key,
-                "short_id": r.short_id,
-                "title": r.title,
-                "priority": r.priority,
-                "scope": r.scope,
-                "type": r.type,
-                "summary": r.summary.strip(),
-            }
-            for r in matches
-        ]
-        print(json.dumps(out, indent=2))
-    elif args.format == "keys":
-        for r in matches:
-            print(r.key)
-    else:
-        text = _format_markdown(matches, args.file_path)
-        if text:
-            print(text)
+    # Write-fallback subcommand
+    if args.write_fallback:
+        target = None if args.write_fallback == "DEFAULT" else Path(args.write_fallback)
+        sys.exit(_cmd_write_fallback(rules_dir, target))
+
+    # Bundle format is used by hooks — be lenient with broken YAMLs so a
+    # single bad file doesn't blind the session to all other rules.
+    lenient = args.format == "bundle"
+    warnings: list[str] = []
+    engine = RulesEngine()
+    try:
+        stats = engine.load_directory(rules_dir, strict=not lenient)
+        warnings = stats.get("errors", [])
+    except RuleLoadError as e:
+        if lenient:
+            warnings = [str(e)]
+        else:
+            print(f"[claude-rules-query] load failed: {e}", file=sys.stderr)
+            sys.exit(3)
+
+    # Bulk query mode (no file_path, metadata filters)
+    if args.file_path is None:
+        if not any([args.type, args.scope, args.priority, args.module]):
+            print(
+                "[claude-rules-query] error: provide either a file_path or at "
+                "least one of --type/--scope/--priority/--module",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        sys.exit(_cmd_bulk_query(
+            engine, args.type, args.scope, args.priority, args.module, args.format
+        ))
+
+    # File query mode
+    sys.exit(_cmd_file_query(engine, args.file_path, args.format, warnings))
 
 
 if __name__ == "__main__":
