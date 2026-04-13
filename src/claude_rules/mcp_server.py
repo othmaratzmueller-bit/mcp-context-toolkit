@@ -73,6 +73,44 @@ def build_server(engine: RulesEngine):
         keys = engine.list_keys(type=type, scope=scope)  # type: ignore[arg-type]
         return json.dumps(keys, indent=2)
 
+    @mcp.tool()
+    def query_rules(
+        type: str | None = None,
+        scope: str | None = None,
+        priority: str | None = None,
+        module: str | None = None,
+    ) -> str:
+        """Return rule summaries matching optional filters. Bulk fetch for agents.
+
+        Unlike query_rules_for_file (which matches globs against a path),
+        query_rules filters by metadata fields: type (security, workflow,
+        code_quality, frontend, architecture, infrastructure, module),
+        scope (backend, frontend, database, infrastructure, docs, all),
+        priority (non_negotiable, mandatory, recommended), and module name.
+
+        Returns sorted by priority (non_negotiable first), then by key.
+        Each result is a summary dict — use get_rule(key) for the full
+        content of a specific rule.
+
+        Typical uses:
+          - Security review: query_rules(type="security", priority="non_negotiable")
+          - Frontend session: query_rules(scope="frontend")
+          - Themis module: query_rules(module="themis")
+        """
+        matches = engine.query(
+            type=type,  # type: ignore[arg-type]
+            scope=scope,  # type: ignore[arg-type]
+            module=module,
+            priority=priority,  # type: ignore[arg-type]
+        )
+        matches.sort(
+            key=lambda r: (
+                {"non_negotiable": 0, "mandatory": 1, "recommended": 2}[r.priority],
+                r.key,
+            )
+        )
+        return json.dumps([_rule_summary(r) for r in matches], indent=2)
+
     return mcp
 
 
