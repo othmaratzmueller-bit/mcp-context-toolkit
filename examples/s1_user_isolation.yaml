@@ -1,0 +1,70 @@
+key: s1_user_isolation
+title: "User Isolation"
+short_id: "S1"
+
+type: security
+scope: backend
+priority: non_negotiable
+modules: [all]
+
+applies_to:
+  files:
+    - "backend/app/api/**/*.py"
+    - "backend/app/modules/**/*.py"
+    - "backend/app/services/**/*.py"
+    - "backend/app/tasks/**/*.py"
+  language: python
+  excludes:
+    - "backend/app/services/auth/__init__.py"
+  triggers:
+    - "db.query("
+    - ".filter("
+
+summary: |
+  EVERY db.query() MUST contain filter(..., user_id == user_id).
+  User-ID via Header X-User-ID.
+
+content: |
+  ## S1. User Isolation (NON-NEGOTIABLE)
+
+  EVERY `db.query()` MUST contain `filter(..., user_id == user_id)`.
+
+  User ID extraction:
+  ```python
+  user_id: str = Header("default_user", alias="X-User-ID")
+  ```
+
+examples:
+  forbidden:
+    code: |
+      db.query(ChatSession).filter(ChatSession.session_id == sid).first()
+    why: "Returns sessions of OTHER users — data leak"
+  required:
+    code: |
+      db.query(ChatSession).filter(
+          ChatSession.session_id == sid,
+          ChatSession.user_id == user_id
+      ).first()
+    why: "Filters to current user's sessions only"
+
+references:
+  files:
+    - path: "backend/app/services/auth.py"
+      why: "User-ID extraction logic"
+  related_rules:
+    - s7_worm_audit
+    - s2_pii_anonymization
+
+compliance_refs:
+  - standard: "ISO 42001"
+    clause: "8.4"
+    description: "Data management for AI systems — multi-tenancy isolation"
+  - standard: "EU AI Act"
+    article: "Art. 10"
+    description: "Data and data governance"
+
+created: 2025-08-15
+last_reviewed: 2026-04-01
+review_interval_days: 90
+owner: security_team
+tags: [data_safety, gdpr, multi_tenant]
