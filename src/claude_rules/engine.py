@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
@@ -9,6 +11,37 @@ import yaml
 from pydantic import ValidationError
 
 from claude_rules.models import Rule, RulePriority, RuleScope, RuleType
+
+
+_FINGERPRINT_EXCLUDE = {
+    "source_path",
+    "created",
+    "last_reviewed",
+    "review_interval_days",
+    "owner",
+}
+
+
+def fingerprint_rules(rules: list["Rule"]) -> str:
+    """Stable 16-char hex hash over the user-visible fields of a rule set.
+
+    Used for live-reload dedup: if a hook stores this fingerprint per file,
+    a subsequent hook invocation can detect whether the rule set matching
+    the file has changed since last time. Catches add/delete, content edits,
+    summary edits, priority changes, title/short_id changes, glob changes.
+
+    Ignores metadata that doesn't affect what Claude sees (source_path,
+    created/reviewed timestamps, owner, review_interval). Rule-order
+    independent because rules are sorted by key before hashing.
+    """
+    if not rules:
+        return "0"
+    h = hashlib.sha256()
+    for r in sorted(rules, key=lambda x: x.key):
+        dump = r.model_dump(mode="json", exclude=_FINGERPRINT_EXCLUDE)
+        h.update(json.dumps(dump, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        h.update(b"|")
+    return h.hexdigest()[:16]
 
 
 @lru_cache(maxsize=512)
@@ -146,6 +179,12 @@ class RulesEngine:
                 matches.append(rule)
         matches.sort(key=lambda r: (self._priority_order(r.priority), r.key))
         return matches
+
+    def query_for_file_with_fingerprint(
+        self, file_path: str
+    ) -> tuple[list[Rule], str]:
+        matches = self.query_for_file(file_path)
+        return matches, fingerprint_rules(matches)
 
     @staticmethod
     def _normalize_path(file_path: str) -> str:

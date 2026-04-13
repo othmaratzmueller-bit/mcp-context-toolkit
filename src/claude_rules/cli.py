@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from claude_rules.engine import RulesEngine
+from claude_rules.engine import RulesEngine, fingerprint_rules
 
 
 def _discover_rules_dir() -> Path:
@@ -62,9 +62,13 @@ def main() -> None:
     parser.add_argument("file_path", help="File path to match against rule globs")
     parser.add_argument(
         "--format",
-        choices=["markdown", "json", "keys"],
+        choices=["markdown", "json", "keys", "bundle", "fingerprint"],
         default="markdown",
-        help="Output format (default: markdown)",
+        help=(
+            "Output format. 'bundle' emits JSON with fingerprint + markdown "
+            "in one call (used by hooks for live-reload dedup). 'fingerprint' "
+            "emits just the 16-char hex string."
+        ),
     )
     parser.add_argument(
         "--rules-dir",
@@ -82,7 +86,17 @@ def main() -> None:
     engine = RulesEngine.from_directory(rules_dir)
     matches = engine.query_for_file(args.file_path)
 
-    if args.format == "json":
+    if args.format == "bundle":
+        markdown = _format_markdown(matches, args.file_path)
+        out = {
+            "fingerprint": fingerprint_rules(matches),
+            "markdown": markdown if markdown else None,
+            "rule_count": len(matches),
+        }
+        print(json.dumps(out))
+    elif args.format == "fingerprint":
+        print(fingerprint_rules(matches))
+    elif args.format == "json":
         out = [
             {
                 "key": r.key,

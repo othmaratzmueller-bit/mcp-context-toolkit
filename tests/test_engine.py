@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_rules.engine import RulesEngine, _compile_glob
+from claude_rules.engine import RulesEngine, _compile_glob, fingerprint_rules
 from claude_rules.models import Rule, RuleApplyTo
 
 
@@ -139,3 +139,76 @@ class TestRulesEngine:
 
         with pytest.raises(RuleLoadError):
             RulesEngine.from_directory(tmp_path / ".claude" / "rules")
+
+
+class TestFingerprint:
+    def test_empty_rules_returns_zero(self):
+        assert fingerprint_rules([]) == "0"
+
+    def test_deterministic(self):
+        rules = [_make_rule("a", ["**/*"]), _make_rule("b", ["**/*"])]
+        assert fingerprint_rules(rules) == fingerprint_rules(rules)
+
+    def test_order_independent(self):
+        r1 = _make_rule("a", ["**/*"])
+        r2 = _make_rule("b", ["**/*"])
+        assert fingerprint_rules([r1, r2]) == fingerprint_rules([r2, r1])
+
+    def test_content_change_flips_fingerprint(self):
+        original = _make_rule("a", ["**/*"], content="original body")
+        edited = _make_rule("a", ["**/*"], content="edited body")
+        assert fingerprint_rules([original]) != fingerprint_rules([edited])
+
+    def test_summary_change_flips_fingerprint(self):
+        original = _make_rule(
+            "a", ["**/*"], summary="Rule one — minimum ten chars"
+        )
+        edited = _make_rule(
+            "a", ["**/*"], summary="Rule one edited — ten chars"
+        )
+        assert fingerprint_rules([original]) != fingerprint_rules([edited])
+
+    def test_title_change_flips_fingerprint(self):
+        original = _make_rule("a", ["**/*"], title="Old Title")
+        edited = _make_rule("a", ["**/*"], title="New Title")
+        assert fingerprint_rules([original]) != fingerprint_rules([edited])
+
+    def test_priority_change_flips_fingerprint(self):
+        low = _make_rule("a", ["**/*"], priority="recommended")
+        high = _make_rule("a", ["**/*"], priority="non_negotiable")
+        assert fingerprint_rules([low]) != fingerprint_rules([high])
+
+    def test_metadata_change_does_not_flip(self):
+        # source_path, created, owner, review_interval are metadata — excluded
+        from datetime import date
+
+        r1 = _make_rule("a", ["**/*"], created=date(2026, 1, 1), owner="alice")
+        r2 = _make_rule("a", ["**/*"], created=date(2026, 4, 13), owner="bob")
+        assert fingerprint_rules([r1]) == fingerprint_rules([r2])
+
+    def test_adding_rule_flips_fingerprint(self):
+        r1 = _make_rule("a", ["**/*"])
+        r2 = _make_rule("b", ["**/*"])
+        assert fingerprint_rules([r1]) != fingerprint_rules([r1, r2])
+
+    def test_different_rules_different_fingerprint(self):
+        r1 = _make_rule("a", ["**/*"], content="one")
+        r2 = _make_rule("b", ["**/*"], content="two")
+        assert fingerprint_rules([r1]) != fingerprint_rules([r2])
+
+    def test_engine_query_for_file_with_fingerprint(self):
+        r1 = _make_rule("a", ["backend/**/*.py"])
+        r2 = _make_rule("b", ["sps_webapp/**/*.js"])
+        engine = RulesEngine([r1, r2])
+
+        matches_a, fp_a = engine.query_for_file_with_fingerprint(
+            "backend/app/main.py"
+        )
+        assert [r.key for r in matches_a] == ["a"]
+        assert fp_a != "0"
+
+        matches_none, fp_none = engine.query_for_file_with_fingerprint(
+            "docs/readme.md"
+        )
+        assert matches_none == []
+        assert fp_none == "0"
