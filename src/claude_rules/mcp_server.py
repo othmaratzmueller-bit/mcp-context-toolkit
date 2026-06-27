@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from claude_rules.engine import RulesEngine
+from claude_rules.memory import MemoryEngine
 
 
 def _discover_rules_dir() -> Path:
@@ -24,6 +25,21 @@ def _discover_rules_dir() -> Path:
         "No rules directory found. Set CLAUDE_RULES_DIR or create .claude/rules/ "
         "in the current working tree."
     )
+
+
+def _discover_memory_dir() -> Path | None:
+    """Locate the PROJECT memory directory. Env CLAUDE_MEMORY_DIR wins, else
+    walk up for .claude/memory. Returns None if none found — memory tools are
+    then simply not registered and rules keep working untouched."""
+    env = os.environ.get("CLAUDE_MEMORY_DIR")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_dir() else None
+    for candidate in [Path.cwd(), *Path.cwd().parents]:
+        mem = candidate / ".claude" / "memory"
+        if mem.is_dir():
+            return mem
+    return None
 
 
 def _rule_summary(rule: Any) -> dict:
@@ -44,7 +60,17 @@ def _rule_full(rule: Any) -> dict:
     return rule.model_dump(mode="json")
 
 
-def build_server(engine: RulesEngine):
+def _memory_summary(m: Any) -> dict:
+    return {
+        "name": m.name,
+        "type": m.type,
+        "tier": m.tier,
+        "description": m.description,
+        "source_path": m.source_path,
+    }
+
+
+def build_server(engine: RulesEngine, memory_engine: MemoryEngine | None = None):
     from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP("claude-rules")
@@ -137,6 +163,47 @@ def build_server(engine: RulesEngine):
         )
         return json.dumps([_rule_summary(r) for r in matches], indent=2)
 
+    # ---- memory tools (registered only when a memory store was found) ----
+    if memory_engine is not None:
+
+        @mcp.tool()
+        def recall(query: str, limit: int = 8) -> str:
+            """Recall the most relevant memories for a query, ranked across BOTH
+            tiers (project + user). Keyword-based and deterministic.
+
+            The native auto-memory only surfaces the project tier — use this to
+            pull project AND user-global knowledge on demand. Returns summaries;
+            follow up with get_memory(name) for the full body.
+            """
+            hits = memory_engine.recall(query, limit=limit)
+            return json.dumps(
+                [_memory_summary(m) for m in hits], indent=2, ensure_ascii=False
+            )
+
+        @mcp.tool()
+        def get_memory(name: str) -> str:
+            """Fetch the full body + metadata of a single memory by its name."""
+            m = memory_engine.get(name)
+            if m is None:
+                return json.dumps({"error": f"memory not found: {name}"})
+            return json.dumps(m.model_dump(mode="json"), indent=2, ensure_ascii=False)
+
+        @mcp.tool()
+        def list_memories(type: str | None = None, tier: str | None = None) -> str:
+            """List memory names + descriptions, optionally filtered by type
+            (user/feedback/project/reference) and/or tier (user/project)."""
+            ms = memory_engine.list(type=type, tier=tier)  # type: ignore[arg-type]
+            return json.dumps(
+                [_memory_summary(m) for m in ms], indent=2, ensure_ascii=False
+            )
+
+        @mcp.tool()
+        def memory_lint() -> str:
+            """Hygiene report over the memory store — broken [[links]], index
+            orphans, stale index pointers. The raw material a /dream
+            consolidation pass acts on."""
+            return json.dumps(memory_engine.lint(), indent=2, ensure_ascii=False)
+
     return mcp
 
 
@@ -166,7 +233,23 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print(f"[claude-rules] fallback write skipped: {e}", file=sys.stderr)
 
-    server = build_server(engine)
+    # Memory store is optional — if found, the same MCP also serves recall /
+    # get_memory / list_memories / memory_lint. If not, rules-only as before.
+    memory_engine = None
+    mem_dir = _discover_memory_dir()
+    if mem_dir is not None:
+        memory_engine = MemoryEngine()
+        memory_engine.load_directory(mem_dir, tier="project", strict=False)
+        user_mem = os.environ.get("CLAUDE_USER_MEMORY_DIR")
+        if user_mem and Path(user_mem).expanduser().is_dir():
+            memory_engine.load_directory(user_mem, tier="user", strict=False)
+        print(
+            f"[claude-rules] loaded {len(memory_engine.memories)} memories from "
+            f"{mem_dir}" + (f" + user tier {user_mem}" if user_mem else ""),
+            file=sys.stderr,
+        )
+
+    server = build_server(engine, memory_engine)
     server.run()
 
 
