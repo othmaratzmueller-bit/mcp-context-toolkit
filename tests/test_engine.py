@@ -102,20 +102,20 @@ class TestRulesEngine:
     def test_load_directory_reads_example(self, tmp_path: Path):
         root = tmp_path / ".claude" / "rules" / "security"
         root.mkdir(parents=True)
-        example_source = Path(__file__).parent.parent / "examples" / "s1_user_isolation.yaml"
+        example_source = Path(__file__).parent.parent / "examples" / "no_hardcoded_secrets.yaml"
         (root / "s1.yaml").write_text(example_source.read_text(encoding="utf-8"))
 
         engine = RulesEngine.from_directory(tmp_path / ".claude" / "rules")
         assert len(engine.rules) == 1
         rule = engine.rules[0]
-        assert rule.key == "s1_user_isolation"
+        assert rule.key == "no_hardcoded_secrets"
         assert rule.priority == "non_negotiable"
 
-        matches = engine.query_for_file("backend/app/api/routers/themis_chat.py")
+        matches = engine.query_for_file("src/app/main.py")
         assert len(matches) == 1
-        assert matches[0].key == "s1_user_isolation"
+        assert matches[0].key == "no_hardcoded_secrets"
 
-        no_matches = engine.query_for_file("sps_webapp/static/css/chat.css")
+        no_matches = engine.query_for_file("web/style.css")
         assert no_matches == []
 
     def test_load_directory_skips_meta_dirs(self, tmp_path: Path):
@@ -130,7 +130,7 @@ class TestRulesEngine:
         rules = tmp_path / ".claude" / "rules" / "security"
         rules.mkdir(parents=True)
         example = (
-            Path(__file__).parent.parent / "examples" / "s1_user_isolation.yaml"
+            Path(__file__).parent.parent / "examples" / "no_hardcoded_secrets.yaml"
         ).read_text(encoding="utf-8")
         (rules / "a.yaml").write_text(example)
         (rules / "b.yaml").write_text(example)
@@ -216,7 +216,7 @@ class TestFingerprint:
 
 class TestValidateAndFallback:
     def _write_example(self, rules_dir: Path) -> None:
-        src = Path(__file__).parent.parent / "examples" / "s1_user_isolation.yaml"
+        src = Path(__file__).parent.parent / "examples" / "no_hardcoded_secrets.yaml"
         (rules_dir / "s1.yaml").write_text(src.read_text(encoding="utf-8"))
 
     def test_validate_directory_ok(self, tmp_path: Path):
@@ -250,7 +250,7 @@ class TestValidateAndFallback:
         assert stats["loaded"] == 1  # only s1 loaded
         assert len(stats["errors"]) == 1
         assert len(engine.rules) == 1
-        assert engine.rules[0].key == "s1_user_isolation"
+        assert engine.rules[0].key == "no_hardcoded_secrets"
 
     def test_write_fallback_markdown(self, tmp_path: Path):
         rules = tmp_path / ".claude" / "rules" / "security"
@@ -264,6 +264,6 @@ class TestValidateAndFallback:
         assert target.exists()
         content = target.read_text(encoding="utf-8")
         assert "claude-rules Fallback" in content
-        assert "S1" in content
-        assert "User Isolation" in content
+        assert "SEC1" in content
+        assert "No Hardcoded Secrets" in content
         assert result["written"] == 1

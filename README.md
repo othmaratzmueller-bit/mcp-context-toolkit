@@ -14,14 +14,14 @@ sees Backend security rules in its context.
 
 ## Status
 
-v0.1 — core engine + MCP server + example rule. No storage, no auto-reload,
+v0.1 — core engine + MCP server + example rules. No storage, no auto-reload,
 no compliance bridge yet. Runs in-memory, zero native deps beyond Python stdlib
 plus `pydantic`, `pyyaml`, `mcp`.
 
 ## Install
 
 ```bash
-cd ~/claude-rules
+cd claude-rules
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -55,7 +55,9 @@ If `CLAUDE_RULES_DIR` is not set, the server walks up from the CWD looking for
 
 ## Rule schema
 
-See `examples/s1_user_isolation.yaml` for a full example. Required fields:
+See `examples/no_hardcoded_secrets.yaml` for a full example;
+`examples/function_length_limit.yaml` and `examples/no_inline_event_handlers.yaml`
+show other rule types and priorities. Required fields:
 
 - `key` (snake_case, unique)
 - `title`
@@ -83,10 +85,20 @@ claude-rules/
 ├── src/claude_rules/
 │   ├── models.py        Pydantic Rule schema
 │   ├── engine.py        Load + query
-│   └── mcp_server.py    stdio MCP wrapper
+│   ├── mcp_server.py    stdio MCP wrapper
+│   └── cli.py           claude-rules-query CLI
 ├── examples/
-│   └── s1_user_isolation.yaml
+│   ├── no_hardcoded_secrets.yaml     (security, non_negotiable)
+│   ├── function_length_limit.yaml    (code_quality, mandatory)
+│   └── no_inline_event_handlers.yaml (frontend, recommended)
 ├── tests/
 │   └── test_engine.py
+├── LICENSE
 └── pyproject.toml
 ```
+
+## License
+
+MIT — see `LICENSE`. The engine is deliberately generic and ships only with
+example rules; project-specific rule sets live in each consuming repo's
+`.claude/rules/` and are not part of this package.
