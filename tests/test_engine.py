@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from claude_rules.engine import RulesEngine, _compile_glob, fingerprint_rules
-from claude_rules.models import Rule, RuleApplyTo
+from mcp_context_toolkit.engine import RulesEngine, _compile_glob, fingerprint_rules
+from mcp_context_toolkit.models import Rule, RuleApplyTo
 
 
 def _make_rule(key: str, files: list[str], **overrides) -> Rule:
@@ -135,7 +135,7 @@ class TestRulesEngine:
         (rules / "a.yaml").write_text(example)
         (rules / "b.yaml").write_text(example)
 
-        from claude_rules.engine import RuleLoadError
+        from mcp_context_toolkit.engine import RuleLoadError
 
         with pytest.raises(RuleLoadError):
             RulesEngine.from_directory(tmp_path / ".claude" / "rules")
@@ -263,7 +263,7 @@ class TestValidateAndFallback:
 
         assert target.exists()
         content = target.read_text(encoding="utf-8")
-        assert "claude-rules Fallback" in content
+        assert "context-toolkit Fallback" in content
         assert "SEC1" in content
         assert "No Hardcoded Secrets" in content
         assert result["written"] == 1

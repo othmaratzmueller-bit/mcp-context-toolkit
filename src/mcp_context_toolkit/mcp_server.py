@@ -6,13 +6,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from claude_rules.engine import RulesEngine
-from claude_rules.memory import MemoryEngine
-from claude_rules.usage import UsageStore
+from mcp_context_toolkit.engine import RulesEngine
+from mcp_context_toolkit.memory import MemoryEngine
+from mcp_context_toolkit.usage import UsageStore
 
 
 def _discover_rules_dir() -> Path:
-    env = os.environ.get("CLAUDE_RULES_DIR")
+    env = os.environ.get("CONTEXT_RULES_DIR")
     if env:
         return Path(env).expanduser().resolve()
 
@@ -23,16 +23,16 @@ def _discover_rules_dir() -> Path:
             return rules
 
     raise FileNotFoundError(
-        "No rules directory found. Set CLAUDE_RULES_DIR or create .claude/rules/ "
+        "No rules directory found. Set CONTEXT_RULES_DIR or create .claude/rules/ "
         "in the current working tree."
     )
 
 
 def _discover_memory_dir() -> Path | None:
-    """Locate the PROJECT memory directory. Env CLAUDE_MEMORY_DIR wins, else
+    """Locate the PROJECT memory directory. Env CONTEXT_MEMORY_DIR wins, else
     walk up for .claude/memory. Returns None if none found — memory tools are
     then simply not registered and rules keep working untouched."""
-    env = os.environ.get("CLAUDE_MEMORY_DIR")
+    env = os.environ.get("CONTEXT_MEMORY_DIR")
     if env:
         p = Path(env).expanduser()
         return p if p.is_dir() else None
@@ -78,7 +78,7 @@ def build_server(
 ):
     from mcp.server.fastmcp import FastMCP
 
-    mcp = FastMCP("claude-rules")
+    mcp = FastMCP("context")
 
     @mcp.tool()
     def query_rules_for_file(file_path: str) -> str:
@@ -239,18 +239,59 @@ def build_server(
     return mcp
 
 
+# The "big sign" shown on server start. Attribution is deliberate — this is a
+# named tool; forks are free to change AUTHOR.
+TOOLKIT_NAME = "mcp-context-toolkit"
+AUTHOR = "Othmar Atzmüller"
+AUTHOR_URL = "github.com/othmaratzmueller-bit"
+
+
+def _print_banner(engine: RulesEngine, memory_engine: MemoryEngine | None) -> None:
+    """Print the startup banner to stderr — every MCP client that launches the
+    server sees it (generic, not tied to any one client). Lists what is loaded
+    and credits the author."""
+    from collections import Counter
+
+    rule_types = Counter(r.type for r in engine.rules)
+    rule_breakdown = " · ".join(
+        f"{n} {t}" for t, n in sorted(rule_types.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    data = [("Rules", len(engine.rules), rule_breakdown or "—")]
+    if memory_engine is not None:
+        tiers = Counter(m.tier for m in memory_engine.memories)
+        tier_breakdown = " + ".join(
+            t for t, _ in sorted(tiers.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        data.append((
+            "Memory", len(memory_engine.memories),
+            f"{tier_breakdown} · frecency-ranked" if tier_breakdown else "—",
+        ))
+        data.append(("Tools", 10, "5 rules · 5 memory"))
+    else:
+        data.append(("Memory", 0, "(no store found)"))
+        data.append(("Tools", 5, "5 rules"))
+
+    bar = "─" * 64
+    out = [
+        "",
+        bar,
+        f" 🧰  {TOOLKIT_NAME}  ·  the right context, on demand",
+        f"     by {AUTHOR} · {AUTHOR_URL}",
+        bar,
+    ]
+    out += [f" {label:<7}{count:>4}   {detail}" for label, count, detail in data]
+    out += [bar, ""]
+    print("\n".join(out), file=sys.stderr)
+
+
 def main() -> None:
     try:
         rules_dir = _discover_rules_dir()
     except FileNotFoundError as e:
-        print(f"[claude-rules] {e}", file=sys.stderr)
+        print(f"[context-toolkit] {e}", file=sys.stderr)
         sys.exit(2)
 
     engine = RulesEngine.from_directory(rules_dir)
-    print(
-        f"[claude-rules] loaded {len(engine.rules)} rules from {rules_dir}",
-        file=sys.stderr,
-    )
 
     # Auto-write fallback markdown so there's always a plain-text reference
     # for the MCP-outage case. Silent on failure — fallback is nice-to-have.
@@ -258,12 +299,12 @@ def main() -> None:
         fallback_target = rules_dir / "_meta" / "fallback_rules.md"
         stats = engine.write_fallback_markdown(fallback_target)
         print(
-            f"[claude-rules] wrote fallback with {stats['written']} critical rules to "
+            f"[context-toolkit] wrote fallback with {stats['written']} critical rules to "
             f"{fallback_target}",
             file=sys.stderr,
         )
     except Exception as e:  # noqa: BLE001
-        print(f"[claude-rules] fallback write skipped: {e}", file=sys.stderr)
+        print(f"[context-toolkit] fallback write skipped: {e}", file=sys.stderr)
 
     # Memory store is optional — if found, the same MCP also serves recall /
     # get_memory / list_memories / memory_lint. If not, rules-only as before.
@@ -273,17 +314,13 @@ def main() -> None:
     if mem_dir is not None:
         memory_engine = MemoryEngine()
         memory_engine.load_directory(mem_dir, tier="project", strict=False)
-        user_mem = os.environ.get("CLAUDE_USER_MEMORY_DIR")
+        user_mem = os.environ.get("CONTEXT_USER_MEMORY_DIR")
         if user_mem and Path(user_mem).expanduser().is_dir():
             memory_engine.load_directory(user_mem, tier="user", strict=False)
         # Hot/cold (frecency) signal — sidecar in the PROJECT memory dir.
         usage = UsageStore.for_memory_dir(mem_dir)
-        print(
-            f"[claude-rules] loaded {len(memory_engine.memories)} memories from "
-            f"{mem_dir}" + (f" + user tier {user_mem}" if user_mem else ""),
-            file=sys.stderr,
-        )
 
+    _print_banner(engine, memory_engine)
     server = build_server(engine, memory_engine, usage)
     server.run()
 

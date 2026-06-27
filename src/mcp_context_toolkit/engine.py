@@ -10,7 +10,7 @@ from typing import Iterable
 import yaml
 from pydantic import ValidationError
 
-from claude_rules.models import Rule, RulePriority, RuleScope, RuleType
+from mcp_context_toolkit.models import Rule, RulePriority, RuleScope, RuleType
 
 
 _FINGERPRINT_EXCLUDE = {
@@ -186,7 +186,7 @@ class RulesEngine:
         conflicts_with references that point to nonexistent rules.
 
         Returns {"ok": bool, "rule_count": N, "errors": [...], "warnings": [...]}.
-        Used by the validate_rules MCP tool and by `claude-rules-query validate`.
+        Used by the validate_rules MCP tool and by `context-toolkit-query validate`.
         """
         root_path = Path(root)
         if not root_path.exists():
@@ -237,7 +237,7 @@ class RulesEngine:
         Writes only non_negotiable + mandatory rules, grouped by type.
         The target should be a path under .claude/rules/_meta/ (git-ignored
         or manually committed — caller decides). Used as the last-resort
-        reference when the claude-rules MCP server is unreachable.
+        reference when the context-toolkit MCP server is unreachable.
         """
         target_path = Path(target)
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,9 +255,9 @@ class RulesEngine:
         )
 
         lines: list[str] = [
-            "# claude-rules Fallback (auto-generated)",
+            "# context-toolkit Fallback (auto-generated)",
             "",
-            "Used as the last-resort reference when the claude-rules MCP",
+            "Used as the last-resort reference when the context-toolkit MCP",
             "server is unreachable. Contains only non_negotiable + mandatory",
             "rules from `.claude/rules/**/*.yaml`. Regenerated on every",
             "engine load. Do not edit by hand.",

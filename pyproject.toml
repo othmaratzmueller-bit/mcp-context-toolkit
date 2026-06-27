@@ -1,11 +1,11 @@
 [project]
-name = "claude-rules"
+name = "mcp-context-toolkit"
 version = "0.1.0"
-description = "Granular rule loading for Claude Code sessions via MCP"
+description = "Generic MCP server: file-scoped rules + frecency-ranked memory recall from plain markdown stores"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-keywords = ["claude", "mcp", "rules", "linting", "ai-agents"]
+keywords = ["mcp", "rules", "memory", "frecency", "context", "ai-agents"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -25,8 +25,8 @@ dev = [
 ]
 
 [project.scripts]
-claude-rules-mcp = "claude_rules.mcp_server:main"
-claude-rules-query = "claude_rules.cli:main"
+context-toolkit-mcp = "mcp_context_toolkit.mcp_server:main"
+context-toolkit-query = "mcp_context_toolkit.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

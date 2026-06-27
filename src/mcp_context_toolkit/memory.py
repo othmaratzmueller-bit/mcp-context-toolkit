@@ -19,7 +19,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
-from claude_rules.core import KnowledgeLoadError, iter_files, parse_frontmatter
+from mcp_context_toolkit.core import KnowledgeLoadError, iter_files, parse_frontmatter
 
 MemoryType = Literal["user", "feedback", "project", "reference", "misc"]
 MemoryTier = Literal["user", "project", "unknown"]

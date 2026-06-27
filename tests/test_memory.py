@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from claude_rules.core import parse_frontmatter
-from claude_rules.memory import MemoryEngine
-from claude_rules.usage import UsageStore
+from mcp_context_toolkit.core import parse_frontmatter
+from mcp_context_toolkit.memory import MemoryEngine
+from mcp_context_toolkit.usage import UsageStore
 
 
 def _write(d: Path, name: str, fm: str, body: str) -> None:

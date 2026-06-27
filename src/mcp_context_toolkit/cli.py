@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from claude_rules.engine import (
+from mcp_context_toolkit.engine import (
     RuleLoadError,
     RulesEngine,
     fingerprint_rules,
@@ -14,7 +14,7 @@ from claude_rules.engine import (
 
 
 def _discover_rules_dir() -> Path:
-    env = os.environ.get("CLAUDE_RULES_DIR")
+    env = os.environ.get("CONTEXT_RULES_DIR")
     if env:
         return Path(env).expanduser().resolve()
 
@@ -25,7 +25,7 @@ def _discover_rules_dir() -> Path:
             return rules
 
     raise FileNotFoundError(
-        "No rules directory found. Set CLAUDE_RULES_DIR or create .claude/rules/."
+        "No rules directory found. Set CONTEXT_RULES_DIR or create .claude/rules/."
     )
 
 
@@ -34,7 +34,7 @@ def _format_markdown(rules: list, file_path: str) -> str:
         return ""
     lines = [
         "INSTRUCTION TO ASSISTANT: The user is working on a file with active "
-        "rules from the claude-rules pilot. In your next user-facing response, "
+        "rules from the context-toolkit pilot. In your next user-facing response, "
         "prepend a one-line marker noting which rule short-ids apply to this "
         "file, e.g. `📋 Rules aktiv: S1, Q1 (backend/path.py)` — this is the "
         "transparency requirement for the pilot phase. Then follow the rules "
@@ -52,7 +52,7 @@ def _format_markdown(rules: list, file_path: str) -> str:
         lines.append(f"  {summary}")
     lines.append("")
     lines.append(
-        f"_{len(rules)} rule(s) loaded. Use `get_rule(key)` via the claude-rules "
+        f"_{len(rules)} rule(s) loaded. Use `get_rule(key)` via the context-toolkit "
         "MCP tool for full content._"
     )
     return "\n".join(lines)
@@ -87,7 +87,7 @@ def _cmd_write_fallback(rules_dir: Path, target: Path | None) -> int:
     stats = engine.load_directory(rules_dir, strict=False)
     if stats.get("errors"):
         for err in stats["errors"]:
-            print(f"[claude-rules-query] WARN: {err}", file=sys.stderr)
+            print(f"[context-toolkit-query] WARN: {err}", file=sys.stderr)
     target_path = target or (rules_dir / "_meta" / "fallback_rules.md")
     write_stats = engine.write_fallback_markdown(target_path)
     print(json.dumps({**stats, **write_stats}, indent=2))
@@ -162,9 +162,9 @@ def _cmd_file_query(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="claude-rules-query",
+        prog="context-toolkit-query",
         description=(
-            "Query, validate, or export rules from a claude-rules directory. "
+            "Query, validate, or export rules from a context-toolkit directory. "
             "Used by hooks, shell scripts, and manual debugging."
         ),
     )
@@ -193,7 +193,7 @@ def main() -> None:
     parser.add_argument(
         "--rules-dir",
         default=None,
-        help="Override rules directory (else CLAUDE_RULES_DIR or .claude/rules auto-discovery)",
+        help="Override rules directory (else CONTEXT_RULES_DIR or .claude/rules auto-discovery)",
     )
     parser.add_argument(
         "--validate",
@@ -214,7 +214,7 @@ def main() -> None:
     try:
         rules_dir = _resolve_rules_dir(args.rules_dir)
     except FileNotFoundError as e:
-        print(f"[claude-rules-query] {e}", file=sys.stderr)
+        print(f"[context-toolkit-query] {e}", file=sys.stderr)
         sys.exit(2)
 
     # Validate subcommand
@@ -238,14 +238,14 @@ def main() -> None:
         if lenient:
             warnings = [str(e)]
         else:
-            print(f"[claude-rules-query] load failed: {e}", file=sys.stderr)
+            print(f"[context-toolkit-query] load failed: {e}", file=sys.stderr)
             sys.exit(3)
 
     # Bulk query mode (no file_path, metadata filters)
     if args.file_path is None:
         if not any([args.type, args.scope, args.priority, args.module]):
             print(
-                "[claude-rules-query] error: provide either a file_path or at "
+                "[context-toolkit-query] error: provide either a file_path or at "
                 "least one of --type/--scope/--priority/--module",
                 file=sys.stderr,
             )
