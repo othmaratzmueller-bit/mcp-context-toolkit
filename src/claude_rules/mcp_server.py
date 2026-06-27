@@ -8,6 +8,7 @@ from typing import Any
 
 from claude_rules.engine import RulesEngine
 from claude_rules.memory import MemoryEngine
+from claude_rules.usage import UsageStore
 
 
 def _discover_rules_dir() -> Path:
@@ -70,7 +71,11 @@ def _memory_summary(m: Any) -> dict:
     }
 
 
-def build_server(engine: RulesEngine, memory_engine: MemoryEngine | None = None):
+def build_server(
+    engine: RulesEngine,
+    memory_engine: MemoryEngine | None = None,
+    usage: UsageStore | None = None,
+):
     from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP("claude-rules")
@@ -169,23 +174,35 @@ def build_server(engine: RulesEngine, memory_engine: MemoryEngine | None = None)
         @mcp.tool()
         def recall(query: str, limit: int = 8) -> str:
             """Recall the most relevant memories for a query, ranked across BOTH
-            tiers (project + user). Keyword-based and deterministic.
+            tiers (project + user). Keyword-based, deterministic, hot/cold-aware.
 
             The native auto-memory only surfaces the project tier — use this to
-            pull project AND user-global knowledge on demand. Returns summaries;
-            follow up with get_memory(name) for the full body.
+            pull project AND user-global knowledge on demand. Ranking blends
+            keyword relevance with frecency (frequently/recently used memories
+            are pulled forward). Returns summaries; follow up with
+            get_memory(name) for the full body — which also marks it as used.
             """
-            hits = memory_engine.recall(query, limit=limit)
+            boosts = usage.boosts() if usage is not None else {}
+            hits = memory_engine.recall(query, limit=limit, boost=boosts)
+            if usage is not None:
+                usage.record_recall([m.name for m in hits])
             return json.dumps(
                 [_memory_summary(m) for m in hits], indent=2, ensure_ascii=False
             )
 
         @mcp.tool()
         def get_memory(name: str) -> str:
-            """Fetch the full body + metadata of a single memory by its name."""
+            """Fetch the full body + metadata of a single memory by its name.
+
+            Counts as a strong usage hit (heavier than a recall appearance) —
+            this is what makes a memory 'hot' and pulls it forward in future
+            recall results and in the /dream intra-section reorder.
+            """
             m = memory_engine.get(name)
             if m is None:
                 return json.dumps({"error": f"memory not found: {name}"})
+            if usage is not None:
+                usage.record_open(name)
             return json.dumps(m.model_dump(mode="json"), indent=2, ensure_ascii=False)
 
         @mcp.tool()
@@ -203,6 +220,21 @@ def build_server(engine: RulesEngine, memory_engine: MemoryEngine | None = None)
             orphans, stale index pointers. The raw material a /dream
             consolidation pass acts on."""
             return json.dumps(memory_engine.lint(), indent=2, ensure_ascii=False)
+
+        @mcp.tool()
+        def memory_usage(limit: int = 50) -> str:
+            """Hot -> cold usage report (frecency): opens, recalls, last-access
+            timestamps and a heat score per memory, hottest first.
+
+            This is the signal /dream uses to reorder bullets WITHIN each
+            MEMORY.md section (section grouping stays human-curated; intra-section
+            order becomes warmth-driven). Frequency-dominant — wall-clock pauses
+            do not cool a memory. Counts only explicit recall()/get_memory()
+            hits; the native auto-recall bypasses this layer, so figures are a
+            lower bound, not a full tally."""
+            if usage is None:
+                return json.dumps({"error": "usage tracking unavailable"})
+            return json.dumps(usage.report()[:limit], indent=2, ensure_ascii=False)
 
     return mcp
 
@@ -236,6 +268,7 @@ def main() -> None:
     # Memory store is optional — if found, the same MCP also serves recall /
     # get_memory / list_memories / memory_lint. If not, rules-only as before.
     memory_engine = None
+    usage = None
     mem_dir = _discover_memory_dir()
     if mem_dir is not None:
         memory_engine = MemoryEngine()
@@ -243,13 +276,15 @@ def main() -> None:
         user_mem = os.environ.get("CLAUDE_USER_MEMORY_DIR")
         if user_mem and Path(user_mem).expanduser().is_dir():
             memory_engine.load_directory(user_mem, tier="user", strict=False)
+        # Hot/cold (frecency) signal — sidecar in the PROJECT memory dir.
+        usage = UsageStore.for_memory_dir(mem_dir)
         print(
             f"[claude-rules] loaded {len(memory_engine.memories)} memories from "
             f"{mem_dir}" + (f" + user tier {user_mem}" if user_mem else ""),
             file=sys.stderr,
         )
 
-    server = build_server(engine, memory_engine)
+    server = build_server(engine, memory_engine, usage)
     server.run()
 
 

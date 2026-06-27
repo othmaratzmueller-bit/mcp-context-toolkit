@@ -154,33 +154,46 @@ class MemoryEngine:
             result = [m for m in result if m.tier == tier]
         return sorted(result, key=lambda m: m.name)
 
-    def recall(self, query: str, limit: int = 8) -> list[Memory]:
+    def recall(
+        self, query: str, limit: int = 8,
+        boost: Optional[dict[str, float]] = None,
+    ) -> list[Memory]:
         """Rank memories by keyword overlap with the query across both tiers.
 
         Deterministic, LLM-free (the `/dream` skill adds LLM judgment on top).
-        Score = weighted substring hits in name/description/tags/body.
+        Base score = weighted substring hits in name/description/tags/body.
+
+        ``boost`` is the optional frecency (hot/cold) signal: a {name: factor}
+        map (see UsageStore.boosts). The final score is
+        ``base * (1 + factor)`` so a frequently-used memory is pulled forward —
+        warmth multiplies relevance, it does not replace it. The engine stays
+        pure-read; the caller (MCP) owns the usage data. With no ``boost`` the
+        ordering is identical to before (name tiebreak preserved).
         """
         terms = set(_WORD_RE.findall(query.lower()))
         if not terms:
             return []
-        scored: list[tuple[int, Memory]] = []
+        boost = boost or {}
+        scored: list[tuple[float, float, Memory]] = []
         for m in self._memories:
             name_l, desc_l = m.name.lower(), m.description.lower()
             tags_l, body_l = " ".join(m.tags).lower(), m.body.lower()
-            score = 0
+            base = 0
             for t in terms:
                 if t in name_l:
-                    score += _W_NAME
+                    base += _W_NAME
                 if t in desc_l:
-                    score += _W_DESC
+                    base += _W_DESC
                 if t in tags_l:
-                    score += _W_TAGS
+                    base += _W_TAGS
                 if t in body_l:
-                    score += _W_BODY
-            if score > 0:
-                scored.append((score, m))
-        scored.sort(key=lambda s: (-s[0], s[1].name))
-        return [m for _, m in scored[:limit]]
+                    base += _W_BODY
+            if base > 0:
+                heat = boost.get(m.name, 0.0)
+                scored.append((base * (1.0 + heat), heat, m))
+        # final score desc, then warmer-on-tie, then name for determinism
+        scored.sort(key=lambda s: (-s[0], -s[1], s[2].name))
+        return [m for _, _, m in scored[:limit]]
 
     def lint(self) -> dict:
         """Read-only hygiene report — the raw material a `/dream` pass acts on.

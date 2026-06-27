@@ -2,6 +2,7 @@ from pathlib import Path
 
 from claude_rules.core import parse_frontmatter
 from claude_rules.memory import MemoryEngine
+from claude_rules.usage import UsageStore
 
 
 def _write(d: Path, name: str, fm: str, body: str) -> None:
@@ -96,3 +97,67 @@ class TestMemoryEngine:
         lint = e.lint()
         assert "a" in lint["orphans"]            # a.md not in index
         assert "gone.md" in lint["stale_pointers"]  # index points at missing file
+
+
+class TestUsageStore:
+    def test_missing_file_is_empty(self, tmp_path: Path):
+        u = UsageStore(tmp_path / "_usage.json")
+        assert u.boosts() == {}
+        assert u.report() == []
+
+    def test_corrupt_file_degrades_not_raises(self, tmp_path: Path):
+        p = tmp_path / "_usage.json"
+        p.write_text("{ not json", encoding="utf-8")
+        u = UsageStore(p)
+        assert u.boosts() == {}
+
+    def test_open_increments_and_persists(self, tmp_path: Path):
+        p = tmp_path / "_usage.json"
+        u = UsageStore(p)
+        u.record_open("a")
+        u.record_open("a")
+        assert p.exists()
+        reloaded = UsageStore(p)               # fresh instance reads from disk
+        rows = reloaded.report()
+        assert rows[0]["name"] == "a"
+        assert rows[0]["opens"] == 2
+        assert rows[0]["last_open"] is not None
+
+    def test_report_sorted_hot_first(self, tmp_path: Path):
+        u = UsageStore(tmp_path / "_usage.json")
+        u.record_open("cold")
+        for _ in range(5):
+            u.record_open("hot")
+        assert [r["name"] for r in u.report()] == ["hot", "cold"]
+
+    def test_open_weighs_three_recalls(self, tmp_path: Path):
+        # one open (weight 3) == three recall appearances (weight 1 each)
+        u_open = UsageStore(tmp_path / "u_open.json")
+        u_open.record_open("x")
+        u_recall = UsageStore(tmp_path / "u_recall.json")
+        u_recall.record_recall(["y", "y", "y"])
+        assert u_open.boosts()["x"] == u_recall.boosts()["y"]
+
+    def test_record_recall_empty_is_noop(self, tmp_path: Path):
+        p = tmp_path / "_usage.json"
+        u = UsageStore(p)
+        u.record_recall([])
+        assert u.report() == []
+        assert not p.exists()                    # nothing written for empty hit
+
+
+class TestRecallBoost:
+    def test_no_boost_is_backward_compatible(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback", "x y")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert [m.name for m in e.recall("x y")] == ["a"]
+
+    def test_boost_pulls_warm_memory_forward(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: alpha\ntype: feedback", "shared keyword topic")
+        _write(tmp_path, "b.md", "name: beta\ntype: feedback", "shared keyword topic")
+        e = MemoryEngine.from_directory(tmp_path)
+        # equal keyword score -> deterministic name tiebreak puts alpha first
+        assert e.recall("shared keyword topic")[0].name == "alpha"
+        # warmth on beta flips the order
+        hits = e.recall("shared keyword topic", boost={"beta": 2.0})
+        assert hits[0].name == "beta"
