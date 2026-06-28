@@ -117,6 +117,9 @@
     .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
     .chip { font-size:11px; padding:2px 9px; background:var(--bg); border:1px solid var(--line);
             border-radius:16px; color:var(--muted); }
+    .ledger { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:14px 16px;
+              white-space:pre-wrap; word-break:break-word; font:12.5px/1.55 ui-monospace,Menlo,monospace;
+              color:var(--fg); }
     footer { flex:none; padding:9px 18px; border-top:1px solid var(--line); background:var(--panel);
              color:var(--muted); font-size:11.5px; display:flex; gap:8px; align-items:center; }
     footer a { color:var(--accent); text-decoration:none; }
@@ -128,6 +131,7 @@
     <div class="tabs">
       <button id="tab-review" class="active">Review</button>
       <button id="tab-browse">Browse</button>
+      <button id="tab-pending">Pending</button>
     </div>
     <span class="spacer"></span>
     <input id="search" class="search" placeholder="Filter…" autocomplete="off">
@@ -172,10 +176,14 @@
   const STATE = { mode:"review", browseTab:"memory", data:{}, q:"", decisions:{} };
 
   // ---------------- data loading (injected → fetch → drop) ----------------
+  // Injected CONTEXT_DATA wins PER KEY; any data key it does not supply is still
+  // fetched. So a host can inject only the hooks (fetchBody/fetchPending) and the
+  // viewer still loads memory.json/rules.json from disk — while a host that injects
+  // full data short-circuits the fetch for those keys (no wasted requests).
   async function loadData() {
-    if (window.CONTEXT_DATA) return { ...window.CONTEXT_DATA };
-    const out = {};
+    const out = { ...(window.CONTEXT_DATA || {}) };
     for (const [key, file] of [["memory","memory.json"],["rules","rules.json"],["diff","diff.json"]]) {
+      if (out[key]) continue;
       try { const r = await fetch(file, { cache:"no-store" }); if (r.ok) out[key] = await r.json(); }
       catch (_) { /* file:// or missing — fall through to drop zone */ }
     }
@@ -357,7 +365,33 @@
       for (const l of p.links) ch.appendChild(el("span", { class:"chip", text:"[["+l+"]]" }));
       b.appendChild(ch);
     }
+    appendBodySection(b, p);
     openDrawer();
+  }
+
+  // Drill down to a package's full body (incl. its `## <member>` sections). The
+  // body is NOT in the metadata snapshot — it is host-supplied: window.CONTEXT_DATA
+  // .fetchBody(name) -> Promise<string>, or a pre-injected p.body string. Without
+  // either (pure offline), the section is omitted. Rendered as text (XSS-safe).
+  function appendBodySection(b, p) {
+    const canFetch = typeof STATE.data.fetchBody === "function";
+    if (!canFetch && p.body == null) return;
+    b.appendChild(el("div", { class:"group-title", text:"content" }));
+    const holder = el("div", {});
+    b.appendChild(holder);
+    const show = text => {
+      clear(holder);
+      if (!text || !text.trim()) { holder.appendChild(el("div", { class:"empty", text:"(empty)" })); return; }
+      holder.appendChild(el("pre", { text:text }));
+    };
+    if (p.body != null) { show(p.body); return; }
+    const btn = el("button", { class:"btn ghost" }, "Show content");
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = "Loading…";
+      try { show(await STATE.data.fetchBody(p.name)); }
+      catch (err) { clear(holder); holder.appendChild(el("div", { class:"empty", text:"Could not load: " + err.message })); }
+    };
+    holder.appendChild(btn);
   }
 
   function renderRules(c) {
@@ -406,6 +440,32 @@
     openDrawer();
   }
 
+  // ---------------- PENDING (consolidation flag-ledger) ----------------
+  // The persistent "human decides" backlog a consolidation pass writes but does
+  // NOT auto-resolve. Host-injectable: window.CONTEXT_DATA.pending (a string) or
+  // .fetchPending() (-> Promise<string>). Rendered as plain text (XSS-safe).
+  async function renderPending() {
+    const c = $("content"); clear(c);
+    c.appendChild(el("div", { class:"summary" }, el("span", {
+      text:"Pending — items a consolidation pass flagged for human decision (not auto-resolved)." })));
+    const body = el("div", {});
+    c.appendChild(body);
+
+    let text = STATE.data.pending;
+    if (text == null && typeof STATE.data.fetchPending === "function") {
+      body.appendChild(el("div", { class:"empty", text:"Loading…" }));
+      try { text = await STATE.data.fetchPending(); }
+      catch (err) { clear(body); body.appendChild(el("div", { class:"empty", text:"Could not load pending: " + err.message })); return; }
+      clear(body);
+    }
+    if (text == null) {
+      body.appendChild(el("div", { class:"empty", text:"No pending ledger — a host supplies it via CONTEXT_DATA.fetchPending() or .pending." }));
+      return;
+    }
+    if (!text.trim()) { body.appendChild(el("div", { class:"empty", text:"Nothing pending — the ledger is empty." })); return; }
+    body.appendChild(el("pre", { class:"ledger", text:text }));
+  }
+
   // ---------------- filters / helpers ----------------
   function filterItems(items) {
     if (!STATE.q) return items;
@@ -432,12 +492,16 @@
   function render() {
     $("tab-review").classList.toggle("active", STATE.mode === "review");
     $("tab-browse").classList.toggle("active", STATE.mode === "browse");
+    $("tab-pending").classList.toggle("active", STATE.mode === "pending");
     $("export").style.display = STATE.mode === "review" ? "" : "none";
-    if (STATE.mode === "review") renderReview(); else renderBrowse();
+    if (STATE.mode === "review") renderReview();
+    else if (STATE.mode === "browse") renderBrowse();
+    else renderPending();
   }
 
   $("tab-review").onclick = () => { STATE.mode = "review"; render(); };
   $("tab-browse").onclick = () => { STATE.mode = "browse"; render(); };
+  $("tab-pending").onclick = () => { STATE.mode = "pending"; render(); };
   $("search").addEventListener("input", e => { STATE.q = e.target.value.trim().toLowerCase(); render(); });
   $("export").onclick = exportDecision;
   $("drawer-close").onclick = closeDrawer;

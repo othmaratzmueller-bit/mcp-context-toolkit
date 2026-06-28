@@ -35,6 +35,33 @@ and copies `index.html`. Memory dir resolves from `--memory-dir` →
 3. **Drag-and-drop** — open `index.html` directly off disk (`file://`, where
    `fetch` is blocked) and drop a `diff.json` onto the Review tab.
 
+## Host hooks — on-demand content (optional)
+
+Two **optional** function hooks on `window.CONTEXT_DATA` let a host serve content the
+metadata snapshot deliberately omits. Both are absent in pure offline use (the viewer
+degrades gracefully — the body section is hidden, the Pending tab shows a hint):
+
+- `fetchBody(name) -> Promise<string>` — full body of a memory package, loaded when
+  you expand it in **Browse** (the snapshot's `memory.json` carries metadata only, no
+  bodies). A host typically wires this to an auth-gated endpoint that reads the store
+  from disk. Alternatively inject a `body` string per package.
+- `fetchPending() -> Promise<string>` — the consolidation flag-ledger (the persistent
+  "human decides" backlog a pass writes but does not auto-resolve), shown in the
+  **Pending** tab. Alternatively inject a `pending` string.
+
+Both return **plain text** (markdown is fine — it is rendered as text, never parsed to
+HTML, keeping the XSS-safe contract). Example host wiring (`*-data.js` loaded before the
+viewer):
+
+```js
+window.CONTEXT_DATA = {
+  memory: /* metadata snapshot */, rules: /* … */,
+  fetchBody: name => fetch(`/your/auth/endpoint/memory/${encodeURIComponent(name)}`)
+                       .then(r => r.json()).then(d => d.content),
+  fetchPending: () => fetch(`/your/auth/endpoint/pending`).then(r => r.json()).then(d => d.content),
+};
+```
+
 ## The diff.json contract (preview-gate)
 
 One **common envelope** for every curation skill, so the viewer is op-agnostic:
