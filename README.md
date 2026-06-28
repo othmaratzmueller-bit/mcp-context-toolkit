@@ -123,13 +123,62 @@ from clobbering each other). Nothing is served staler than your last edit.
 
 ## CLI
 
-A second entry point, `context-toolkit-query`, exposes the rule engine on the command
-line (used e.g. by editor hooks for per-file rule injection):
+A second entry point, `context-toolkit-query`, exposes the engine on the command line —
+used by editor/agent **hooks** to inject the right rules + memory automatically:
 
 ```bash
-context-toolkit-query path/to/file.py --format bundle   # rules for one file
-context-toolkit-query --validate                        # validate the rule set
+# Rules for one file (glob match) — JSON bundle {fingerprint, markdown, rule_count}
+context-toolkit-query path/to/file.py --format bundle
+
+# Memory recall for a prompt — JSON {names, markdown, count}; --exclude dedups
+context-toolkit-query --recall "how do I anonymize PII?" --limit 6 --exclude name1,name2
+
+# All memories of a tier (e.g. always-load the user tier at session start)
+context-toolkit-query --memory-tier user --with-bodies
+
+# Maintenance
+context-toolkit-query --validate                       # validate the rule set
+context-toolkit-query --export-studio ./studio         # Context Studio snapshot + viewer
 ```
+
+## Wiring auto-injection (hooks)
+
+The engine gives you the *data*; your agent/host decides *when* to inject it. The whole
+point is deterministic injection — beats hoping the model remembers to query. Three hooks
+cover it (examples assume a Claude-Code-style host that runs a shell command and reads an
+`additionalContext` JSON from stdout — adapt to your host). The hook scripts themselves
+live in the **consuming** repo, not in the engine (it stays host-agnostic):
+
+**1. Rules — per file touched** (e.g. PreToolUse on Edit/Read/Write). Inject the rules
+matching the file you are about to change; dedup by `fingerprint` so an unchanged set
+stays silent:
+
+```bash
+BUNDLE=$(context-toolkit-query "$REL_PATH" --format bundle)
+# inject $(jq -r .markdown <<<"$BUNDLE") as context IF its .fingerprint differs from
+# what you last injected for this path (store per-path fingerprints in session state).
+```
+
+**2. Memory — user tier at session start** (SessionStart). The user tier is always
+relevant but rarely keyword-matches a prompt, so load it unconditionally, up front:
+
+```bash
+context-toolkit-query --memory-tier user --with-bodies   # -> {markdown} -> context
+# also seed your session "already-injected" set with the returned .names
+```
+
+**3. Memory — relevant recall per prompt** (UserPromptSubmit). Recall what matches the
+prompt; inject only what you have not injected yet this session (track the names, pass
+them back as `--exclude`):
+
+```bash
+context-toolkit-query --recall "$PROMPT" --limit 6 --exclude "$ALREADY_INJECTED"
+# -> {names, markdown}: inject .markdown, then add .names to your session set
+```
+
+Each emits a ready-to-inject `markdown` field plus the identifiers (`fingerprint` /
+`names`) you need for dedup. With these three wired, the model always has the right rules
+for the file it touches and the right memories for the topic — without being asked.
 
 ## Store format
 
