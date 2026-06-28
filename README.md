@@ -84,8 +84,10 @@ clients). Point it at your stores via env:
 }
 ```
 
-Any unset dir is auto-discovered by walking up from the working directory. Memory tools
-register only when a memory store is found — rules-only setups keep working untouched.
+Any unset dir is auto-discovered by walking up from the working directory, looking for
+`<dir>/.context/rules` (and `…/memory`) first, then `<dir>/.claude/rules` as a fallback
+for existing Claude Code repos. Memory tools register only when a memory store is found —
+rules-only setups keep working untouched.
 
 ## Tools
 
@@ -172,15 +174,30 @@ The note itself. Link related notes with [[their-name]].
   structure `recall` expects.
 
 Both are illustrative defaults, not production policy — see each directory's
-`README.md`. They are **inert**: auto-discovery only ever loads `<dir>/.claude/rules`
-and `<dir>/.claude/memory`, so nothing under `examples/` is ever picked up
-implicitly. Pointing `CONTEXT_RULES_DIR` straight at the starter pack works (it's
-opt-in) but prints a loud `NOTE` to stderr so the examples can't silently become
-your real rule set.
+`README.md`. They are **inert**: auto-discovery only ever loads `<dir>/.context/rules`
+(or `<dir>/.claude/rules`) and the matching `…/memory`, so nothing under `examples/` is
+ever picked up implicitly. Pointing `CONTEXT_RULES_DIR` straight at the starter pack
+works (it's opt-in) but prints a loud `NOTE` to stderr so the examples can't silently
+become your real rule set.
+
+## What it writes to disk
+
+The engine treats your content as read-only. There is exactly **one** file it writes on
+its own, plus one opt-in export:
+
+| Path | When | What |
+| --- | --- | --- |
+| `<memory-dir>/_usage.json` | on every `recall` / `get_memory` | the frecency sidecar (hit counts). Atomic temp-file write, best-effort — a failure never breaks recall. Per-machine, gitignore it. |
+| `<out-dir>/{index.html,rules.json,memory.json}` | only on `--export-studio OUT_DIR` | the offline Context Studio viewer + a metadata snapshot. Opt-in; nothing is written unless you run it. |
+
+Your rule and memory **content** is never created, edited, or deleted by the engine —
+writes are owned by you (or a separate consolidation pass). No network access, no
+telemetry.
 
 ## Design principles
 
-- **Read-only engine.** It loads and ranks; it never mutates your stores.
+- **Read-only on your content.** It loads and ranks; the only self-write is the
+  `_usage.json` frecency sidecar (see above).
 - **Deterministic.** Keyword + frecency scoring, no LLM in the loop — same inputs, same order.
 - **Degrade, don't crash.** A malformed file is skipped, not fatal; a missing/corrupt
   usage sidecar resets to empty.

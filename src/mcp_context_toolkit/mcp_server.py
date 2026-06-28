@@ -10,6 +10,12 @@ from mcp_context_toolkit.engine import RulesEngine
 from mcp_context_toolkit.memory import MemoryEngine
 from mcp_context_toolkit.usage import UsageStore
 
+# Store-directory conventions tried during walk-up auto-discovery, in order.
+# `.context` is the generic default (matches the tool/env naming); `.claude`
+# is kept as a fallback so a Claude Code repo with an existing .claude/rules
+# store keeps working without configuration.
+_STORE_CONVENTIONS = (".context", ".claude")
+
 
 def _discover_rules_dir() -> Path:
     env = os.environ.get("CONTEXT_RULES_DIR")
@@ -18,28 +24,30 @@ def _discover_rules_dir() -> Path:
 
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
-        rules = candidate / ".claude" / "rules"
-        if rules.is_dir():
-            return rules
+        for conv in _STORE_CONVENTIONS:
+            rules = candidate / conv / "rules"
+            if rules.is_dir():
+                return rules
 
     raise FileNotFoundError(
-        "No rules directory found. Set CONTEXT_RULES_DIR or create .claude/rules/ "
-        "in the current working tree."
+        "No rules directory found. Set CONTEXT_RULES_DIR or create .context/rules/ "
+        "(or .claude/rules/) in the current working tree."
     )
 
 
 def _discover_memory_dir() -> Path | None:
     """Locate the PROJECT memory directory. Env CONTEXT_MEMORY_DIR wins, else
-    walk up for .claude/memory. Returns None if none found — memory tools are
-    then simply not registered and rules keep working untouched."""
+    walk up for .context/memory (or .claude/memory). Returns None if none found —
+    memory tools are then simply not registered and rules keep working untouched."""
     env = os.environ.get("CONTEXT_MEMORY_DIR")
     if env:
         p = Path(env).expanduser()
         return p if p.is_dir() else None
     for candidate in [Path.cwd(), *Path.cwd().parents]:
-        mem = candidate / ".claude" / "memory"
-        if mem.is_dir():
-            return mem
+        for conv in _STORE_CONVENTIONS:
+            mem = candidate / conv / "memory"
+            if mem.is_dir():
+                return mem
     return None
 
 

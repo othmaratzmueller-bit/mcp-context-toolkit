@@ -12,6 +12,12 @@ from mcp_context_toolkit.engine import (
     fingerprint_rules,
 )
 
+# Store-directory conventions tried during walk-up auto-discovery, in order.
+# `.context` is the generic default (matches the tool/env naming); `.claude`
+# is kept as a fallback for existing Claude Code repos. Keep in sync with
+# mcp_server._STORE_CONVENTIONS.
+_STORE_CONVENTIONS = (".context", ".claude")
+
 
 def _discover_rules_dir() -> Path:
     env = os.environ.get("CONTEXT_RULES_DIR")
@@ -20,12 +26,14 @@ def _discover_rules_dir() -> Path:
 
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
-        rules = candidate / ".claude" / "rules"
-        if rules.is_dir():
-            return rules
+        for conv in _STORE_CONVENTIONS:
+            rules = candidate / conv / "rules"
+            if rules.is_dir():
+                return rules
 
     raise FileNotFoundError(
-        "No rules directory found. Set CONTEXT_RULES_DIR or create .claude/rules/."
+        "No rules directory found. Set CONTEXT_RULES_DIR or create .context/rules/ "
+        "(or .claude/rules/)."
     )
 
 
@@ -72,10 +80,10 @@ def _rule_to_summary_dict(r) -> dict:
 
 def _warn_if_example_rules(rules_dir: Path) -> None:
     """The shipped starter pack (``examples/rules``) is INERT — copy-to-activate,
-    never a production default. Auto-discovery (``<dir>/.claude/rules``) can never
-    reach it, but a misconfigured ``CONTEXT_RULES_DIR`` / ``--rules-dir`` could
-    point at it directly. Say so loudly so the examples don't silently 'poison'
-    a real rule set."""
+    never a production default. Auto-discovery (``<dir>/.context/rules`` or
+    ``<dir>/.claude/rules``) can never reach it, but a misconfigured
+    ``CONTEXT_RULES_DIR`` / ``--rules-dir`` could point at it directly. Say so
+    loudly so the examples don't silently 'poison' a real rule set."""
     if "examples" in rules_dir.parts:
         print(
             f"[context-toolkit-query] NOTE: loading EXAMPLE/starter rules from "
@@ -114,8 +122,8 @@ def _cmd_write_fallback(rules_dir: Path, target: Path | None) -> int:
 
 def _discover_memory_dir(arg: str | None) -> Path | None:
     """Memory dir for the studio export. Explicit arg / CONTEXT_MEMORY_DIR win,
-    else walk up for `.claude/memory`. Returns None if none found (rules-only
-    export is valid)."""
+    else walk up for `.context/memory` (or `.claude/memory`). Returns None if
+    none found (rules-only export is valid)."""
     if arg:
         return Path(arg).expanduser().resolve()
     env = os.environ.get("CONTEXT_MEMORY_DIR")
@@ -123,9 +131,10 @@ def _discover_memory_dir(arg: str | None) -> Path | None:
         return Path(env).expanduser().resolve()
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
-        mem = candidate / ".claude" / "memory"
-        if mem.is_dir():
-            return mem
+        for conv in _STORE_CONVENTIONS:
+            mem = candidate / conv / "memory"
+            if mem.is_dir():
+                return mem
     return None
 
 
@@ -354,7 +363,7 @@ def main() -> None:
     parser.add_argument(
         "--rules-dir",
         default=None,
-        help="Override rules directory (else CONTEXT_RULES_DIR or .claude/rules auto-discovery)",
+        help="Override rules directory (else CONTEXT_RULES_DIR or .context/rules / .claude/rules auto-discovery)",
     )
     parser.add_argument(
         "--validate",
@@ -383,7 +392,7 @@ def main() -> None:
     parser.add_argument(
         "--memory-dir",
         default=None,
-        help="Memory dir for --export-studio (else CONTEXT_MEMORY_DIR or .claude/memory auto-discovery)",
+        help="Memory dir for --export-studio (else CONTEXT_MEMORY_DIR or .context/memory / .claude/memory auto-discovery)",
     )
     args = parser.parse_args()
 

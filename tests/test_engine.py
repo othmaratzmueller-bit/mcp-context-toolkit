@@ -304,3 +304,45 @@ class TestStarterPackNotAutoLoaded:
         _resolve_rules_dir(str(real))
 
         assert "EXAMPLE" not in capsys.readouterr().err
+
+
+class TestStoreConventionDiscovery:
+    """Auto-discovery accepts `.context/` (generic default) and `.claude/`
+    (Claude Code fallback). `.context/` wins when both are present."""
+
+    def test_context_dir_is_discovered(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        rules = tmp_path / ".context" / "rules"
+        rules.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        assert _discover_rules_dir() == rules
+
+    def test_claude_dir_still_discovered_as_fallback(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        rules = tmp_path / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        assert _discover_rules_dir() == rules
+
+    def test_context_wins_over_claude(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        ctx = tmp_path / ".context" / "rules"
+        ctx.mkdir(parents=True)
+        (tmp_path / ".claude" / "rules").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        assert _discover_rules_dir() == ctx
+
+    def test_context_memory_is_discovered(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_memory_dir
+
+        mem = tmp_path / ".context" / "memory"
+        mem.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        assert _discover_memory_dir(None) == mem
