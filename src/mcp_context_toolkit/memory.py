@@ -35,6 +35,17 @@ _NON_MEMORY = {"MEMORY.md"}
 _W_NAME, _W_DESC, _W_TAGS, _W_BODY = 3, 2, 2, 1
 
 
+def _norm_link(target: str) -> str:
+    """Normalize a [[link]] target or memory name for resolution: drop a
+    trailing ``.md`` and fold kebab-case to snake_case. Bundling left links in
+    mixed styles (old prod kebab vs dev snake) all pointing at the same slug;
+    folding makes them resolve to one canonical form."""
+    target = target.strip()
+    if target.endswith(".md"):
+        target = target[:-3]
+    return target.replace("-", "_")
+
+
 class Memory(BaseModel):
     name: str
     description: str = ""
@@ -42,6 +53,7 @@ class Memory(BaseModel):
     tier: MemoryTier = "unknown"
     body: str = ""
     links: list[str] = []           # [[name]] references found in the body
+    members: list[str] = []         # for bundled packages: the slugs merged in
     tags: list[str] = []
     source_path: Optional[str] = None
 
@@ -62,6 +74,8 @@ def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
         raw_type = meta["metadata"].get("type")
     tags = meta.get("tags")
     tags = [str(t) for t in tags] if isinstance(tags, list) else []
+    members = meta.get("members")
+    members = [str(x).strip() for x in members] if isinstance(members, list) else []
     # A frontmatter `tier:` (e.g. a bundled package's core/user/project) overrides
     # the load-directory default; fall back to the load tier otherwise.
     fm_tier = meta.get("tier")
@@ -73,6 +87,7 @@ def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
         tier=resolved_tier,
         body=body,
         links=sorted(set(_LINK_RE.findall(body))),
+        members=members,
         tags=tags,
         source_path=str(path),
     )
@@ -146,8 +161,23 @@ class MemoryEngine:
     def memories(self) -> list[Memory]:
         return list(self._memories)
 
+    def _member_owners(self) -> dict[str, str]:
+        """Normalized member slug -> owning package name. Lets a [[member]]
+        link (a pre-bundle atomic name) resolve to the package that merged it."""
+        owners: dict[str, str] = {}
+        for m in self._memories:
+            for member in m.members:
+                owners[_norm_link(member)] = m.name
+        return owners
+
     def get(self, name: str) -> Optional[Memory]:
-        return next((m for m in self._memories if m.name == name), None)
+        exact = next((m for m in self._memories if m.name == name), None)
+        if exact is not None:
+            return exact
+        # Fall back: a package member resolves to the package that absorbed it,
+        # so following a [[old_atomic_slug]] link lands on its bundle.
+        owner = self._member_owners().get(_norm_link(name))
+        return next((m for m in self._memories if m.name == owner), None) if owner else None
 
     def list(self, type: Optional[MemoryType] = None,
              tier: Optional[MemoryTier] = None) -> list[Memory]:
@@ -206,11 +236,17 @@ class MemoryEngine:
         - orphans: memory names not referenced anywhere in MEMORY.md.
         - stale_pointers: (file.md) references in MEMORY.md with no such file.
         """
-        names = {m.name for m in self._memories}
+        # A link resolves to any memory name OR any package member slug,
+        # compared in normalized form (kebab/snake + .md folded). The reported
+        # `missing` keeps the raw link text for the human.
+        resolvable = {_norm_link(m.name) for m in self._memories}
+        resolvable.update(
+            _norm_link(member) for m in self._memories for member in m.members
+        )
         broken = {
             m.name: missing
             for m in self._memories
-            if (missing := [l for l in m.links if l not in names])
+            if (missing := [l for l in m.links if _norm_link(l) not in resolvable])
         }
 
         orphans: list[str] = []

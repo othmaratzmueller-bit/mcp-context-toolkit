@@ -97,6 +97,33 @@ class TestMemoryEngine:
         assert lint["total"] == 2
         assert lint["orphans"] == []
 
+    def test_member_link_resolves_to_package(self, tmp_path: Path):
+        # A package absorbs old atomic slugs as `members:`; links to those slugs
+        # (the pre-bundle names) must resolve to the package, not break — incl.
+        # a kebab-cased link folding onto a snake-cased member.
+        _write(tmp_path, "pkg.md",
+               "name: sec_pkg\nmembers: [old_force_local, old_pii_once]",
+               "see [[old_pii_once]]")
+        _write(tmp_path, "other.md", "name: other",
+               "ref [[old_force_local]] and [[reference-kebab-member]]")
+        _write(tmp_path, "kebab.md",
+               "name: kebab_pkg\nmembers: [reference_kebab_member]", "x")
+        (tmp_path / "MEMORY.md").write_text(
+            "- [sec_pkg](pkg.md)\n- [other](other.md)\n- [kebab_pkg](kebab.md)\n",
+            encoding="utf-8")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.lint()["broken_links"] == {}        # every [[member]] resolved
+        assert e.get("old_pii_once").name == "sec_pkg"          # followable
+        assert e.get("reference-kebab-member").name == "kebab_pkg"  # kebab input
+
+    def test_member_unknown_slug_still_breaks(self, tmp_path: Path):
+        # A link to a slug that is no member of any package still flags (Tier 3).
+        _write(tmp_path, "pkg.md", "name: pkg\nmembers: [known]",
+               "see [[known]] and [[truly_gone]]")
+        (tmp_path / "MEMORY.md").write_text("- [pkg](pkg.md)\n", encoding="utf-8")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.lint()["broken_links"]["pkg"] == ["truly_gone"]
+
     def test_lint_reports_orphans_and_stale(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a", "x")
         (tmp_path / "MEMORY.md").write_text("- [gone](gone.md)\n", encoding="utf-8")
