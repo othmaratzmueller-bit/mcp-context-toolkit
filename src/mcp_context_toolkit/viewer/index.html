@@ -23,8 +23,18 @@
       --core:#7c9cf0; --project:#54c1b8; --user:#e0b15a; --unknown:#8b94a6;
     }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; display:flex; flex-direction:column;
+    /* Fill the container EXACTLY (works standalone and inside a fixed-height iframe)
+       so the document never scrolls — only `main` and the drawer do, one scrollbar
+       per pane. min-height:100vh would overflow a shorter iframe and add a spurious
+       document-level scrollbar on top of main's. */
+    html, body { height:100%; }
+    body { margin:0; height:100%; overflow:hidden; display:flex; flex-direction:column;
            font:14px/1.5 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); }
+    /* Subtle, theme-matched scrollbars (the default chrome looks heavy on dark). */
+    main::-webkit-scrollbar, .drawer::-webkit-scrollbar { width:10px; }
+    main::-webkit-scrollbar-track, .drawer::-webkit-scrollbar-track { background:transparent; }
+    main::-webkit-scrollbar-thumb, .drawer::-webkit-scrollbar-thumb { background:var(--line); border-radius:5px; }
+    main:hover::-webkit-scrollbar-thumb, .drawer:hover::-webkit-scrollbar-thumb { background:var(--accent-dim); }
     .topbar { display:flex; align-items:center; gap:16px; padding:12px 18px;
               background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
     .brand { font-size:15px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
