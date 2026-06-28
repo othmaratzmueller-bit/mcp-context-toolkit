@@ -100,6 +100,7 @@ class MemoryEngine:
     def __init__(self) -> None:
         self._memories: list[Memory] = []
         self._roots: list[tuple[Path, MemoryTier]] = []
+        self._member_owner_cache: dict[str, str] | None = None
 
     @classmethod
     def from_roots(cls, roots: dict[str, str | Path]) -> "MemoryEngine":
@@ -154,6 +155,7 @@ class MemoryEngine:
             seen.add(mem.name)
             self._memories.append(mem)
             added += 1
+        self._member_owner_cache = None  # memory set changed → rebuild lazily
         return {"added": added, "skipped": skipped, "tier": tier,
                 "root": str(root_path), "errors": errors}
 
@@ -162,13 +164,16 @@ class MemoryEngine:
         return list(self._memories)
 
     def _member_owners(self) -> dict[str, str]:
-        """Normalized member slug -> owning package name. Lets a [[member]]
-        link (a pre-bundle atomic name) resolve to the package that merged it."""
-        owners: dict[str, str] = {}
-        for m in self._memories:
-            for member in m.members:
-                owners[_norm_link(member)] = m.name
-        return owners
+        """Normalized member slug -> owning package name (built once, cached;
+        invalidated on every load_directory). Lets a [[member]] link (a
+        pre-bundle atomic name) resolve to the package that merged it."""
+        if self._member_owner_cache is None:
+            owners: dict[str, str] = {}
+            for m in self._memories:
+                for member in m.members:
+                    owners[_norm_link(member)] = m.name
+            self._member_owner_cache = owners
+        return self._member_owner_cache
 
     def get(self, name: str) -> Optional[Memory]:
         exact = next((m for m in self._memories if m.name == name), None)
@@ -207,20 +212,28 @@ class MemoryEngine:
         terms = set(_WORD_RE.findall(query.lower()))
         if not terms:
             return []
+        # Match each term at a word START rather than as a raw substring. The
+        # negative-lookbehind `(?<![a-z0-9])` treats letters/digits as "inside a
+        # word" but `_`, spaces and punctuation as separators — so a term still
+        # follows forward-stems and snake_case parts ("deploy" → "deployment",
+        # "workflow" → "deploy_workflow") yet no longer leaks on incidental
+        # substrings ("set" ✗ "asset", "api" ✗ "rapid", "in" ✗ "string") that
+        # used to flood the ranker. Compiled once per query term.
+        patterns = [re.compile(r"(?<![a-z0-9])" + re.escape(t)) for t in terms]
         boost = boost or {}
         scored: list[tuple[float, float, Memory]] = []
         for m in self._memories:
             name_l, desc_l = m.name.lower(), m.description.lower()
             tags_l, body_l = " ".join(m.tags).lower(), m.body.lower()
             base = 0
-            for t in terms:
-                if t in name_l:
+            for pat in patterns:
+                if pat.search(name_l):
                     base += _W_NAME
-                if t in desc_l:
+                if pat.search(desc_l):
                     base += _W_DESC
-                if t in tags_l:
+                if pat.search(tags_l):
                     base += _W_TAGS
-                if t in body_l:
+                if pat.search(body_l):
                     base += _W_BODY
             if base > 0:
                 heat = boost.get(m.name, 0.0)
@@ -240,9 +253,7 @@ class MemoryEngine:
         # compared in normalized form (kebab/snake + .md folded). The reported
         # `missing` keeps the raw link text for the human.
         resolvable = {_norm_link(m.name) for m in self._memories}
-        resolvable.update(
-            _norm_link(member) for m in self._memories for member in m.members
-        )
+        resolvable.update(self._member_owners().keys())  # member slugs (cached, normalized)
         broken = {
             m.name: missing
             for m in self._memories

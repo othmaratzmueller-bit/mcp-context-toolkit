@@ -49,6 +49,21 @@ class TestMemoryEngine:
         e = MemoryEngine.from_directory(tmp_path)
         assert e.recall("   ") == []
 
+    def test_recall_matches_word_start_not_substring(self, tmp_path: Path):
+        # The matcher anchors a term to a word start: it follows forward-stems
+        # and snake_case parts, but ignores incidental substrings.
+        _write(tmp_path, "deploy.md", "name: deploy_workflow\ntype: feedback",
+               "deployment notes")
+        _write(tmp_path, "asset.md", "name: asset_registry\ntype: project",
+               "asset bookkeeping")
+        e = MemoryEngine.from_directory(tmp_path)
+        # "deploy" forward-stems onto "deployment" + the snake_case name part…
+        assert [m.name for m in e.recall("deploy")] == ["deploy_workflow"]
+        # …"workflow" reaches the snake_case tail of deploy_workflow…
+        assert [m.name for m in e.recall("workflow")] == ["deploy_workflow"]
+        # …but "set" must NOT leak into "asset" (the old substring false positive)
+        assert e.recall("set") == []
+
     def test_get_and_list_by_type(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a\ntype: feedback", "x")
         _write(tmp_path, "b.md", "name: b\ntype: project", "y")
@@ -123,6 +138,21 @@ class TestMemoryEngine:
         (tmp_path / "MEMORY.md").write_text("- [pkg](pkg.md)\n", encoding="utf-8")
         e = MemoryEngine.from_directory(tmp_path)
         assert e.lint()["broken_links"]["pkg"] == ["truly_gone"]
+
+    def test_member_owner_cache_invalidated_across_loads(self, tmp_path: Path):
+        # The member-owner map is cached, but a second load_directory must
+        # invalidate it — a member defined only in the later-loaded tier still
+        # resolves. (Probing after the first load forces the cache to populate.)
+        proj = tmp_path / "proj"
+        user = tmp_path / "user"
+        _write(proj, "p.md", "name: proj_pkg\ntype: project", "x")
+        _write(user, "u.md",
+               "name: user_pkg\ntype: user\nmembers: [old_user_slug]", "y")
+        e = MemoryEngine()
+        e.load_directory(proj, tier="project")
+        assert e.get("old_user_slug") is None        # caches an empty owner map
+        e.load_directory(user, tier="user")           # must drop that stale cache
+        assert e.get("old_user_slug").name == "user_pkg"
 
     def test_lint_reports_orphans_and_stale(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a", "x")
