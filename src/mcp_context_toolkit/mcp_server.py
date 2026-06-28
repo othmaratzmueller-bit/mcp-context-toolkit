@@ -79,9 +79,60 @@ def _memory_summary(m: Any) -> dict:
     }
 
 
+def _tree_mtime(root: Path) -> float:
+    """Highest mtime across a store tree (the dir itself + every file/subdir).
+
+    Walking the whole tree — not just the dir's own mtime — is deliberate:
+    editing an existing file bumps only that file's mtime, while add/remove
+    bumps the dir's. Taking the max over everything catches both, so a `/dream`
+    edit is seen as well as a freshly added memory file. 0.0 if the tree is gone.
+    """
+    try:
+        latest = root.stat().st_mtime
+    except OSError:
+        return 0.0
+    for p in root.rglob("*"):
+        try:
+            mt = p.stat().st_mtime
+        except OSError:
+            continue  # racing deletion etc. — skip, best-effort
+        if mt > latest:
+            latest = mt
+    return latest
+
+
+class _Reloader:
+    """Holds a built engine + the dirs it was loaded from, and rebuilds it (via
+    the supplied loader) only when those trees' mtime changes.
+
+    A long-running MCP process loads its store once at start; without this an
+    edit or a `/dream` re-bundle from a parallel session stays invisible until
+    restart. With it, the next tool call sees the change — a cheap mtime scan,
+    reload only on a real change. The engines stay pure-read; the freshness
+    concern lives here in the server layer.
+    """
+
+    def __init__(self, loader, watch_dirs):
+        self._loader = loader
+        self._watch = [Path(d) for d in watch_dirs if d is not None]
+        self._mtime = self._scan()
+        self._engine = self._loader()
+
+    def _scan(self) -> float:
+        return max((_tree_mtime(d) for d in self._watch), default=0.0)
+
+    def current(self):
+        """Return the engine, rebuilding first iff the watched trees changed."""
+        mt = self._scan()
+        if mt != self._mtime:
+            self._mtime = mt
+            self._engine = self._loader()
+        return self._engine
+
+
 def build_server(
-    engine: RulesEngine,
-    memory_engine: MemoryEngine | None = None,
+    rules_reloader: "_Reloader",
+    memory_reloader: "_Reloader | None" = None,
     usage: UsageStore | None = None,
 ):
     from mcp.server.fastmcp import FastMCP
@@ -95,13 +146,13 @@ def build_server(
         Use this as the first action when opening a file in a session —
         it filters ~60 repo rules down to the ~5-10 relevant for this file.
         """
-        matches = engine.query_for_file(file_path)
+        matches = rules_reloader.current().query_for_file(file_path)
         return json.dumps([_rule_summary(r) for r in matches], indent=2)
 
     @mcp.tool()
     def get_rule(key: str) -> str:
         """Fetch the full content of a single rule by key."""
-        rule = engine.get_rule(key)
+        rule = rules_reloader.current().get_rule(key)
         if rule is None:
             return json.dumps({"error": f"rule not found: {key}"})
         return json.dumps(_rule_full(rule), indent=2, default=str)
@@ -109,7 +160,7 @@ def build_server(
     @mcp.tool()
     def list_rule_keys(type: str | None = None, scope: str | None = None) -> str:
         """List all loaded rule keys, optionally filtered by type and/or scope."""
-        keys = engine.list_keys(type=type, scope=scope)  # type: ignore[arg-type]
+        keys = rules_reloader.current().list_keys(type=type, scope=scope)  # type: ignore[arg-type]
         return json.dumps(keys, indent=2)
 
     @mcp.tool()
@@ -127,6 +178,7 @@ def build_server(
         # Re-run validation against the directory the engine was loaded from.
         # We pull rules_dir from the first rule's source_path (all rules live
         # under the same root).
+        engine = rules_reloader.current()
         if not engine.rules:
             return _json.dumps({"ok": False, "error": "no rules loaded"})
         source = engine.rules[0].source_path
@@ -162,7 +214,7 @@ def build_server(
           - Frontend session: query_rules(scope="frontend")
           - Themis module: query_rules(module="themis")
         """
-        matches = engine.query(
+        matches = rules_reloader.current().query(
             type=type,  # type: ignore[arg-type]
             scope=scope,  # type: ignore[arg-type]
             module=module,
@@ -177,7 +229,7 @@ def build_server(
         return json.dumps([_rule_summary(r) for r in matches], indent=2)
 
     # ---- memory tools (registered only when a memory store was found) ----
-    if memory_engine is not None:
+    if memory_reloader is not None:
 
         @mcp.tool()
         def recall(query: str, limit: int = 8) -> str:
@@ -191,7 +243,7 @@ def build_server(
             get_memory(name) for the full body — which also marks it as used.
             """
             boosts = usage.boosts() if usage is not None else {}
-            hits = memory_engine.recall(query, limit=limit, boost=boosts)
+            hits = memory_reloader.current().recall(query, limit=limit, boost=boosts)
             if usage is not None:
                 usage.record_recall([m.name for m in hits])
             return json.dumps(
@@ -206,7 +258,7 @@ def build_server(
             this is what makes a memory 'hot' and pulls it forward in future
             recall results and in the /dream intra-section reorder.
             """
-            m = memory_engine.get(name)
+            m = memory_reloader.current().get(name)
             if m is None:
                 return json.dumps({"error": f"memory not found: {name}"})
             if usage is not None:
@@ -217,7 +269,7 @@ def build_server(
         def list_memories(type: str | None = None, tier: str | None = None) -> str:
             """List memory names + descriptions, optionally filtered by type
             (user/feedback/project/reference) and/or tier (user/project)."""
-            ms = memory_engine.list(type=type, tier=tier)  # type: ignore[arg-type]
+            ms = memory_reloader.current().list(type=type, tier=tier)  # type: ignore[arg-type]
             return json.dumps(
                 [_memory_summary(m) for m in ms], indent=2, ensure_ascii=False
             )
@@ -227,7 +279,9 @@ def build_server(
             """Hygiene report over the memory store — broken [[links]], index
             orphans, stale index pointers. The raw material a /dream
             consolidation pass acts on."""
-            return json.dumps(memory_engine.lint(), indent=2, ensure_ascii=False)
+            return json.dumps(
+                memory_reloader.current().lint(), indent=2, ensure_ascii=False
+            )
 
         @mcp.tool()
         def memory_usage(limit: int = 50) -> str:
@@ -309,7 +363,10 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    engine = RulesEngine.from_directory(rules_dir)
+    # Wrap the rules engine in a reloader so an in-session YAML edit (or a
+    # parallel session's) is picked up at the next tool call, not just at restart.
+    rules_reloader = _Reloader(lambda: RulesEngine.from_directory(rules_dir), [rules_dir])
+    engine = rules_reloader.current()  # initial build (no reload yet)
 
     # Auto-write fallback markdown so there's always a plain-text reference
     # for the MCP-outage case. Silent on failure — fallback is nice-to-have.
@@ -326,20 +383,31 @@ def main() -> None:
 
     # Memory store is optional — if found, the same MCP also serves recall /
     # get_memory / list_memories / memory_lint. If not, rules-only as before.
-    memory_engine = None
+    # The memory engine is likewise wrapped in a reloader so a `/dream` rebundle
+    # from a parallel session refreshes this process at its next tool call.
+    memory_reloader = None
     usage = None
     mem_dir = _discover_memory_dir()
     if mem_dir is not None:
-        memory_engine = MemoryEngine()
-        memory_engine.load_directory(mem_dir, tier="project", strict=False)
         user_mem = os.environ.get("CONTEXT_USER_MEMORY_DIR")
-        if user_mem and Path(user_mem).expanduser().is_dir():
-            memory_engine.load_directory(user_mem, tier="user", strict=False)
+        user_mem_dir = Path(user_mem).expanduser() if user_mem else None
+        if user_mem_dir is not None and not user_mem_dir.is_dir():
+            user_mem_dir = None
+
+        def _load_memory() -> MemoryEngine:
+            me = MemoryEngine()
+            me.load_directory(mem_dir, tier="project", strict=False)
+            if user_mem_dir is not None:
+                me.load_directory(user_mem_dir, tier="user", strict=False)
+            return me
+
+        memory_reloader = _Reloader(_load_memory, [mem_dir, user_mem_dir])
         # Hot/cold (frecency) signal — sidecar in the PROJECT memory dir.
         usage = UsageStore.for_memory_dir(mem_dir)
 
+    memory_engine = memory_reloader.current() if memory_reloader is not None else None
     _print_banner(engine, memory_engine)
-    server = build_server(engine, memory_engine, usage)
+    server = build_server(rules_reloader, memory_reloader, usage)
     server.run()
 
 

@@ -19,8 +19,14 @@ from __future__ import annotations
 import json
 import math
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX advisory file locking (Linux/Mac); absent on Windows
+except ImportError:  # pragma: no cover - non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
 
 # Heat weights: opening the full body ("I actually used this") is a stronger
 # signal than merely surfacing in a recall result list.
@@ -48,6 +54,9 @@ class UsageStore:
     The ``_``-prefix keeps the file out of ``iter_files`` (never parsed as a
     memory) and it is ``.json`` not ``.md`` — doubly safe. Gitignored: usage is
     a per-machine signal, so dev and prod each keep their own hot set.
+
+    Concurrent writes from parallel MCP processes are serialized with a
+    ``_usage.json.lock`` companion file (see ``_file_lock``) — gitignore it too.
     """
 
     FILENAME = "_usage.json"
@@ -72,35 +81,81 @@ class UsageStore:
             name, {"opens": 0, "recalls": 0, "last_open": None, "last_recall": None}
         )
 
+    @contextmanager
+    def _file_lock(self):
+        """Hold an exclusive cross-process lock for one read-modify-write cycle.
+
+        Parallel Claude sessions each run their own MCP process, all pointing at
+        the same ``_usage.json`` — without serialization two near-simultaneous
+        hits would clobber each other (last writer wins, hits lost). A dedicated
+        ``.lock`` file is used (never replaced) so the data file's atomic
+        ``os.replace()`` does not drop the lock.
+
+        Best-effort: if fcntl is unavailable (non-POSIX) or the lock cannot be
+        taken, the cycle runs unlocked rather than crashing — usage is lossy and
+        log-damped by design, so degrading to the old race is acceptable; a crash
+        is not.
+        """
+        if fcntl is None:
+            yield
+            return
+        lock_path = self.path.parent / (self.path.name + ".lock")
+        handle = None
+        try:
+            handle = open(lock_path, "w")
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            if handle is not None:
+                handle.close()
+            handle = None
+        try:
+            yield
+        finally:
+            if handle is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
+
     def record_open(self, name: str) -> None:
         """Strong hit: the full body was fetched (get_memory)."""
-        self._data = self._load()  # merge parallel-process state before mutating
-        entry = self._entry(name)
-        entry["opens"] = int(entry.get("opens", 0)) + 1
-        entry["last_open"] = _now_iso()
-        self._save()
+        with self._file_lock():
+            self._data = self._load()  # re-read under lock before mutating
+            entry = self._entry(name)
+            entry["opens"] = int(entry.get("opens", 0)) + 1
+            entry["last_open"] = _now_iso()
+            self._save()
 
     def record_recall(self, names: list[str]) -> None:
         """Weak hit: surfaced in a recall result (the 'searched for' signal)."""
         if not names:
             return
-        self._data = self._load()
-        ts = _now_iso()
-        for name in names:
-            entry = self._entry(name)
-            entry["recalls"] = int(entry.get("recalls", 0)) + 1
-            entry["last_recall"] = ts
-        self._save()
+        with self._file_lock():
+            self._data = self._load()  # re-read under lock before mutating
+            ts = _now_iso()
+            for name in names:
+                entry = self._entry(name)
+                entry["recalls"] = int(entry.get("recalls", 0)) + 1
+                entry["last_recall"] = ts
+            self._save()
 
     def boosts(self) -> dict[str, float]:
-        """name -> frecency boost factor, for blending into recall scoring."""
+        """name -> frecency boost factor, for blending into recall scoring.
+
+        Reads fresh from disk so a parallel session's recorded hits show up at
+        the next recall — paired with the MCP mtime-reload (which refreshes
+        memory CONTENT), this keeps the hot/cold signal current too."""
+        data = self._load()
         return {
             name: _heat(int(e.get("opens", 0)), int(e.get("recalls", 0)))
-            for name, e in self._data.items()
+            for name, e in data.items()
         }
 
     def report(self) -> list[dict]:
-        """Hot -> cold rows for the memory_usage tool and the /dream reorder."""
+        """Hot -> cold rows for the memory_usage tool and the /dream reorder.
+
+        Reads fresh from disk (like ``boosts``) so the report reflects writes
+        from parallel sessions, not just this process's own hits."""
         rows = [
             {
                 "name": name,
@@ -110,7 +165,7 @@ class UsageStore:
                 "last_recall": e.get("last_recall"),
                 "heat": round(_heat(int(e.get("opens", 0)), int(e.get("recalls", 0))), 3),
             }
-            for name, e in self._data.items()
+            for name, e in self._load().items()
         ]
         rows.sort(key=lambda r: (-r["heat"], r["name"]))
         return rows

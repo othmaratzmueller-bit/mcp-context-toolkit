@@ -1,8 +1,18 @@
+import multiprocessing
 from pathlib import Path
+
+import pytest
 
 from mcp_context_toolkit.core import parse_frontmatter
 from mcp_context_toolkit.memory import MemoryEngine
 from mcp_context_toolkit.usage import UsageStore
+
+
+def _hammer_opens(path_str: str, n: int) -> None:
+    """Module-level worker (must be importable for multiprocessing 'spawn')."""
+    store = UsageStore(Path(path_str))
+    for _ in range(n):
+        store.record_open("x")
 
 
 def _write(d: Path, name: str, fm: str, body: str) -> None:
@@ -209,6 +219,16 @@ class TestUsageStore:
         assert u.report() == []
         assert not p.exists()                    # nothing written for empty hit
 
+    def test_boosts_and_report_read_fresh_from_disk(self, tmp_path: Path):
+        # boosts()/report() re-read disk, so a second instance sees the first's
+        # writes — the basis for parallel sessions sharing one frecency signal.
+        p = tmp_path / "_usage.json"
+        u1 = UsageStore(p)
+        u2 = UsageStore(p)                       # both start from the empty file
+        u1.record_open("x")
+        assert "x" in u2.boosts()                # u2 sees u1's write (fresh read)
+        assert u2.report()[0]["name"] == "x"
+
 
 class TestRecallBoost:
     def test_no_boost_is_backward_compatible(self, tmp_path: Path):
@@ -225,3 +245,25 @@ class TestRecallBoost:
         # warmth on beta flips the order
         hits = e.recall("shared keyword topic", boost={"beta": 2.0})
         assert hits[0].name == "beta"
+
+
+class TestUsageStoreConcurrency:
+    def test_parallel_opens_not_lost(self, tmp_path: Path):
+        # Four processes hammer the same _usage.json. With the fcntl lock the
+        # read-modify-write cycles serialize, so every hit is counted; without
+        # it, near-simultaneous writes would clobber each other and the total
+        # would fall short. Skipped where flock is unavailable (the lock is a
+        # no-op there, so the guarantee does not hold).
+        pytest.importorskip("fcntl")
+        p = tmp_path / "_usage.json"
+        procs = [
+            multiprocessing.Process(target=_hammer_opens, args=(str(p), 40))
+            for _ in range(4)
+        ]
+        for pr in procs:
+            pr.start()
+        for pr in procs:
+            pr.join()
+        rows = UsageStore(p).report()
+        assert len(rows) == 1 and rows[0]["name"] == "x"
+        assert rows[0]["opens"] == 160           # 4 × 40, none lost to the race

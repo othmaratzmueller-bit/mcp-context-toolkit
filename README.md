@@ -89,6 +89,16 @@ Any unset dir is auto-discovered by walking up from the working directory, looki
 for existing Claude Code repos. Memory tools register only when a memory store is found —
 rules-only setups keep working untouched.
 
+## Freshness / reloading
+
+The server loads its stores once at startup, then **reloads automatically when the files
+change**. Every tool call does a cheap mtime scan over the rule and memory trees and
+rebuilds only when something actually changed — so an edited rule, or a memory store
+re-bundled by a separate consolidation pass, is picked up at the *next* call, no restart
+needed. The frecency sidecar is re-read on each `recall`, so several server processes
+pointing at one store share a single hot/cold signal (and a file lock keeps their writes
+from clobbering each other). Nothing is served staler than your last edit.
+
 ## Tools
 
 **Rules**
@@ -182,12 +192,13 @@ become your real rule set.
 
 ## What it writes to disk
 
-The engine treats your content as read-only. There is exactly **one** file it writes on
-its own, plus one opt-in export:
+The engine treats your content as read-only. It writes only a frecency sidecar (plus its
+lock companion), and one opt-in export:
 
 | Path | When | What |
 | --- | --- | --- |
 | `<memory-dir>/_usage.json` | on every `recall` / `get_memory` | the frecency sidecar (hit counts). Atomic temp-file write, best-effort — a failure never breaks recall. Per-machine, gitignore it. |
+| `<memory-dir>/_usage.json.lock` | during a `recall` / `get_memory` write | a zero-byte `fcntl` lock file that serializes concurrent writers (parallel MCP processes sharing one store). POSIX only; absent on Windows. Gitignore it too. |
 | `<out-dir>/{index.html,rules.json,memory.json}` | only on `--export-studio OUT_DIR` | the offline Context Studio viewer + a metadata snapshot. Opt-in; nothing is written unless you run it. |
 
 Your rule and memory **content** is never created, edited, or deleted by the engine —
