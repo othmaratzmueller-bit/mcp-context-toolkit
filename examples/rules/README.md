@@ -27,3 +27,12 @@ schema, or the top-level `README.md` → "Store format".
 
 Edit the globs (`applies_to.files`) to match your layout — the defaults assume a
 `src/**` tree. Drop the categories you don't need.
+
+## These examples are inert — they never auto-load
+
+Auto-discovery looks for `<dir>/.claude/rules` walking up from the working
+directory. This starter pack lives under `examples/rules/`, so it can **never**
+be picked up implicitly — nothing here becomes active until *you* copy it into
+your own rules directory. If you point `CONTEXT_RULES_DIR` (or `--rules-dir`)
+directly at this folder, the toolkit prints a loud `NOTE: loading EXAMPLE/starter
+rules …` to stderr so the examples don't silently become your production rule set.

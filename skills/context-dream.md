@@ -31,6 +31,13 @@ a run, `MEMORY.md` ≤ before.
    (member→package catalog) from the sources (build artifacts, never hand-edited).
 5. **Verify + commit** — `memory_lint` clean, store size ≤ before, no member lost.
 
+## Preview-gate
+The sub-skills' proposals combine into one `diff.json` in the common Context
+Studio envelope (`{tool, summary, items:[{id, op, …}]}` — schema:
+`../frontend/README.md`). Review it in the terminal or the Context Studio viewer,
+keep what you want, and apply only the accepted `decision.json` items before the
+commit. Nothing mutates the store until you approve.
+
 ## Guardrails (hard)
 - **Net smaller, never larger.** Grows → wrong → revert.
 - **Never delete without a flag**; never cut correction history or technical detail.

@@ -1,0 +1,63 @@
+{
+  "kind": "context-studio/diff",
+  "tool": "context-dream",
+  "store": ".claude/memory",
+  "summary": "6 proposals · net −3.1 KB · 1 flagged for review",
+  "items": [
+    {
+      "id": "prefer_tabs_over_spaces",
+      "op": "prune",
+      "title": "prefer_tabs_over_spaces",
+      "detail": "Superseded — the project adopted Prettier, indentation is no longer a human decision.",
+      "evidence": "Last recalled 0 times in 90 days. Contradicted by [[formatting_is_automated]].",
+      "saved_bytes": -612,
+      "default": true
+    },
+    {
+      "id": "user_prefers_terse_replies",
+      "op": "compact",
+      "title": "user_prefers_terse_replies",
+      "detail": "Trim the worked example; keep the rule and the why.",
+      "before": "The user prefers terse replies. For example, when they asked about the cache layer, a three-paragraph answer was met with 'too long'. They want bullets, tables, and at most one short example. Avoid restating the question. Avoid closing summaries. Avoid hedging.",
+      "after": "Prefer terse replies: bullets/tables, ≤1 short example, no restating the question, no closing summary, no hedging.",
+      "saved_bytes": -240,
+      "default": true
+    },
+    {
+      "id": "deploy_notes",
+      "op": "merge",
+      "title": "deploy_notes  ←  deploy_steps + rollback_steps",
+      "detail": "Two notes describe the same release flow from different angles — merge into one, keeping both checklists.",
+      "before": "deploy_steps.md (build → push → migrate)\nrollback_steps.md (tag → reset → restart)",
+      "after": "deploy_notes.md (build → push → migrate · rollback: tag → reset → restart)",
+      "saved_bytes": -180,
+      "default": true
+    },
+    {
+      "id": "review_checklist",
+      "op": "reclassify",
+      "title": "review_checklist",
+      "detail": "This is a recurring workflow, not a one-off project note.",
+      "from": "project/review_checklist.md",
+      "to": "feedback/review_checklist.md",
+      "default": true
+    },
+    {
+      "id": "usefull_links",
+      "op": "rename",
+      "title": "usefull_links → useful_links",
+      "detail": "Normalize the typo'd filename so [[useful_links]] resolves.",
+      "from": "reference/usefull_links.md",
+      "to": "reference/useful_links.md",
+      "default": true
+    },
+    {
+      "id": "incident_2024_db",
+      "op": "flag",
+      "title": "incident_2024_db",
+      "detail": "Possible duplicate of [[postmortem_db_outage]] — but the dates differ. Needs a human to decide whether these are the same event.",
+      "evidence": "Both reference the primary replica failover, but one is dated March and the other April.",
+      "default": false
+    }
+  ]
+}

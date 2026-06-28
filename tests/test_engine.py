@@ -267,3 +267,40 @@ class TestValidateAndFallback:
         assert "SEC1" in content
         assert "No Hardcoded Secrets" in content
         assert result["written"] == 1
+
+
+class TestStarterPackNotAutoLoaded:
+    """The shipped starter pack (examples/rules) is inert — copy-to-activate.
+    Auto-discovery walks for `<dir>/.claude/rules`, so the examples tree can
+    never be picked up implicitly. These tests pin that contract so the grundpaket
+    can't silently 'poison' a real rule set."""
+
+    def test_autodiscovery_never_picks_up_examples(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        # Mimic the published repo layout: examples/rules exists, NO .claude/rules.
+        ex = tmp_path / "examples" / "rules" / "security"
+        ex.mkdir(parents=True)
+        (ex / "x.yaml").write_text("key: x\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(FileNotFoundError):
+            _discover_rules_dir()
+
+    def test_explicit_example_path_warns_loudly(self, tmp_path: Path, capsys):
+        from mcp_context_toolkit.cli import _resolve_rules_dir
+
+        ex = tmp_path / "examples" / "rules"
+        ex.mkdir(parents=True)
+        _resolve_rules_dir(str(ex))
+
+        assert "EXAMPLE" in capsys.readouterr().err
+
+    def test_real_rules_dir_does_not_warn(self, tmp_path: Path, capsys):
+        from mcp_context_toolkit.cli import _resolve_rules_dir
+
+        real = tmp_path / ".claude" / "rules"
+        real.mkdir(parents=True)
+        _resolve_rules_dir(str(real))
+
+        assert "EXAMPLE" not in capsys.readouterr().err

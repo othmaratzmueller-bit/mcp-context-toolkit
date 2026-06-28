@@ -19,7 +19,8 @@ Conservative — when in doubt, keep.
      a lower bound; native auto-recall doesn't count).
    - dated `(superseded YYYY-MM-DD)` markers, "replaced by" notes.
    - near-duplicates (recall clusters with high overlap).
-2. **Candidate list as `diff.json`**: `{name, reason, evidence}` — **flag only**.
+2. **Candidate list as `diff.json`** (common Context Studio envelope — schema
+   `../frontend/README.md`): per entry `op:"prune"`, `id`, `detail` (reason), `evidence` — **flag only**.
 3. **PREVIEW + select**: user decides per entry (remove / keep / merge).
 4. **Apply** (after approval): `git rm`, or for ambiguous cases flag into a pending
    ledger instead of deleting. Regenerate index + catalog.

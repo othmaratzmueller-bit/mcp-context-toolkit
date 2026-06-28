@@ -291,6 +291,16 @@ def main() -> None:
         print(f"[context-toolkit] {e}", file=sys.stderr)
         sys.exit(2)
 
+    # The shipped starter pack (examples/rules) is inert — copy-to-activate. If a
+    # misconfigured CONTEXT_RULES_DIR points at it directly, say so loudly so the
+    # examples don't silently become someone's production rule set.
+    if "examples" in rules_dir.parts:
+        print(
+            f"[context-toolkit] NOTE: serving EXAMPLE/starter rules from {rules_dir} "
+            f"— inert starter pack, copy into your own rules dir for real use.",
+            file=sys.stderr,
+        )
+
     engine = RulesEngine.from_directory(rules_dir)
 
     # Auto-write fallback markdown so there's always a plain-text reference

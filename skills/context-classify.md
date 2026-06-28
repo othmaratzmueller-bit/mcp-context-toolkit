@@ -18,8 +18,9 @@ Pattern (all memory skills): **read → propose → PREVIEW → select → apply
    Capture naming drift (sentence-vs-slug) here too.
 2. **Propose a bundle map**: ~40-60 tight packages, EVERY memory in exactly ONE,
    tier per package. (Large stores: a panel of clusterings → synthesise → verify.)
-3. **PREVIEW as `diff.json`**: per memory `{name, from, to_package, tier}`. Show it —
-   touch no data.
+3. **PREVIEW as `diff.json`** in the common Context Studio envelope (`{tool,
+   summary, items:[…]}` — schema: `../frontend/README.md`): one item per memory,
+   `op:"reclassify"` (or `"rename"`), `id`, `from`, `to`. Show it — touch no data.
 4. **Select**: user takes all / part / corrects (`decision.json`).
 5. **Apply** (after approval): merge members into package files as `## slug` sections
    (body **verbatim**, lossless), regenerate index + catalog.

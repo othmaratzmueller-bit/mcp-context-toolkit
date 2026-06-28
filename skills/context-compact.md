@@ -16,7 +16,8 @@ shorter. Pattern: **read → propose → PREVIEW → select → apply → git.**
 
 ## Flow
 1. **Candidates** (read-only): verbose bodies (body ≫ needed), index hooks > ~80 chars.
-2. **Compressed version as `diff.json`**: per entry `{name, before, after, saved_bytes}`.
+2. **Compressed version as `diff.json`** (common Context Studio envelope — schema
+   `../frontend/README.md`): per entry `op:"compact"`, `id`, `before`, `after`, `saved_bytes`.
    - Index hook: description to ~80 chars, keep title + `[[links]]` + recall keywords.
    - Body: remove only true redundancy.
 3. **PREVIEW + select**: user takes/corrects per entry.

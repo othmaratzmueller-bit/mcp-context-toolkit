@@ -1,0 +1,46 @@
+{
+  "kind": "context-studio/memory",
+  "store": ".claude/memory",
+  "stats": { "packages": 3, "members": 7, "bytes": 4820, "by_tier": { "core": 1, "project": 1, "user": 1 } },
+  "packages": [
+    {
+      "name": "output_style",
+      "tier": "core",
+      "type": "feedback",
+      "description": "How the assistant should write: terse, structured, no filler.",
+      "bytes": 1240,
+      "member_count": 3,
+      "members": ["prefer_terse_replies", "no_filler_apologies", "tables_over_prose"],
+      "links": ["calibrated_critique"],
+      "heat": 2.71,
+      "opens": 14,
+      "recalls": 9
+    },
+    {
+      "name": "deploy",
+      "tier": "project",
+      "type": "project",
+      "description": "Release flow for this repo — build, push, migrate, rollback.",
+      "bytes": 2180,
+      "member_count": 3,
+      "members": ["deploy_notes", "migration_policy", "feature_flags"],
+      "links": [],
+      "heat": 1.39,
+      "opens": 4,
+      "recalls": 3
+    },
+    {
+      "name": "tooling",
+      "tier": "user",
+      "type": "reference",
+      "description": "Cross-project tools and where their dashboards live.",
+      "bytes": 1400,
+      "member_count": 1,
+      "members": ["useful_links"],
+      "links": [],
+      "heat": 0.0,
+      "opens": 0,
+      "recalls": 0
+    }
+  ]
+}

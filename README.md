@@ -172,7 +172,11 @@ The note itself. Link related notes with [[their-name]].
   structure `recall` expects.
 
 Both are illustrative defaults, not production policy — see each directory's
-`README.md`.
+`README.md`. They are **inert**: auto-discovery only ever loads `<dir>/.claude/rules`
+and `<dir>/.claude/memory`, so nothing under `examples/` is ever picked up
+implicitly. Pointing `CONTEXT_RULES_DIR` straight at the starter pack works (it's
+opt-in) but prints a loud `NOTE` to stderr so the examples can't silently become
+your real rule set.
 
 ## Design principles
 
