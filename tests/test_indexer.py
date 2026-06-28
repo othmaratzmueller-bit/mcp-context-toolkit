@@ -3,6 +3,8 @@ from pathlib import Path
 from mcp_context_toolkit.indexer import (
     DESCRIPTIONS_FILENAME,
     build_descriptions,
+    build_member_catalog,
+    build_memory_md,
     write_descriptions,
 )
 from mcp_context_toolkit.memory import MemoryEngine
@@ -41,6 +43,30 @@ class TestBuildDescriptions:
         _write(tmp_path, "a.md", "name: aaa\ntype: feedback\ndescription: A", "y")
         _write(tmp_path, "b.md", "name: bbb\ntype: project\ndescription: B", "x")
         assert build_descriptions(tmp_path)["content"] == build_descriptions(tmp_path)["content"]
+
+
+class TestBuildMemoryMd:
+    def test_lean_toc_by_tier(self):
+        pkgs = [
+            {"file": "core/a.md", "title": "A", "tier": "core", "members": ["x", "y"]},
+            {"file": "project/b.md", "title": "B", "tier": "project", "members": ["z"]},
+        ]
+        md = build_memory_md(pkgs)
+        assert "[A](core/a.md) — 2 memories" in md
+        assert "[B](project/b.md) — 1 memories" in md
+        assert md.index("## core") < md.index("## project")  # core first
+
+
+class TestBuildMemberCatalog:
+    def test_maps_member_to_package(self, tmp_path: Path):
+        _write(tmp_path, "x.md", "name: x\ntype: feedback\ndescription: Desc X", "b")
+        e = MemoryEngine.from_directory(tmp_path)
+        r = build_member_catalog(
+            [{"file": "core/a.md", "title": "A", "tier": "core", "members": ["x"]}], e
+        )
+        assert r["count"] == 1
+        assert "**x** — Desc X → core/a.md" in r["content"]
+        assert r["line_index"]["x"] >= 1
 
 
 class TestWriteDescriptions:
