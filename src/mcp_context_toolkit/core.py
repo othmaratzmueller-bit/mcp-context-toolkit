@@ -5,7 +5,7 @@ YAML frontmatter that grows and changes over time. This module holds the
 genuinely shared, content-type-agnostic helpers so a new store type (memory
 today, anything markdown-with-frontmatter tomorrow) does not re-invent them.
 
-Deliberately tiny and dependency-light: no TALOS knowledge, no rule/memory
+Deliberately tiny and dependency-light: no host-application knowledge, no rule/memory
 specifics. The rule engine (engine.py) and memory engine (memory.py) build
 their own models + query semantics on top.
 """

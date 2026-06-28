@@ -84,7 +84,7 @@ def _tree_mtime(root: Path) -> float:
 
     Walking the whole tree — not just the dir's own mtime — is deliberate:
     editing an existing file bumps only that file's mtime, while add/remove
-    bumps the dir's. Taking the max over everything catches both, so a `/dream`
+    bumps the dir's. Taking the max over everything catches both, so an in-place
     edit is seen as well as a freshly added memory file. 0.0 if the tree is gone.
     """
     try:
@@ -106,8 +106,8 @@ class _Reloader:
     the supplied loader) only when those trees' mtime changes.
 
     A long-running MCP process loads its store once at start; without this an
-    edit or a `/dream` re-bundle from a parallel session stays invisible until
-    restart. With it, the next tool call sees the change — a cheap mtime scan,
+    edit or a consolidation re-bundle from a parallel session stays invisible
+    until restart. With it, the next tool call sees the change — a cheap mtime scan,
     reload only on a real change. The engines stay pure-read; the freshness
     concern lives here in the server layer.
     """
@@ -212,7 +212,7 @@ def build_server(
         Typical uses:
           - Security review: query_rules(type="security", priority="non_negotiable")
           - Frontend session: query_rules(scope="frontend")
-          - Themis module: query_rules(module="themis")
+          - A specific module: query_rules(module="billing")
         """
         matches = rules_reloader.current().query(
             type=type,  # type: ignore[arg-type]
@@ -236,8 +236,9 @@ def build_server(
             """Recall the most relevant memories for a query, ranked across BOTH
             tiers (project + user). Keyword-based, deterministic, hot/cold-aware.
 
-            The native auto-memory only surfaces the project tier — use this to
-            pull project AND user-global knowledge on demand. Ranking blends
+            A host's own auto-memory (if any) typically surfaces only the project
+            tier — use this to pull project AND user-global knowledge on demand.
+            Ranking blends
             keyword relevance with frecency (frequently/recently used memories
             are pulled forward). Returns summaries; follow up with
             get_memory(name) for the full body — which also marks it as used.
@@ -256,7 +257,7 @@ def build_server(
 
             Counts as a strong usage hit (heavier than a recall appearance) —
             this is what makes a memory 'hot' and pulls it forward in future
-            recall results and in the /dream intra-section reorder.
+            recall results and in a consolidation pass's intra-section reorder.
             """
             m = memory_reloader.current().get(name)
             if m is None:
@@ -277,8 +278,8 @@ def build_server(
         @mcp.tool()
         def memory_lint() -> str:
             """Hygiene report over the memory store — broken [[links]], index
-            orphans, stale index pointers. The raw material a /dream
-            consolidation pass acts on."""
+            orphans, stale index pointers. The raw material a consolidation
+            pass acts on."""
             return json.dumps(
                 memory_reloader.current().lint(), indent=2, ensure_ascii=False
             )
@@ -288,11 +289,11 @@ def build_server(
             """Hot -> cold usage report (frecency): opens, recalls, last-access
             timestamps and a heat score per memory, hottest first.
 
-            This is the signal /dream uses to reorder bullets WITHIN each
-            MEMORY.md section (section grouping stays human-curated; intra-section
+            This is the signal a consolidation pass uses to reorder bullets WITHIN
+            each MEMORY.md section (grouping stays human-curated; intra-section
             order becomes warmth-driven). Frequency-dominant — wall-clock pauses
             do not cool a memory. Counts only explicit recall()/get_memory()
-            hits; the native auto-recall bypasses this layer, so figures are a
+            hits; a host's own auto-recall bypasses this layer, so figures are a
             lower bound, not a full tally."""
             if usage is None:
                 return json.dumps({"error": "usage tracking unavailable"})
@@ -383,8 +384,8 @@ def main() -> None:
 
     # Memory store is optional — if found, the same MCP also serves recall /
     # get_memory / list_memories / memory_lint. If not, rules-only as before.
-    # The memory engine is likewise wrapped in a reloader so a `/dream` rebundle
-    # from a parallel session refreshes this process at its next tool call.
+    # The memory engine is likewise wrapped in a reloader so a consolidation
+    # rebundle from a parallel session refreshes this process at its next call.
     memory_reloader = None
     usage = None
     mem_dir = _discover_memory_dir()

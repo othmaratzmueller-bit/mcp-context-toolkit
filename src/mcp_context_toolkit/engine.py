@@ -30,7 +30,7 @@ def fingerprint_rules(rules: list["Rule"]) -> str:
     the file has changed since last time. Catches add/delete, content edits,
     summary edits, priority changes, title/short_id changes, glob changes.
 
-    Ignores metadata that doesn't affect what Claude sees (source_path,
+    Ignores metadata that doesn't affect what the agent sees (source_path,
     created/reviewed timestamps, owner, review_interval). Rule-order
     independent because rules are sorted by key before hashing.
     """

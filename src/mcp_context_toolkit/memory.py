@@ -2,8 +2,8 @@
 
 Same on-disk shape as rules (a directory of frontmatter files that grows over
 time), different query semantics: rules match by file-path glob, memories are
-recalled by relevance. Read-only — this engine never writes memory. Native
-Claude Code writes/auto-loads the project tier; the `/dream` skill curates.
+recalled by relevance. Read-only — this engine never writes memory content.
+The host agent owns writes; a consolidation pass curates.
 
 Multi-tier from the start: load several roots, each tagged with a tier
 ("user" = cross-project, "project" = locked to one repo). Load order is
@@ -199,7 +199,7 @@ class MemoryEngine:
     ) -> list[Memory]:
         """Rank memories by keyword overlap with the query across both tiers.
 
-        Deterministic, LLM-free (the `/dream` skill adds LLM judgment on top).
+        Deterministic, LLM-free (a consolidation pass can add LLM judgment on top).
         Base score = weighted substring hits in name/description/tags/body.
 
         ``boost`` is the optional frecency (hot/cold) signal: a {name: factor}
@@ -243,7 +243,7 @@ class MemoryEngine:
         return [m for _, _, m in scored[:limit]]
 
     def lint(self) -> dict:
-        """Read-only hygiene report — the raw material a `/dream` pass acts on.
+        """Read-only hygiene report — the raw material a consolidation pass acts on.
 
         - broken_links: {memory: [missing [[targets]]]} pointing at no memory.
         - orphans: memory names not referenced anywhere in MEMORY.md.

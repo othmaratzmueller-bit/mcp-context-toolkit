@@ -2,13 +2,13 @@
 
 Frequency-dominant by design: a memory's heat is driven by how OFTEN it is
 used, not by wall-clock recency. A weekend (or three-week) pause must NOT cool
-a heavily-used memory — the TALOS principle "decay by conversation distance,
+a heavily-used memory — the guiding principle "decay by conversation distance,
 not wall time" applies to the store too. Timestamps are kept for display and
 as a tiebreak only; they never decay the score.
 
 Per-machine and best-effort. This captures only EXPLICIT recall()/get_memory()
-hits routed through the MCP. The native auto-recall (autoMemoryDirectory ->
-system-reminders) bypasses this layer, so counts are a LOWER BOUND, never a
+hits routed through the MCP. A host's own auto-recall (if any) bypasses this
+layer, so counts are a LOWER BOUND, never a
 full tally. The score must — and does — degrade gracefully under that
 undercounting: log-damped and frequency-dominant, so a handful of missed hits
 cannot flip a ranking.
@@ -85,7 +85,7 @@ class UsageStore:
     def _file_lock(self):
         """Hold an exclusive cross-process lock for one read-modify-write cycle.
 
-        Parallel Claude sessions each run their own MCP process, all pointing at
+        Parallel agent sessions each run their own MCP process, all pointing at
         the same ``_usage.json`` — without serialization two near-simultaneous
         hits would clobber each other (last writer wins, hits lost). A dedicated
         ``.lock`` file is used (never replaced) so the data file's atomic
@@ -152,7 +152,7 @@ class UsageStore:
         }
 
     def report(self) -> list[dict]:
-        """Hot -> cold rows for the memory_usage tool and the /dream reorder.
+        """Hot -> cold rows for the memory_usage tool and a consolidation reorder.
 
         Reads fresh from disk (like ``boosts``) so the report reflects writes
         from parallel sessions, not just this process's own hits."""

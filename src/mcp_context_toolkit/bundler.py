@@ -40,7 +40,7 @@ def render_package(pkg: dict, members: list[Memory]) -> str:
         "type: package",
         f"tier: {tier}",
         # json.dumps → YAML-safe double-quoted scalar (titles contain ': ' e.g.
-        # "Prometheus: Datenmodell" which would otherwise break the frontmatter).
+        # "My Topic: Subtitle" which would otherwise break the frontmatter).
         f"description: {json.dumps(title, ensure_ascii=False)}",
         "members: [" + ", ".join(_slug(m) for m in members) + "]",
         "---",
