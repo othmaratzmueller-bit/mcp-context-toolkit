@@ -1,8 +1,10 @@
+import json
 import multiprocessing
 from pathlib import Path
 
 import pytest
 
+from mcp_context_toolkit import cli
 from mcp_context_toolkit.core import parse_frontmatter
 from mcp_context_toolkit.memory import MemoryEngine
 from mcp_context_toolkit.usage import UsageStore
@@ -267,3 +269,35 @@ class TestUsageStoreConcurrency:
         rows = UsageStore(p).report()
         assert len(rows) == 1 and rows[0]["name"] == "x"
         assert rows[0]["opens"] == 160           # 4 × 40, none lost to the race
+
+
+class TestCliMemoryCommands:
+    """The CLI memory commands powering the auto-recall hooks (--memory-tier for
+    the session-start user-memory, --recall + --exclude for the per-prompt hook)."""
+
+    def test_memory_tier_dump_with_bodies(self, tmp_path: Path, capsys, monkeypatch):
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        _write(tmp_path, "u.md", "name: u_fact\ntype: user\ntier: user", "user body line")
+        _write(tmp_path, "p.md", "name: p_topic\ntype: project\ntier: project", "alpha beta")
+        rc = cli._cmd_memory_tier(tmp_path, "user", True)
+        out = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert out["names"] == ["u_fact"] and out["count"] == 1   # only the user tier
+        assert "user body line" in out["markdown"]                # --with-bodies
+
+    def test_memory_recall_and_exclude_dedup(self, tmp_path: Path, capsys, monkeypatch):
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        _write(tmp_path, "a.md", "name: alpha_pkg\ntier: project", "shared topic keyword")
+        _write(tmp_path, "b.md", "name: beta_pkg\ntier: project", "shared topic keyword")
+        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, set())
+        out = json.loads(capsys.readouterr().out)
+        assert set(out["names"]) == {"alpha_pkg", "beta_pkg"}
+        assert "Auto-recalled" in out["markdown"]
+        # exclude one -> only the other survives (dedup), backfill within limit
+        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, {"alpha_pkg"})
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == ["beta_pkg"]
+        # all excluded -> empty bundle, markdown None (hook stays silent)
+        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, {"alpha_pkg", "beta_pkg"})
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == [] and out["markdown"] is None

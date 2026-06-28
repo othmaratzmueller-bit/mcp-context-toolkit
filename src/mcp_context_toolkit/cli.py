@@ -264,6 +264,86 @@ def _cmd_export_studio(rules_dir: Path, memory_dir: Path | None, out_dir: Path) 
     return 0
 
 
+# ---------------- memory (recall + tier-dump for the auto-recall hooks) ----------------
+
+def _load_memory_engine(memory_dir: Path):
+    """Load the memory store (the project dir; each file's frontmatter ``tier:``
+    sets its real tier) plus an optional separate user-tier root
+    (``CONTEXT_USER_MEMORY_DIR``). Returns a MemoryEngine spanning both tiers."""
+    from mcp_context_toolkit.memory import MemoryEngine
+    roots: dict[str, str | Path] = {"project": memory_dir}
+    user = os.environ.get("CONTEXT_USER_MEMORY_DIR")
+    if user and Path(user).expanduser().is_dir():
+        roots["user"] = Path(user).expanduser()
+    return MemoryEngine.from_roots(roots)
+
+
+def _memory_recall_md(memories: list, query: str) -> str:
+    lines = [
+        "INSTRUCTION TO ASSISTANT: Memories relevant to the user's prompt were "
+        "auto-recalled (context-toolkit). Prepend a one-line marker "
+        "`\U0001f9e0 Memory: <names>` in your reply, and call `get_memory(name)` for "
+        "any you need in depth BEFORE answering. Background context — reflects what "
+        "was true when written; verify against code if it names files/flags.",
+        "",
+        f"### Auto-recalled memories (query: {query})",
+        "",
+    ]
+    for m in memories:
+        lines.append(f"- **{m.name}** ({m.tier}) — {m.description}")
+    return "\n".join(lines)
+
+
+def _cmd_memory_recall(memory_dir: Path, query: str, limit: int, exclude: set) -> int:
+    """Top-N memories relevant to ``query`` (keyword + frecency), minus ``exclude``
+    (the hook's already-injected set). Emits JSON {names, markdown, count}."""
+    from mcp_context_toolkit.usage import UsageStore
+    engine = _load_memory_engine(memory_dir)
+    boosts = UsageStore.for_memory_dir(memory_dir).boosts()
+    ranked = engine.recall(query, limit=limit + len(exclude), boost=boosts)
+    hits = [m for m in ranked if m.name not in exclude][:limit]
+    out = {
+        "names": [m.name for m in hits],
+        "markdown": _memory_recall_md(hits, query) if hits else None,
+        "count": len(hits),
+    }
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def _memory_tier_md(memories: list, tier: str, with_bodies: bool) -> str:
+    lines = [
+        "INSTRUCTION TO ASSISTANT: The following are the user-tier memories — "
+        "cross-project facts about the USER and how to work with them. They are "
+        "MAXIMALLY IMPORTANT and always relevant; internalize them now at session "
+        "start and apply them throughout. Prepend `\U0001f9e0 User-Memory geladen` once.",
+        "",
+        f"### {tier}-tier memories (always-loaded)",
+        "",
+    ]
+    for m in memories:
+        lines.append(f"- **{m.name}** — {m.description}")
+        if with_bodies and m.body.strip():
+            lines.append("")
+            lines.append(m.body.strip())
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _cmd_memory_tier(memory_dir: Path, tier: str, with_bodies: bool) -> int:
+    """Dump all memories of ``tier`` (e.g. 'user') — for unconditional load at
+    session start. Emits JSON {names, markdown, count}."""
+    engine = _load_memory_engine(memory_dir)
+    mems = engine.list(tier=tier)  # type: ignore[arg-type]
+    out = {
+        "names": [m.name for m in mems],
+        "markdown": _memory_tier_md(mems, tier, with_bodies) if mems else None,
+        "count": len(mems),
+    }
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def _cmd_bulk_query(
     engine: RulesEngine,
     rtype: str | None,
@@ -392,9 +472,43 @@ def main() -> None:
     parser.add_argument(
         "--memory-dir",
         default=None,
-        help="Memory dir for --export-studio (else CONTEXT_MEMORY_DIR or .context/memory / .claude/memory auto-discovery)",
+        help="Memory dir for --export-studio / --recall / --memory-tier (else CONTEXT_MEMORY_DIR or .context/memory / .claude/memory auto-discovery)",
+    )
+    parser.add_argument(
+        "--recall",
+        metavar="TEXT",
+        default=None,
+        help="Recall top memories relevant to TEXT (UserPromptSubmit hook). Emits JSON {names, markdown, count}.",
+    )
+    parser.add_argument(
+        "--memory-tier",
+        default=None,
+        help="Dump ALL memories of a tier (e.g. 'user') for unconditional load at session start. Emits JSON {names, markdown, count}.",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=6, help="Max memories returned by --recall (default 6).",
+    )
+    parser.add_argument(
+        "--with-bodies", action="store_true",
+        help="Include full memory bodies (used by --memory-tier for the session-start user-memory).",
+    )
+    parser.add_argument(
+        "--exclude", default=None,
+        help="Comma-separated memory names to exclude from --recall (the hook's dedup set).",
     )
     args = parser.parse_args()
+
+    # Memory subcommands (recall / tier-dump) — independent of the rules dir, used
+    # by the auto-recall hooks. Resolve memory dir; emit empty bundle if none.
+    if args.recall is not None or args.memory_tier is not None:
+        memory_dir = _discover_memory_dir(args.memory_dir)
+        if memory_dir is None or not memory_dir.is_dir():
+            print(json.dumps({"names": [], "markdown": None, "count": 0}))
+            sys.exit(0)
+        if args.recall is not None:
+            exclude = set(filter(None, (args.exclude or "").split(",")))
+            sys.exit(_cmd_memory_recall(memory_dir, args.recall, args.limit, exclude))
+        sys.exit(_cmd_memory_tier(memory_dir, args.memory_tier, args.with_bodies))
 
     try:
         rules_dir = _resolve_rules_dir(args.rules_dir)
