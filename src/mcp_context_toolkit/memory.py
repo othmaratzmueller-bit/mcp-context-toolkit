@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from mcp_context_toolkit.core import KnowledgeLoadError, iter_files, parse_frontmatter
 
 MemoryType = Literal["user", "feedback", "project", "reference", "misc"]
-MemoryTier = Literal["user", "project", "unknown"]
+MemoryTier = Literal["core", "user", "project", "unknown"]
 
 _LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _WORD_RE = re.compile(r"[a-z0-9_]+")
@@ -62,11 +62,15 @@ def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
         raw_type = meta["metadata"].get("type")
     tags = meta.get("tags")
     tags = [str(t) for t in tags] if isinstance(tags, list) else []
+    # A frontmatter `tier:` (e.g. a bundled package's core/user/project) overrides
+    # the load-directory default; fall back to the load tier otherwise.
+    fm_tier = meta.get("tier")
+    resolved_tier = fm_tier if fm_tier in ("core", "user", "project") else tier
     return Memory(
         name=str(meta.get("name") or path.stem).strip(),
         description=str(meta.get("description") or "").strip(),
         type=_coerce_type(raw_type),
-        tier=tier,
+        tier=resolved_tier,
         body=body,
         links=sorted(set(_LINK_RE.findall(body))),
         tags=tags,

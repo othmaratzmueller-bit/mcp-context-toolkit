@@ -57,6 +57,13 @@ class TestMemoryEngine:
         assert e.get("missing") is None
         assert [m.name for m in e.list(type="feedback")] == ["a"]
 
+    def test_frontmatter_tier_overrides_load_default(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback\ntier: core", "x")
+        _write(tmp_path, "b.md", "name: b\ntype: project", "y")  # no tier → load default
+        e = MemoryEngine.from_directory(tmp_path)  # load default = project
+        assert e.get("a").tier == "core"      # frontmatter wins
+        assert e.get("b").tier == "project"   # falls back to load default
+
     def test_nested_metadata_type(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a\nmetadata:\n  type: reference", "x")
         e = MemoryEngine.from_directory(tmp_path)

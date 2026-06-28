@@ -4,6 +4,9 @@
 > the *right context at the right time* — file-scoped **rules** and frecency-ranked
 > **memory**, loaded on demand from plain markdown + YAML-frontmatter stores.
 
+**By [Othmar Atzmüller](https://github.com/othmaratzmueller-bit).** MIT-licensed —
+fork freely; a credit back is appreciated.
+
 ## The idea
 
 Long-lived AI coding/agent sessions accumulate context: coding standards, security

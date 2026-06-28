@@ -14,6 +14,7 @@ every member's body must appear verbatim in its package output.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +39,9 @@ def render_package(pkg: dict, members: list[Memory]) -> str:
         f"name: {name}",
         "type: package",
         f"tier: {tier}",
-        f"description: {title}",
+        # json.dumps → YAML-safe double-quoted scalar (titles contain ': ' e.g.
+        # "Prometheus: Datenmodell" which would otherwise break the frontmatter).
+        f"description: {json.dumps(title, ensure_ascii=False)}",
         "members: [" + ", ".join(_slug(m) for m in members) + "]",
         "---",
         "",

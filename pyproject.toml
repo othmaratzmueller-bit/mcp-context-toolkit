@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Generic MCP server: file-scoped rules + frecency-ranked memory recall from plain markdown stores"
 readme = "README.md"
 license = { text = "MIT" }
+authors = [{ name = "Othmar Atzmüller" }]
 requires-python = ">=3.11"
 keywords = ["mcp", "rules", "memory", "frecency", "context", "ai-agents"]
 classifiers = [

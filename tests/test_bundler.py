@@ -57,6 +57,21 @@ class TestWriteBundle:
         assert "type: package" in content
 
 
+class TestRenderPackageYamlSafe:
+    def test_colon_title_frontmatter_stays_valid_yaml(self, tmp_path: Path):
+        # Regression: titles with ': ' (e.g. "Infra/Hardware: GPU") must not break
+        # the package frontmatter — description has to be quoted.
+        from mcp_context_toolkit.core import parse_frontmatter
+        _write(tmp_path, "x.md", "name: x\ntype: feedback\ndescription: D", "body")
+        e = MemoryEngine.from_directory(tmp_path)
+        pkg = {"file": "project/infra.md", "title": "Infra/Hardware: GPU, Prod-HW", "tier": "project", "members": ["x"]}
+        meta, _ = parse_frontmatter(render_package(pkg, [e.get("x")]))
+        assert meta != {}                                        # YAML did NOT break
+        assert meta["members"] == ["x"]                          # members readable
+        assert meta["description"] == "Infra/Hardware: GPU, Prod-HW"
+        assert meta["tier"] == "project"
+
+
 class TestRenderPackage:
     def test_frontmatter_members(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a\ntype: feedback\ndescription: A\ntags: [x, y]", "body")
