@@ -1,0 +1,52 @@
+key: no_dynamic_code_eval
+title: "No Dynamic Code Evaluation"
+short_id: "SEC2"
+
+type: security
+scope: all
+priority: non_negotiable
+modules: [all]
+
+applies_to:
+  files:
+    - "src/**/*.py"
+    - "src/**/*.js"
+    - "src/**/*.ts"
+  triggers:
+    - "eval("
+    - "exec("
+    - "new Function("
+
+summary: |
+  Never turn data into code. eval / exec / new Function on any value that can
+  reach a user input is remote code execution waiting to happen.
+
+content: |
+  ## No Dynamic Code Evaluation (NON-NEGOTIABLE)
+
+  Dynamic code-evaluation builtins (`eval`, `exec`, `new Function`, `setTimeout`
+  with a string) execute their argument as code. If any part of that argument is
+  data — config, a request field, a DB value — it is an injection sink.
+
+  Use explicit dispatch instead: a dict/map of allowed handlers, a parser, or
+  `json.loads` / `JSON.parse` for data.
+
+examples:
+  forbidden:
+    code: |
+      result = eval(request.args["expr"])
+      handler = eval(f"handle_{action}")()
+    why: "User-controlled data executed as code = RCE"
+  required:
+    code: |
+      HANDLERS = {"sum": handle_sum, "avg": handle_avg}
+      result = HANDLERS[action]()      # explicit allow-list dispatch
+    why: "Only pre-declared handlers can run; data never becomes code"
+
+compliance_refs:
+  - standard: "CWE"
+    section: "CWE-95"
+    description: "Improper Neutralization of Directives in Dynamically Evaluated Code"
+
+tags: [injection, rce, eval]
+created: 2026-01-01

@@ -1,0 +1,42 @@
+key: no_dead_code
+title: "No Dead Code — Git Is the Backup"
+short_id: "CQ2"
+
+type: code_quality
+scope: all
+priority: mandatory
+modules: [all]
+
+applies_to:
+  files:
+    - "src/**/*.py"
+    - "src/**/*.js"
+    - "src/**/*.ts"
+
+summary: |
+  Delete commented-out blocks, unreachable code and unused
+  imports/variables/functions. Version control is the history, not comments.
+
+content: |
+  ## No Dead Code (MANDATORY)
+
+  Commented-out code blocks (> 3 lines), unreachable code after `return`/`raise`,
+  and unused imports/variables/functions are forbidden in committed code. They
+  rot, mislead readers, and hide the live path. If you might need it again, that
+  is what git history is for.
+
+examples:
+  forbidden:
+    code: |
+      # old_impl(x)            # kept "just in case"
+      # for row in rows: ...
+      return compute(x)
+      log("unreachable")       # after return
+    why: "Dead lines mislead and drift from reality"
+  required:
+    code: |
+      return compute(x)
+    why: "Only the live path remains; history holds the rest"
+
+tags: [cleanup, maintainability]
+created: 2026-01-01

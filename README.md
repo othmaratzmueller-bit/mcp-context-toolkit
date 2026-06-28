@@ -155,6 +155,25 @@ The note itself. Link related notes with [[their-name]].
 `MEMORY.md` in the memory dir is the human-curated index (skipped as a record);
 `memory_lint` checks it against the actual files.
 
+## Examples — copy to start from zero
+
+`examples/` ships a runnable starting point so you don't face an empty store:
+
+- **`examples/rules/`** — a small, generic **starter pack** (8 rules across
+  `security/`, `code_quality/`, `frontend/`, `workflow/`). Copy it and adapt the
+  globs:
+
+  ```bash
+  cp -r examples/rules/* /path/to/your/.context/rules/
+  ```
+
+- **`examples/memory/`** — the 3-file memory layout (`MEMORY.md` index,
+  `_descriptions.md` catalog, one example package under `core/`) showing the
+  structure `recall` expects.
+
+Both are illustrative defaults, not production policy — see each directory's
+`README.md`.
+
 ## Design principles
 
 - **Read-only engine.** It loads and ranks; it never mutates your stores.

@@ -102,7 +102,7 @@ class TestRulesEngine:
     def test_load_directory_reads_example(self, tmp_path: Path):
         root = tmp_path / ".claude" / "rules" / "security"
         root.mkdir(parents=True)
-        example_source = Path(__file__).parent.parent / "examples" / "no_hardcoded_secrets.yaml"
+        example_source = Path(__file__).parent.parent / "examples" / "rules" / "security" / "no_hardcoded_secrets.yaml"
         (root / "s1.yaml").write_text(example_source.read_text(encoding="utf-8"))
 
         engine = RulesEngine.from_directory(tmp_path / ".claude" / "rules")
@@ -130,7 +130,7 @@ class TestRulesEngine:
         rules = tmp_path / ".claude" / "rules" / "security"
         rules.mkdir(parents=True)
         example = (
-            Path(__file__).parent.parent / "examples" / "no_hardcoded_secrets.yaml"
+            Path(__file__).parent.parent / "examples" / "rules" / "security" / "no_hardcoded_secrets.yaml"
         ).read_text(encoding="utf-8")
         (rules / "a.yaml").write_text(example)
         (rules / "b.yaml").write_text(example)
@@ -216,7 +216,7 @@ class TestFingerprint:
 
 class TestValidateAndFallback:
     def _write_example(self, rules_dir: Path) -> None:
-        src = Path(__file__).parent.parent / "examples" / "no_hardcoded_secrets.yaml"
+        src = Path(__file__).parent.parent / "examples" / "rules" / "security" / "no_hardcoded_secrets.yaml"
         (rules_dir / "s1.yaml").write_text(src.read_text(encoding="utf-8"))
 
     def test_validate_directory_ok(self, tmp_path: Path):

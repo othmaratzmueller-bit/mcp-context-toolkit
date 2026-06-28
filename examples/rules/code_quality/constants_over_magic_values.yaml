@@ -1,0 +1,42 @@
+key: constants_over_magic_values
+title: "Named Constants Instead of Magic Values"
+short_id: "CQ3"
+
+type: code_quality
+scope: all
+priority: recommended
+modules: [all]
+
+applies_to:
+  files:
+    - "src/**/*.py"
+    - "src/**/*.js"
+    - "src/**/*.ts"
+
+summary: |
+  Use enums / named constants for fixed value sets, status codes, keys and
+  defaults. No raw literals driving control flow.
+
+content: |
+  ## Named Constants Instead of Magic Values (RECOMMENDED)
+
+  Repeated string/number literals that drive control flow (statuses, roles,
+  cache keys, HTTP codes, thresholds) become enums or named constants. One
+  definition, one place to change, no silent typo-drift across call sites.
+
+examples:
+  forbidden:
+    code: |
+      if user.role == "admn":        # typo, silently always false
+          ...
+      cache.set("usr:" + id, v)
+    why: "Literals scattered across the codebase drift and typo silently"
+  required:
+    code: |
+      class Role(str, Enum): ADMIN = "admin"
+      if user.role == Role.ADMIN: ...
+      cache.set(USER_KEY.format(id=id), v)
+    why: "Single source of truth; a typo is a NameError, not a silent bug"
+
+tags: [readability, enums]
+created: 2026-01-01

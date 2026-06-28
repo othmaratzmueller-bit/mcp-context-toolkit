@@ -1,0 +1,40 @@
+key: verify_after_change
+title: "Verify After Every Change"
+short_id: "WF1"
+
+type: workflow
+scope: all
+priority: mandatory
+modules: [all]
+
+applies_to:
+  files:
+    - "src/**/*.py"
+    - "src/**/*.js"
+    - "src/**/*.ts"
+
+summary: |
+  After editing code, run the relevant check — tests, type-check, or an import
+  smoke — before claiming it works. No "should work" without a run.
+
+content: |
+  ## Verify After Every Change (MANDATORY)
+
+  A change is not done until it is verified. After an edit, run the cheapest
+  check that proves it: the unit test, a type-check/linter, or at minimum an
+  import/build smoke. Report the actual result — if a check failed, say so with
+  the output; never assert success from reading the diff alone.
+
+examples:
+  forbidden:
+    code: |
+      # edit function, then: "Done — this should work."
+    why: "Unverified claims hide breakage until it reaches the user"
+  required:
+    code: |
+      # edit function, then run: pytest tests/test_x.py  ->  3 passed
+      # report: "Done — 3 tests green."
+    why: "Claim backed by an actual run"
+
+tags: [workflow, testing, verification]
+created: 2026-01-01
