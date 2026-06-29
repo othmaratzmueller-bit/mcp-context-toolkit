@@ -48,13 +48,13 @@ class TestMemoryEngine:
         assert [m.name for m in e.memories] == ["a"]
 
     def test_recall_ranks_by_keyword(self, tmp_path: Path):
-        _write(tmp_path, "a.md", "name: abas_auth\ntype: reference",
-               "ABAS booking and authentication details")
+        _write(tmp_path, "a.md", "name: payroll_auth\ntype: reference",
+               "payroll booking and authentication details")
         _write(tmp_path, "b.md", "name: chat_render\ntype: project",
                "chat bubble rendering")
         e = MemoryEngine.from_directory(tmp_path)
-        hits = e.recall("ABAS authentication", limit=5)
-        assert hits[0].name == "abas_auth"
+        hits = e.recall("payroll authentication", limit=5)
+        assert hits[0].name == "payroll_auth"
 
     def test_recall_empty_query_returns_empty(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a", "x")

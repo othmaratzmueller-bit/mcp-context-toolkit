@@ -33,8 +33,8 @@ class TestCompileGlob:
             ("backend/app/api/routers/chat.py", "backend/app/api/**/*.py", True),
             ("backend/app/api/foo.py", "backend/app/api/**/*.py", True),
             ("backend/app/api/a/b/c/d.py", "backend/app/api/**/*.py", True),
-            ("sps_webapp/static/js/main.js", "sps_webapp/static/**/*.js", True),
-            ("sps_webapp/static/css/main.css", "sps_webapp/static/**/*.js", False),
+            ("web/static/js/main.js", "web/static/**/*.js", True),
+            ("web/static/css/main.css", "web/static/**/*.js", False),
             ("a/b.txt", "a/b.???", True),
             ("a/b.tstx", "a/b.???", False),
             ("a/subdir/b.txt", "a/b.???", False),
@@ -47,7 +47,7 @@ class TestCompileGlob:
 class TestRulesEngine:
     def test_query_for_file_filters_by_glob(self):
         r1 = _make_rule("a", ["backend/**/*.py"])
-        r2 = _make_rule("b", ["sps_webapp/**/*.js"])
+        r2 = _make_rule("b", ["web/**/*.js"])
         r3 = _make_rule("c", ["backend/app/api/**/*.py"])
 
         engine = RulesEngine([r1, r2, r3])
@@ -87,11 +87,11 @@ class TestRulesEngine:
 
     def test_query_filters_by_module_includes_all(self):
         r_all = _make_rule("a", ["**/*"], modules=["all"])
-        r_themis = _make_rule("b", ["**/*"], modules=["themis"])
-        r_prom = _make_rule("c", ["**/*"], modules=["prometheus"])
-        engine = RulesEngine([r_all, r_themis, r_prom])
+        r_mod_a = _make_rule("b", ["**/*"], modules=["module_a"])
+        r_mod_b = _make_rule("c", ["**/*"], modules=["module_b"])
+        engine = RulesEngine([r_all, r_mod_a, r_mod_b])
 
-        result = {r.key for r in engine.query(module="themis")}
+        result = {r.key for r in engine.query(module="module_a")}
         assert result == {"a", "b"}
 
     def test_get_rule_returns_none_for_unknown(self):
@@ -198,7 +198,7 @@ class TestFingerprint:
 
     def test_engine_query_for_file_with_fingerprint(self):
         r1 = _make_rule("a", ["backend/**/*.py"])
-        r2 = _make_rule("b", ["sps_webapp/**/*.js"])
+        r2 = _make_rule("b", ["web/**/*.js"])
         engine = RulesEngine([r1, r2])
 
         matches_a, fp_a = engine.query_for_file_with_fingerprint(
