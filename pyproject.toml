@@ -1,0 +1,40 @@
+[project]
+name = "mcp-context-toolkit"
+version = "1.0.0rc1"
+description = "Generic MCP server: file-scoped rules + frecency-ranked memory recall from plain markdown stores"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Othmar Atzmüller" }]
+requires-python = ">=3.11"
+keywords = ["mcp", "rules", "memory", "frecency", "context", "ai-agents"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+context-toolkit-mcp = "mcp_context_toolkit.mcp_server:main"
+context-toolkit-query = "mcp_context_toolkit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mcp_context_toolkit = ["viewer/*.html"]

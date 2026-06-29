@@ -1,0 +1,43 @@
+{
+  "kind": "context-studio/rules",
+  "stats": {
+    "rules": 3,
+    "by_priority": { "non_negotiable": 1, "mandatory": 1, "recommended": 1 },
+    "by_type": { "security": 1, "code_quality": 1, "frontend": 1 }
+  },
+  "rules": [
+    {
+      "key": "no_hardcoded_secrets",
+      "short_id": "SEC1",
+      "title": "No Hardcoded Secrets",
+      "type": "security",
+      "scope": "backend",
+      "priority": "non_negotiable",
+      "summary": "Never commit credentials in source. Read secrets from the environment or a secret manager — never as a literal in code.",
+      "files": ["src/**/*.py", "app/**/*.py"],
+      "tags": ["secrets", "credentials", "supply_chain"]
+    },
+    {
+      "key": "no_dead_code",
+      "short_id": "CQ2",
+      "title": "No Dead Code — Git Is the Backup",
+      "type": "code_quality",
+      "scope": "all",
+      "priority": "mandatory",
+      "summary": "Delete commented-out blocks, unreachable code and unused imports/variables/functions. Version control is the history, not comments.",
+      "files": ["src/**/*.py", "src/**/*.js", "src/**/*.ts"],
+      "tags": ["cleanup", "maintainability"]
+    },
+    {
+      "key": "escape_user_data_in_html",
+      "short_id": "FE2",
+      "title": "XSS-Safe Rendering — Never Inject User Data as HTML",
+      "type": "frontend",
+      "scope": "frontend",
+      "priority": "non_negotiable",
+      "summary": "Never assign user-derived data to innerHTML/outerHTML or insertAdjacentHTML. Use textContent / createElement so data stays data.",
+      "files": ["src/**/*.js", "src/**/*.ts", "**/*.html"],
+      "tags": ["xss", "frontend", "security"]
+    }
+  ]
+}

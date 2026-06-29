@@ -1,0 +1,37 @@
+key: no_inline_event_handlers
+title: "No Inline Event Handlers"
+short_id: "FE1"
+
+type: frontend
+scope: frontend
+priority: recommended
+modules: [all]
+
+applies_to:
+  files:
+    - "web/**/*.html"
+    - "src/**/*.js"
+
+summary: |
+  Bind events in JavaScript via addEventListener, not through inline
+  onclick=/onload= attributes in HTML.
+
+content: |
+  ## No Inline Event Handlers (RECOMMENDED)
+
+  Inline handlers mix behaviour into markup, bypass a Content-Security-Policy,
+  and are hard to remove. Attach listeners from a script module instead.
+
+examples:
+  forbidden:
+    code: |
+      <button onclick="doThing()">Go</button>
+    why: "Inline JS violates CSP and couples markup to behaviour"
+  required:
+    code: |
+      <button id="go">Go</button>
+      <script>document.getElementById('go').addEventListener('click', doThing)</script>
+    why: "Behaviour bound from JS; markup stays declarative"
+
+tags: [csp, separation_of_concerns]
+created: 2026-01-01

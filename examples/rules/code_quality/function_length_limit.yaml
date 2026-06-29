@@ -1,0 +1,41 @@
+key: function_length_limit
+title: "Function Length Limit"
+short_id: "CQ1"
+
+type: code_quality
+scope: all
+priority: mandatory
+modules: [all]
+
+applies_to:
+  files:
+    - "src/**/*.py"
+  language: python
+
+summary: |
+  Functions longer than ~50 lines must be split into named helpers so the
+  public function reads as a table of contents.
+
+content: |
+  ## Function Length Limit (MANDATORY)
+
+  A function over ~50 lines is hard to test and review. Extract phases into
+  private helpers; the public function should read like a summary of steps.
+
+examples:
+  forbidden:
+    code: |
+      def handle_request(req):
+          # 120 lines of parsing, validation, IO and formatting inline
+          ...
+    why: "One giant function hides control flow and resists unit testing"
+  required:
+    code: |
+      def handle_request(req):
+          data = _parse(req)
+          _validate(data)
+          return _format(_persist(data))
+    why: "Public function is a table of contents; work lives in helpers"
+
+tags: [readability, maintainability]
+created: 2026-01-01

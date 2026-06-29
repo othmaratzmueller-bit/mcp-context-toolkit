@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<!-- Context Studio — offline, zero-dependency viewer for the mcp-context-toolkit.
+     by Othmar Atzmüller · MIT.
+     Two modes:
+       • Review  — load a skill's diff.json (the preview-gate), accept/reject each
+                   proposal, export decision.json (Blob download — no backend).
+       • Browse  — read-only view of memory.json (packages by tier, frecency heat)
+                   and rules.json (rules by category, priority).
+     Data sources, in order: window.CONTEXT_DATA (injected *-data.js) → fetch of
+     ./memory.json|./rules.json|./diff.json (served) → drag-and-drop (file://).
+     XSS-safe: ALL data is rendered via textContent / createElement, never innerHTML
+     with data — the viewer dogfoods the toolkit's own escape_user_data_in_html rule. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Context Studio</title>
+  <style>
+    :root {
+      --bg:#0f1218; --panel:#171b22; --panel2:#1d222b; --line:#2a313d;
+      --fg:#e3e8f0; --muted:#8b94a6; --accent:#7c9cf0; --accent-dim:#3a4a78;
+      --ok:#5fc99a; --warn:#e0b15a; --danger:#d97b86; --merge:#54c1b8; --info:#8b94a6;
+      --core:#7c9cf0; --project:#54c1b8; --user:#e0b15a; --unknown:#8b94a6;
+    }
+    * { box-sizing:border-box; }
+    /* Fill the container EXACTLY (works standalone and inside a fixed-height iframe)
+       so the document never scrolls — only `main` and the drawer do, one scrollbar
+       per pane. min-height:100vh would overflow a shorter iframe and add a spurious
+       document-level scrollbar on top of main's. */
+    html, body { height:100%; }
+    body { margin:0; height:100%; overflow:hidden; display:flex; flex-direction:column;
+           font:14px/1.5 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); }
+    /* Subtle, theme-matched scrollbars (the default chrome looks heavy on dark). */
+    main::-webkit-scrollbar, .drawer::-webkit-scrollbar { width:10px; }
+    main::-webkit-scrollbar-track, .drawer::-webkit-scrollbar-track { background:transparent; }
+    main::-webkit-scrollbar-thumb, .drawer::-webkit-scrollbar-thumb { background:var(--line); border-radius:5px; }
+    main:hover::-webkit-scrollbar-thumb, .drawer:hover::-webkit-scrollbar-thumb { background:var(--accent-dim); }
+    .topbar { display:flex; align-items:center; gap:16px; padding:12px 18px;
+              background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
+    .brand { font-size:15px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
+    .brand .dot { color:var(--accent); }
+    .tabs { display:flex; gap:4px; }
+    .tabs button { padding:6px 14px; background:transparent; border:1px solid transparent;
+                   border-radius:7px; color:var(--muted); font-size:13px; cursor:pointer; }
+    .tabs button.active { color:var(--fg); background:var(--panel2); border-color:var(--line); }
+    .spacer { flex:1; }
+    .search { padding:7px 11px; background:var(--bg); border:1px solid var(--line);
+              border-radius:7px; color:var(--fg); font-size:13px; width:230px; }
+    .btn { padding:7px 13px; border:1px solid var(--accent-dim); background:rgba(124,156,240,.14);
+           color:var(--accent); border-radius:7px; font-size:13px; cursor:pointer; }
+    .btn:hover { background:rgba(124,156,240,.26); }
+    .btn:disabled { opacity:.4; cursor:not-allowed; }
+    .btn.ghost { border-color:var(--line); background:transparent; color:var(--muted); }
+    .btn.ghost:hover { background:var(--panel2); color:var(--fg); }
+    main { flex:1; overflow-y:auto; padding:18px; }
+    .wrap { max-width:980px; margin:0 auto; }
+    .summary { color:var(--muted); font-size:13px; margin-bottom:14px; display:flex;
+               align-items:center; gap:14px; flex-wrap:wrap; }
+    .summary b { color:var(--fg); }
+    .subtabs { display:flex; gap:6px; margin-bottom:14px; }
+    .subtabs button { padding:5px 12px; background:var(--panel); border:1px solid var(--line);
+                      border-radius:6px; color:var(--muted); font-size:12px; cursor:pointer; }
+    .subtabs button.active { color:var(--fg); border-color:var(--accent-dim); }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:9px;
+            padding:13px 15px; margin-bottom:10px; }
+    .card .head { display:flex; align-items:center; gap:10px; }
+    .card .title { font-weight:600; font-size:13.5px; word-break:break-word; }
+    .card .detail { color:var(--muted); font-size:12.5px; margin-top:6px; white-space:pre-wrap; }
+    .badge { font-size:10.5px; padding:2px 8px; border-radius:20px; font-weight:600;
+             text-transform:uppercase; letter-spacing:.03em; flex:none; }
+    .ba-prune,.ba-flag { background:rgba(217,123,134,.16); color:var(--danger); }
+    .ba-compact { background:rgba(224,177,90,.16); color:var(--warn); }
+    .ba-merge { background:rgba(84,193,184,.16); color:var(--merge); }
+    .ba-reclassify,.ba-rename,.ba-reorder { background:rgba(124,156,240,.16); color:var(--accent); }
+    .ba-link_fix,.ba-normalize { background:rgba(139,148,166,.16); color:var(--info); }
+    .tier-core { background:rgba(124,156,240,.16); color:var(--core); }
+    .tier-project { background:rgba(84,193,184,.16); color:var(--project); }
+    .tier-user { background:rgba(224,177,90,.16); color:var(--user); }
+    .tier-unknown { background:rgba(139,148,166,.16); color:var(--unknown); }
+    .prio-non_negotiable { background:rgba(217,123,134,.16); color:var(--danger); }
+    .prio-mandatory { background:rgba(224,177,90,.16); color:var(--warn); }
+    .prio-recommended { background:rgba(139,148,166,.16); color:var(--info); }
+    .meta { color:var(--muted); font-size:11.5px; flex:none; }
+    .chk { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; flex:none; }
+    .diff { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:9px; }
+    .diff .col { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px 10px;
+                 font:12px/1.45 ui-monospace,Menlo,monospace; white-space:pre-wrap; word-break:break-word;
+                 max-height:220px; overflow-y:auto; }
+    .diff .col h4 { margin:0 0 5px; font:600 10px/1 system-ui; text-transform:uppercase;
+                    letter-spacing:.04em; color:var(--muted); }
+    .col.before { border-left:2px solid var(--danger); }
+    .col.after { border-left:2px solid var(--ok); }
+    .move { margin-top:8px; font:12px/1.4 ui-monospace,monospace; color:var(--fg); }
+    .move .arrow { color:var(--accent); margin:0 7px; }
+    .evidence { margin-top:8px; padding:7px 10px; background:var(--bg); border-radius:6px;
+                border-left:2px solid var(--muted); font-size:12px; color:var(--muted); white-space:pre-wrap; }
+    .heat { display:inline-block; width:60px; height:6px; background:var(--line); border-radius:3px;
+            overflow:hidden; vertical-align:middle; }
+    .heat i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--warn)); }
+    .row { display:flex; align-items:center; gap:11px; padding:9px 13px; background:var(--panel);
+           border:1px solid var(--line); border-radius:8px; margin-bottom:7px; cursor:pointer; }
+    .row:hover { border-color:var(--accent-dim); }
+    .row .nm { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .row .desc { color:var(--muted); font-size:12px; flex:1; overflow:hidden; text-overflow:ellipsis;
+                 white-space:nowrap; }
+    .group-title { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+                   margin:16px 0 8px; display:flex; gap:8px; align-items:center; }
+    .empty { text-align:center; color:var(--muted); padding:60px 20px; }
+    .drop { border:2px dashed var(--line); border-radius:12px; padding:48px 24px; text-align:center;
+            color:var(--muted); cursor:pointer; }
+    .drop.over { border-color:var(--accent); color:var(--fg); background:var(--panel); }
+    .drop input { display:none; }
+    .drawer { position:fixed; top:0; right:0; width:min(560px,92vw); height:100vh; background:var(--panel);
+              border-left:1px solid var(--line); padding:18px 20px; overflow-y:auto; transform:translateX(100%);
+              transition:transform .18s ease; z-index:30; }
+    .drawer.open { transform:translateX(0); }
+    .drawer h2 { margin:0 0 3px; font-size:16px; word-break:break-word; }
+    .drawer .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
+    .drawer pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
+                  white-space:pre-wrap; word-break:break-word; font:12.5px/1.5 ui-monospace,monospace; }
+    .drawer .close-btn { position:absolute; top:14px; right:16px; background:transparent; border:none;
+                         color:var(--muted); font-size:22px; cursor:pointer; line-height:1; }
+    .drawer .close-btn:hover { color:var(--fg); }
+    .scrim { position:fixed; inset:0; background:rgba(0,0,0,.45); opacity:0; pointer-events:none;
+             transition:opacity .18s; z-index:20; }
+    .scrim.open { opacity:1; pointer-events:auto; }
+    .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+    .chip { font-size:11px; padding:2px 9px; background:var(--bg); border:1px solid var(--line);
+            border-radius:16px; color:var(--muted); }
+    .ledger { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:14px 16px;
+              white-space:pre-wrap; word-break:break-word; font:12.5px/1.55 ui-monospace,Menlo,monospace;
+              color:var(--fg); }
+    footer { flex:none; padding:9px 18px; border-top:1px solid var(--line); background:var(--panel);
+             color:var(--muted); font-size:11.5px; display:flex; gap:8px; align-items:center; }
+    footer a { color:var(--accent); text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand">Context <span class="dot">●</span> Studio</span>
+    <div class="tabs">
+      <button id="tab-review" class="active">Review</button>
+      <button id="tab-browse">Browse</button>
+      <button id="tab-pending">Pending</button>
+    </div>
+    <span class="spacer"></span>
+    <input id="search" class="search" placeholder="Filter…" autocomplete="off">
+    <button id="export" class="btn" disabled>Export decision.json</button>
+  </div>
+
+  <main><div class="wrap" id="content"></div></main>
+
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer">
+    <button class="close-btn" id="drawer-close" aria-label="Close">×</button>
+    <div id="drawer-body"></div>
+  </aside>
+
+  <footer>
+    <span>Context Studio — by <a href="https://github.com/othmaratzmueller-bit" target="_blank" rel="noopener">Othmar Atzmüller</a></span>
+    <span>·</span>
+    <a href="https://github.com/othmaratzmueller-bit/mcp-context-toolkit" target="_blank" rel="noopener">mcp-context-toolkit</a>
+    <span>· MIT</span>
+    <span class="spacer" style="flex:1"></span>
+    <span id="status"></span>
+  </footer>
+
+  <script>
+  "use strict";
+  // ---- tiny DOM builder — text always via textContent (XSS-safe by construction) ----
+  function el(tag, props, ...kids) {
+    const n = document.createElement(tag);
+    if (props) for (const k in props) {
+      if (k === "class") n.className = props[k];
+      else if (k === "text") n.textContent = props[k];
+      else if (k === "onclick") n.onclick = props[k];
+      else if (k === "html") throw new Error("innerHTML is forbidden for data");
+      else n.setAttribute(k, props[k]);
+    }
+    for (const c of kids) if (c != null) n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    return n;
+  }
+  const $ = id => document.getElementById(id);
+  const clear = node => { while (node.firstChild) node.removeChild(node.firstChild); };
+
+  const STATE = { mode:"review", browseTab:"memory", data:{}, q:"", decisions:{} };
+
+  // ---------------- data loading (injected → fetch → drop) ----------------
+  // Injected CONTEXT_DATA wins PER KEY; any data key it does not supply is still
+  // fetched. So a host can inject only the hooks (fetchBody/fetchPending) and the
+  // viewer still loads memory.json/rules.json from disk — while a host that injects
+  // full data short-circuits the fetch for those keys (no wasted requests).
+  async function loadData() {
+    const out = { ...(window.CONTEXT_DATA || {}) };
+    for (const [key, file] of [["memory","memory.json"],["rules","rules.json"],["diff","diff.json"]]) {
+      if (out[key]) continue;
+      try { const r = await fetch(file, { cache:"no-store" }); if (r.ok) out[key] = await r.json(); }
+      catch (_) { /* file:// or missing — fall through to drop zone */ }
+    }
+    return out;
+  }
+
+  // ---------------- REVIEW (diff.json preview-gate) ----------------
+  function renderReview() {
+    const c = $("content"); clear(c);
+    const diff = STATE.data.diff;
+    if (!diff || !Array.isArray(diff.items) || !diff.items.length) { renderDropZone(c); return; }
+
+    // Seed each item's accept/reject from its `default` (default true unless the
+    // proposal explicitly sets default:false, e.g. a flagged-for-human item) so
+    // the checkbox, the accepted count and the exported decision.json all agree.
+    for (const it of diff.items) {
+      if (STATE.decisions[it.id] === undefined) STATE.decisions[it.id] = (it.default !== false);
+    }
+
+    const items = filterItems(diff.items);
+    const accepted = items.filter(it => STATE.decisions[it.id] !== false).length;
+
+    const summary = el("div", { class:"summary" });
+    summary.appendChild(el("span", {}, el("b", { text:String(diff.items.length) }), " proposals"));
+    if (diff.tool) summary.appendChild(el("span", { class:"badge ba-merge", text:diff.tool }));
+    if (diff.summary) summary.appendChild(el("span", { text:diff.summary }));
+    summary.appendChild(el("span", {}, el("b", { id:"acc-count", text:String(accepted) }), " accepted"));
+    summary.appendChild(el("button", { class:"btn ghost", onclick:()=>{ setAll(diff.items,true); } }, "Accept all"));
+    summary.appendChild(el("button", { class:"btn ghost", onclick:()=>{ setAll(diff.items,false); } }, "Reject all"));
+    c.appendChild(summary);
+
+    if (!items.length) { c.appendChild(el("div", { class:"empty", text:"No proposals match the filter." })); return; }
+    for (const it of items) c.appendChild(reviewCard(it));
+    updateExport();
+  }
+
+  function reviewCard(it) {
+    const op = it.op || "change";
+    const card = el("div", { class:"card" });
+    const head = el("div", { class:"head" });
+    const chk = el("input", { type:"checkbox", class:"chk" });
+    chk.checked = STATE.decisions[it.id] !== false;
+    chk.onchange = () => { STATE.decisions[it.id] = chk.checked; updateExport(); updateAccCount(); };
+    head.appendChild(chk);
+    head.appendChild(el("span", { class:"badge ba-" + op, text:op }));
+    head.appendChild(el("span", { class:"title", text:it.title || it.id || "(unnamed)" }));
+    if (typeof it.saved_bytes === "number") {
+      const sign = it.saved_bytes >= 0 ? "−" : "+";
+      head.appendChild(el("span", { class:"meta", text:sign + Math.abs(it.saved_bytes) + " B" }));
+    }
+    card.appendChild(head);
+
+    if (it.detail) card.appendChild(el("div", { class:"detail", text:it.detail }));
+    if (it.from || it.to) {
+      const m = el("div", { class:"move" });
+      m.appendChild(document.createTextNode(it.from || "—"));
+      m.appendChild(el("span", { class:"arrow", text:"→" }));
+      m.appendChild(document.createTextNode(it.to || "—"));
+      card.appendChild(m);
+    }
+    if (it.before != null || it.after != null) {
+      const d = el("div", { class:"diff" });
+      d.appendChild(el("div", { class:"col before" }, el("h4", { text:"before" }), document.createTextNode(it.before || "")));
+      d.appendChild(el("div", { class:"col after" }, el("h4", { text:"after" }), document.createTextNode(it.after || "")));
+      card.appendChild(d);
+    }
+    if (it.evidence) card.appendChild(el("div", { class:"evidence", text:it.evidence }));
+    return card;
+  }
+
+  function setAll(items, val) {
+    for (const it of items) { STATE.decisions[it.id] = val; }
+    renderReview();
+  }
+  function updateAccCount() {
+    const diff = STATE.data.diff; if (!diff || !Array.isArray(diff.items)) return;
+    const n = filterItems(diff.items).filter(it => STATE.decisions[it.id] !== false).length;
+    const span = $("acc-count"); if (span) span.textContent = String(n);
+  }
+  function updateExport() {
+    const has = STATE.data.diff && Array.isArray(STATE.data.diff.items) && STATE.data.diff.items.length;
+    $("export").disabled = !has;
+  }
+
+  function exportDecision() {
+    const diff = STATE.data.diff; if (!diff || !Array.isArray(diff.items)) return;
+    const accepted = [], rejected = [];
+    for (const it of diff.items) (STATE.decisions[it.id] !== false ? accepted : rejected).push(it.id);
+    const decision = { kind:"context-studio/decision", tool:diff.tool || null, accepted, rejected };
+    const blob = new Blob([JSON.stringify(decision, null, 2)], { type:"application/json" });
+    const a = el("a", { href:URL.createObjectURL(blob), download:"decision.json" });
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+    setStatus(accepted.length + " accepted / " + rejected.length + " rejected → decision.json");
+  }
+
+  function renderDropZone(c) {
+    const dz = el("div", { class:"drop" },
+      el("div", { text:"Drop a diff.json here, or click to choose" }),
+      el("div", { class:"meta", text:"a skill's preview-gate proposal (context-dream / prune / compact / classify)" }));
+    const input = el("input", { type:"file", accept:".json,application/json" });
+    input.onchange = e => { if (e.target.files[0]) readDiffFile(e.target.files[0]); };
+    dz.appendChild(input);
+    dz.onclick = () => input.click();
+    dz.ondragover = e => { e.preventDefault(); dz.classList.add("over"); };
+    dz.ondragleave = () => dz.classList.remove("over");
+    dz.ondrop = e => { e.preventDefault(); dz.classList.remove("over"); if (e.dataTransfer.files[0]) readDiffFile(e.dataTransfer.files[0]); };
+    c.appendChild(dz);
+  }
+  function readDiffFile(file) {
+    const r = new FileReader();
+    r.onload = () => {
+      try { STATE.data.diff = JSON.parse(r.result); STATE.decisions = {}; setStatus("loaded " + file.name); renderReview(); }
+      catch (err) { setStatus("invalid JSON: " + err.message); }
+    };
+    r.readAsText(file);
+  }
+
+  // ---------------- BROWSE (memory.json + rules.json) ----------------
+  function renderBrowse() {
+    const c = $("content"); clear(c);
+    const st = el("div", { class:"subtabs" });
+    st.appendChild(subtabBtn("memory", "Memory"));
+    st.appendChild(subtabBtn("rules", "Rules"));
+    c.appendChild(st);
+    if (STATE.browseTab === "memory") renderMemory(c); else renderRules(c);
+  }
+  function subtabBtn(key, label) {
+    const b = el("button", { class:STATE.browseTab === key ? "active" : "", text:label });
+    b.onclick = () => { STATE.browseTab = key; renderBrowse(); };
+    return b;
+  }
+
+  function renderMemory(c) {
+    const mem = STATE.data.memory;
+    if (!mem || !Array.isArray(mem.packages)) { c.appendChild(el("div", { class:"empty", text:"No memory.json — run: context-toolkit-query --export-studio <dir>" })); return; }
+    const pkgs = (mem.packages || []).filter(matchPkg);
+    const maxHeat = Math.max(0.001, ...pkgs.map(p => p.heat || 0));
+    if (mem.stats) {
+      const s = el("div", { class:"summary" });
+      s.appendChild(el("span", {}, el("b", { text:String(mem.stats.packages) }), " packages"));
+      s.appendChild(el("span", {}, el("b", { text:String(mem.stats.members) }), " memories"));
+      s.appendChild(el("span", { text:fmtBytes(mem.stats.bytes) }));
+      c.appendChild(s);
+    }
+    const tiers = ["core","project","user","unknown"];
+    const byTier = {}; for (const p of pkgs) (byTier[p.tier] = byTier[p.tier] || []).push(p);
+    let shown = 0;
+    for (const t of tiers) {
+      const list = byTier[t]; if (!list || !list.length) continue;
+      c.appendChild(el("div", { class:"group-title" }, el("span", { class:"badge tier-"+t, text:t }), String(list.length) + " packages"));
+      for (const p of list) { c.appendChild(memRow(p, maxHeat)); shown++; }
+    }
+    if (!shown) c.appendChild(el("div", { class:"empty", text:"No packages match the filter." }));
+  }
+  function memRow(p, maxHeat) {
+    const row = el("div", { class:"row", onclick:()=>openPackage(p) });
+    row.appendChild(el("span", { class:"badge tier-"+p.tier, text:p.tier }));
+    row.appendChild(el("span", { class:"nm", text:p.name }));
+    row.appendChild(el("span", { class:"desc", text:p.description || "" }));
+    row.appendChild(el("span", { class:"meta", text:(p.member_count||0)+" mem · "+fmtBytes(p.bytes) }));
+    const heat = el("span", { class:"heat" }); heat.appendChild(el("i"));
+    heat.firstChild.style.width = Math.round(100 * (p.heat||0) / maxHeat) + "%";
+    row.appendChild(heat);
+    return row;
+  }
+  function openPackage(p) {
+    const b = $("drawer-body"); clear(b);
+    b.appendChild(el("h2", { text:p.name }));
+    b.appendChild(el("div", { class:"sub", text:p.tier + " · " + (p.type||"") + " · " + (p.member_count||0) + " memories · heat " + (p.heat||0).toFixed(2) + " (opens " + (p.opens||0) + ", recalls " + (p.recalls||0) + ")" }));
+    if (p.description) b.appendChild(el("div", { class:"detail", text:p.description }));
+    if (p.members && p.members.length) {
+      const ch = el("div", { class:"chips" });
+      for (const m of p.members) ch.appendChild(el("span", { class:"chip", text:m }));
+      b.appendChild(ch);
+    }
+    if (p.links && p.links.length) {
+      b.appendChild(el("div", { class:"group-title", text:"links" }));
+      const ch = el("div", { class:"chips" });
+      for (const l of p.links) ch.appendChild(el("span", { class:"chip", text:"[["+l+"]]" }));
+      b.appendChild(ch);
+    }
+    appendBodySection(b, p);
+    openDrawer();
+  }
+
+  // Drill down to a package's full body (incl. its `## <member>` sections). The
+  // body is NOT in the metadata snapshot — it is host-supplied: window.CONTEXT_DATA
+  // .fetchBody(name) -> Promise<string>, or a pre-injected p.body string. Without
+  // either (pure offline), the section is omitted. Rendered as text (XSS-safe).
+  function appendBodySection(b, p) {
+    const canFetch = typeof STATE.data.fetchBody === "function";
+    if (!canFetch && p.body == null) return;
+    b.appendChild(el("div", { class:"group-title", text:"content" }));
+    const holder = el("div", {});
+    b.appendChild(holder);
+    const show = text => {
+      clear(holder);
+      if (!text || !text.trim()) { holder.appendChild(el("div", { class:"empty", text:"(empty)" })); return; }
+      holder.appendChild(el("pre", { text:text }));
+    };
+    if (p.body != null) { show(p.body); return; }
+    const btn = el("button", { class:"btn ghost" }, "Show content");
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = "Loading…";
+      try { show(await STATE.data.fetchBody(p.name)); }
+      catch (err) { clear(holder); holder.appendChild(el("div", { class:"empty", text:"Could not load: " + err.message })); }
+    };
+    holder.appendChild(btn);
+  }
+
+  function renderRules(c) {
+    const rl = STATE.data.rules;
+    if (!rl || !Array.isArray(rl.rules)) { c.appendChild(el("div", { class:"empty", text:"No rules.json — run: context-toolkit-query --export-studio <dir>" })); return; }
+    const rules = (rl.rules || []).filter(matchRule);
+    if (rl.stats) {
+      const s = el("div", { class:"summary" });
+      s.appendChild(el("span", {}, el("b", { text:String(rl.stats.rules) }), " rules"));
+      for (const k in (rl.stats.by_priority||{})) s.appendChild(el("span", { class:"badge prio-"+k, text:k+" "+rl.stats.by_priority[k] }));
+      c.appendChild(s);
+    }
+    const byType = {}; for (const r of rules) (byType[r.type] = byType[r.type] || []).push(r);
+    let shown = 0;
+    for (const t of Object.keys(byType).sort()) {
+      c.appendChild(el("div", { class:"group-title", text:t + " · " + byType[t].length }));
+      for (const r of byType[t]) { c.appendChild(ruleRow(r)); shown++; }
+    }
+    if (!shown) c.appendChild(el("div", { class:"empty", text:"No rules match the filter." }));
+  }
+  function ruleRow(r) {
+    const row = el("div", { class:"row", onclick:()=>openRule(r) });
+    if (r.short_id) row.appendChild(el("span", { class:"badge ba-reclassify", text:r.short_id }));
+    row.appendChild(el("span", { class:"nm", text:r.title }));
+    row.appendChild(el("span", { class:"desc", text:r.summary || "" }));
+    row.appendChild(el("span", { class:"badge prio-"+r.priority, text:r.priority }));
+    return row;
+  }
+  function openRule(r) {
+    const b = $("drawer-body"); clear(b);
+    b.appendChild(el("h2", { text:r.title }));
+    b.appendChild(el("div", { class:"sub", text:(r.short_id?r.short_id+" · ":"") + r.key + " · " + r.scope + "/" + r.type + " · " + r.priority }));
+    if (r.summary) b.appendChild(el("pre", { text:r.summary }));
+    if (r.files && r.files.length) {
+      b.appendChild(el("div", { class:"group-title", text:"applies to" }));
+      const ch = el("div", { class:"chips" });
+      for (const f of r.files) ch.appendChild(el("span", { class:"chip", text:f }));
+      b.appendChild(ch);
+    }
+    if (r.tags && r.tags.length) {
+      b.appendChild(el("div", { class:"group-title", text:"tags" }));
+      const ch = el("div", { class:"chips" });
+      for (const t of r.tags) ch.appendChild(el("span", { class:"chip", text:t }));
+      b.appendChild(ch);
+    }
+    openDrawer();
+  }
+
+  // ---------------- PENDING (consolidation flag-ledger) ----------------
+  // The persistent "human decides" backlog a consolidation pass writes but does
+  // NOT auto-resolve. Host-injectable: window.CONTEXT_DATA.pending (a string) or
+  // .fetchPending() (-> Promise<string>). Rendered as plain text (XSS-safe).
+  async function renderPending() {
+    const c = $("content"); clear(c);
+    c.appendChild(el("div", { class:"summary" }, el("span", {
+      text:"Pending — items a consolidation pass flagged for human decision (not auto-resolved)." })));
+    const body = el("div", {});
+    c.appendChild(body);
+
+    let text = STATE.data.pending;
+    if (text == null && typeof STATE.data.fetchPending === "function") {
+      body.appendChild(el("div", { class:"empty", text:"Loading…" }));
+      try { text = await STATE.data.fetchPending(); }
+      catch (err) { clear(body); body.appendChild(el("div", { class:"empty", text:"Could not load pending: " + err.message })); return; }
+      clear(body);
+    }
+    if (text == null) {
+      body.appendChild(el("div", { class:"empty", text:"No pending ledger — a host supplies it via CONTEXT_DATA.fetchPending() or .pending." }));
+      return;
+    }
+    if (!text.trim()) { body.appendChild(el("div", { class:"empty", text:"Nothing pending — the ledger is empty." })); return; }
+    body.appendChild(el("pre", { class:"ledger", text:text }));
+  }
+
+  // ---------------- filters / helpers ----------------
+  function filterItems(items) {
+    if (!STATE.q) return items;
+    const q = STATE.q;
+    return items.filter(it => (
+      (it.id||"") + (it.title||"") + (it.op||"") + (it.detail||"")
+    ).toLowerCase().includes(q));
+  }
+  function matchPkg(p) {
+    if (!STATE.q) return true;
+    return ((p.name||"")+(p.description||"")+(p.tier||"")+(p.members||[]).join(" ")).toLowerCase().includes(STATE.q);
+  }
+  function matchRule(r) {
+    if (!STATE.q) return true;
+    return ((r.key||"")+(r.title||"")+(r.summary||"")+(r.short_id||"")+(r.tags||[]).join(" ")).toLowerCase().includes(STATE.q);
+  }
+  function fmtBytes(n) { n = n||0; return n < 1024 ? n+" B" : (n/1024).toFixed(1)+" KB"; }
+  function setStatus(t) { $("status").textContent = t || ""; }
+
+  function openDrawer() { $("drawer").classList.add("open"); $("scrim").classList.add("open"); }
+  function closeDrawer() { $("drawer").classList.remove("open"); $("scrim").classList.remove("open"); }
+
+  // ---------------- routing ----------------
+  function render() {
+    $("tab-review").classList.toggle("active", STATE.mode === "review");
+    $("tab-browse").classList.toggle("active", STATE.mode === "browse");
+    $("tab-pending").classList.toggle("active", STATE.mode === "pending");
+    $("export").style.display = STATE.mode === "review" ? "" : "none";
+    if (STATE.mode === "review") renderReview();
+    else if (STATE.mode === "browse") renderBrowse();
+    else renderPending();
+  }
+
+  $("tab-review").onclick = () => { STATE.mode = "review"; render(); };
+  $("tab-browse").onclick = () => { STATE.mode = "browse"; render(); };
+  $("tab-pending").onclick = () => { STATE.mode = "pending"; render(); };
+  $("search").addEventListener("input", e => { STATE.q = e.target.value.trim().toLowerCase(); render(); });
+  $("export").onclick = exportDecision;
+  $("drawer-close").onclick = closeDrawer;
+  $("scrim").onclick = closeDrawer;
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+
+  // ---------------- boot ----------------
+  (async function () {
+    STATE.data = await loadData();
+    const has = k => STATE.data[k] && (STATE.data[k].items || STATE.data[k].packages || STATE.data[k].rules);
+    // Open on whichever mode has data; default review.
+    if (!has("diff") && (has("memory") || has("rules"))) STATE.mode = "browse";
+    const parts = [];
+    if (STATE.data.diff && STATE.data.diff.items) parts.push(STATE.data.diff.items.length + " proposals");
+    if (STATE.data.memory && STATE.data.memory.packages) parts.push(STATE.data.memory.packages.length + " packages");
+    if (STATE.data.rules && STATE.data.rules.rules) parts.push(STATE.data.rules.rules.length + " rules");
+    setStatus(parts.join(" · "));
+    render();
+  })();
+  </script>
+</body>
+</html>

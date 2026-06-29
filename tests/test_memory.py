@@ -1,0 +1,338 @@
+import json
+import multiprocessing
+from pathlib import Path
+
+import pytest
+
+from mcp_context_toolkit import cli
+from mcp_context_toolkit.core import parse_frontmatter
+from mcp_context_toolkit.memory import MemoryEngine
+from mcp_context_toolkit.usage import UsageStore
+
+
+def _hammer_opens(path_str: str, n: int) -> None:
+    """Module-level worker (must be importable for multiprocessing 'spawn')."""
+    store = UsageStore(Path(path_str))
+    for _ in range(n):
+        store.record_open("x")
+
+
+def _write(d: Path, name: str, fm: str, body: str) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(f"---\n{fm}\n---\n\n{body}\n", encoding="utf-8")
+
+
+class TestParseFrontmatter:
+    def test_no_frontmatter(self):
+        meta, body = parse_frontmatter("just body\nmore")
+        assert meta == {}
+        assert body == "just body\nmore"
+
+    def test_simple(self):
+        meta, body = parse_frontmatter("---\nname: x\ntype: feedback\n---\n\nhello")
+        assert meta["name"] == "x"
+        assert meta["type"] == "feedback"
+        assert body == "hello"
+
+    def test_bad_yaml_degrades_not_raises(self):
+        meta, body = parse_frontmatter("---\nname: [unclosed\n---\nbody")
+        assert meta == {}
+        assert "body" in body
+
+
+class TestMemoryEngine:
+    def test_load_skips_memory_md(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback", "alpha content")
+        (tmp_path / "MEMORY.md").write_text("# index\n- [a](a.md)\n", encoding="utf-8")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert [m.name for m in e.memories] == ["a"]
+
+    def test_recall_ranks_by_keyword(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: payroll_auth\ntype: reference",
+               "payroll booking and authentication details")
+        _write(tmp_path, "b.md", "name: chat_render\ntype: project",
+               "chat bubble rendering")
+        e = MemoryEngine.from_directory(tmp_path)
+        hits = e.recall("payroll authentication", limit=5)
+        assert hits[0].name == "payroll_auth"
+
+    def test_recall_empty_query_returns_empty(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a", "x")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.recall("   ") == []
+
+    def test_recall_matches_word_start_not_substring(self, tmp_path: Path):
+        # The matcher anchors a term to a word start: it follows forward-stems
+        # and snake_case parts, but ignores incidental substrings.
+        _write(tmp_path, "deploy.md", "name: deploy_workflow\ntype: feedback",
+               "deployment notes")
+        _write(tmp_path, "asset.md", "name: asset_registry\ntype: project",
+               "asset bookkeeping")
+        e = MemoryEngine.from_directory(tmp_path)
+        # "deploy" forward-stems onto "deployment" + the snake_case name part…
+        assert [m.name for m in e.recall("deploy")] == ["deploy_workflow"]
+        # …"workflow" reaches the snake_case tail of deploy_workflow…
+        assert [m.name for m in e.recall("workflow")] == ["deploy_workflow"]
+        # …but "set" must NOT leak into "asset" (the old substring false positive)
+        assert e.recall("set") == []
+
+    def test_get_and_list_by_type(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback", "x")
+        _write(tmp_path, "b.md", "name: b\ntype: project", "y")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("a").name == "a"
+        assert e.get("missing") is None
+        assert [m.name for m in e.list(type="feedback")] == ["a"]
+
+    def test_frontmatter_tier_overrides_load_default(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback\ntier: core", "x")
+        _write(tmp_path, "b.md", "name: b\ntype: project", "y")  # no tier → load default
+        e = MemoryEngine.from_directory(tmp_path)  # load default = project
+        assert e.get("a").tier == "core"      # frontmatter wins
+        assert e.get("b").tier == "project"   # falls back to load default
+
+    def test_nested_metadata_type(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\nmetadata:\n  type: reference", "x")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("a").type == "reference"
+
+    def test_links_extracted_from_body(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a", "links to [[b]] and [[c]]")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("a").links == ["b", "c"]
+
+    def test_tier_precedence_project_wins(self, tmp_path: Path):
+        proj = tmp_path / "proj"
+        user = tmp_path / "user"
+        _write(proj, "dup.md", "name: dup\ntype: project", "PROJECT body")
+        _write(user, "dup.md", "name: dup\ntype: feedback", "USER body")
+        _write(user, "only_user.md", "name: only_user\ntype: user", "user only")
+        e = MemoryEngine.from_roots({"project": proj, "user": user})
+        dup = e.get("dup")
+        assert dup.tier == "project"
+        assert "PROJECT" in dup.body
+        assert e.get("only_user").tier == "user"
+        assert e.list(tier="user") == [m for m in e.memories if m.name == "only_user"]
+
+    def test_lint_reports_broken_links(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a", "see [[b]] and [[ghost]]")
+        _write(tmp_path, "b.md", "name: b", "hi")
+        (tmp_path / "MEMORY.md").write_text("- [a](a.md)\n- [b](b.md)\n", encoding="utf-8")
+        e = MemoryEngine.from_directory(tmp_path)
+        lint = e.lint()
+        assert lint["broken_links"]["a"] == ["ghost"]
+        assert lint["total"] == 2
+        assert lint["orphans"] == []
+
+    def test_member_link_resolves_to_package(self, tmp_path: Path):
+        # A package absorbs old atomic slugs as `members:`; links to those slugs
+        # (the pre-bundle names) must resolve to the package, not break — incl.
+        # a kebab-cased link folding onto a snake-cased member.
+        _write(tmp_path, "pkg.md",
+               "name: sec_pkg\nmembers: [old_force_local, old_pii_once]",
+               "see [[old_pii_once]]")
+        _write(tmp_path, "other.md", "name: other",
+               "ref [[old_force_local]] and [[reference-kebab-member]]")
+        _write(tmp_path, "kebab.md",
+               "name: kebab_pkg\nmembers: [reference_kebab_member]", "x")
+        (tmp_path / "MEMORY.md").write_text(
+            "- [sec_pkg](pkg.md)\n- [other](other.md)\n- [kebab_pkg](kebab.md)\n",
+            encoding="utf-8")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.lint()["broken_links"] == {}        # every [[member]] resolved
+        assert e.get("old_pii_once").name == "sec_pkg"          # followable
+        assert e.get("reference-kebab-member").name == "kebab_pkg"  # kebab input
+
+    def test_member_unknown_slug_still_breaks(self, tmp_path: Path):
+        # A link to a slug that is no member of any package still flags (Tier 3).
+        _write(tmp_path, "pkg.md", "name: pkg\nmembers: [known]",
+               "see [[known]] and [[truly_gone]]")
+        (tmp_path / "MEMORY.md").write_text("- [pkg](pkg.md)\n", encoding="utf-8")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.lint()["broken_links"]["pkg"] == ["truly_gone"]
+
+    def test_member_owner_cache_invalidated_across_loads(self, tmp_path: Path):
+        # The member-owner map is cached, but a second load_directory must
+        # invalidate it — a member defined only in the later-loaded tier still
+        # resolves. (Probing after the first load forces the cache to populate.)
+        proj = tmp_path / "proj"
+        user = tmp_path / "user"
+        _write(proj, "p.md", "name: proj_pkg\ntype: project", "x")
+        _write(user, "u.md",
+               "name: user_pkg\ntype: user\nmembers: [old_user_slug]", "y")
+        e = MemoryEngine()
+        e.load_directory(proj, tier="project")
+        assert e.get("old_user_slug") is None        # caches an empty owner map
+        e.load_directory(user, tier="user")           # must drop that stale cache
+        assert e.get("old_user_slug").name == "user_pkg"
+
+    def test_lint_reports_orphans_and_stale(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a", "x")
+        (tmp_path / "MEMORY.md").write_text("- [gone](gone.md)\n", encoding="utf-8")
+        e = MemoryEngine.from_directory(tmp_path)
+        lint = e.lint()
+        assert "a" in lint["orphans"]            # a.md not in index
+        assert "gone.md" in lint["stale_pointers"]  # index points at missing file
+
+
+class TestUsageStore:
+    def test_missing_file_is_empty(self, tmp_path: Path):
+        u = UsageStore(tmp_path / "_usage.json")
+        assert u.boosts() == {}
+        assert u.report() == []
+
+    def test_corrupt_file_degrades_not_raises(self, tmp_path: Path):
+        p = tmp_path / "_usage.json"
+        p.write_text("{ not json", encoding="utf-8")
+        u = UsageStore(p)
+        assert u.boosts() == {}
+
+    def test_open_increments_and_persists(self, tmp_path: Path):
+        p = tmp_path / "_usage.json"
+        u = UsageStore(p)
+        u.record_open("a")
+        u.record_open("a")
+        assert p.exists()
+        reloaded = UsageStore(p)               # fresh instance reads from disk
+        rows = reloaded.report()
+        assert rows[0]["name"] == "a"
+        assert rows[0]["opens"] == 2
+        assert rows[0]["last_open"] is not None
+
+    def test_report_sorted_hot_first(self, tmp_path: Path):
+        u = UsageStore(tmp_path / "_usage.json")
+        u.record_open("cold")
+        for _ in range(5):
+            u.record_open("hot")
+        assert [r["name"] for r in u.report()] == ["hot", "cold"]
+
+    def test_open_weighs_three_recalls(self, tmp_path: Path):
+        # one open (weight 3) == three recall appearances (weight 1 each)
+        u_open = UsageStore(tmp_path / "u_open.json")
+        u_open.record_open("x")
+        u_recall = UsageStore(tmp_path / "u_recall.json")
+        u_recall.record_recall(["y", "y", "y"])
+        assert u_open.boosts()["x"] == u_recall.boosts()["y"]
+
+    def test_record_recall_empty_is_noop(self, tmp_path: Path):
+        p = tmp_path / "_usage.json"
+        u = UsageStore(p)
+        u.record_recall([])
+        assert u.report() == []
+        assert not p.exists()                    # nothing written for empty hit
+
+    def test_boosts_and_report_read_fresh_from_disk(self, tmp_path: Path):
+        # boosts()/report() re-read disk, so a second instance sees the first's
+        # writes — the basis for parallel sessions sharing one frecency signal.
+        p = tmp_path / "_usage.json"
+        u1 = UsageStore(p)
+        u2 = UsageStore(p)                       # both start from the empty file
+        u1.record_open("x")
+        assert "x" in u2.boosts()                # u2 sees u1's write (fresh read)
+        assert u2.report()[0]["name"] == "x"
+
+
+class TestRecallBoost:
+    def test_no_boost_is_backward_compatible(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback", "x y")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert [m.name for m in e.recall("x y")] == ["a"]
+
+    def test_boost_pulls_warm_memory_forward(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: alpha\ntype: feedback", "shared keyword topic")
+        _write(tmp_path, "b.md", "name: beta\ntype: feedback", "shared keyword topic")
+        e = MemoryEngine.from_directory(tmp_path)
+        # equal keyword score -> deterministic name tiebreak puts alpha first
+        assert e.recall("shared keyword topic")[0].name == "alpha"
+        # warmth on beta flips the order
+        hits = e.recall("shared keyword topic", boost={"beta": 2.0})
+        assert hits[0].name == "beta"
+
+
+class TestRecallFloor:
+    """Relevance floor: weak single-word near-misses must not surface behind the
+    strong matches — the failure mode the per-prompt hook's exclude-backfill
+    would otherwise walk into on a long same-topic thread."""
+
+    def test_weak_tail_dropped_below_floor(self, tmp_path: Path):
+        # strong: query terms in name AND body -> base 12; weak: one incidental
+        # body word -> base 1. floor = 12 * 0.25 = 3 -> weak (1) dropped.
+        _write(tmp_path, "s.md", "name: alpha_beta_topic\ntier: project", "alpha beta topic")
+        _write(tmp_path, "w.md", "name: gamma_note\ntier: project", "unrelated alpha mention")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert [m.name for m in e.recall("alpha beta topic")] == ["alpha_beta_topic"]
+
+    def test_all_weak_matches_survive_relative_floor(self, tmp_path: Path):
+        # No strong hit -> the top is itself weak -> the relative floor keeps the
+        # whole field (the bar is "near-miss vs the best", not an absolute gate).
+        _write(tmp_path, "a.md", "name: w_one\ntier: project", "topic alpha")
+        _write(tmp_path, "b.md", "name: w_two\ntier: project", "alpha topic")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert {m.name for m in e.recall("alpha")} == {"w_one", "w_two"}
+
+    def test_exclude_backfill_stops_at_floor(self, tmp_path: Path, capsys, monkeypatch):
+        # The user's exact scenario: exclude the strong hit; the hook must NOT
+        # backfill the weak near-miss — it goes silent instead.
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        _write(tmp_path, "s.md", "name: alpha_beta_topic\ntier: project", "alpha beta topic")
+        _write(tmp_path, "w.md", "name: gamma_note\ntier: project", "unrelated alpha mention")
+        cli._cmd_memory_recall(tmp_path, "alpha beta topic", 5, set())
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == ["alpha_beta_topic"]            # weak floored from the start
+        cli._cmd_memory_recall(tmp_path, "alpha beta topic", 5, {"alpha_beta_topic"})
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == [] and out["markdown"] is None  # no backfill into the weak tail
+
+
+class TestUsageStoreConcurrency:
+    def test_parallel_opens_not_lost(self, tmp_path: Path):
+        # Four processes hammer the same _usage.json. With the fcntl lock the
+        # read-modify-write cycles serialize, so every hit is counted; without
+        # it, near-simultaneous writes would clobber each other and the total
+        # would fall short. Skipped where flock is unavailable (the lock is a
+        # no-op there, so the guarantee does not hold).
+        pytest.importorskip("fcntl")
+        p = tmp_path / "_usage.json"
+        procs = [
+            multiprocessing.Process(target=_hammer_opens, args=(str(p), 40))
+            for _ in range(4)
+        ]
+        for pr in procs:
+            pr.start()
+        for pr in procs:
+            pr.join()
+        rows = UsageStore(p).report()
+        assert len(rows) == 1 and rows[0]["name"] == "x"
+        assert rows[0]["opens"] == 160           # 4 × 40, none lost to the race
+
+
+class TestCliMemoryCommands:
+    """The CLI memory commands powering the auto-recall hooks (--memory-tier for
+    the session-start user-memory, --recall + --exclude for the per-prompt hook)."""
+
+    def test_memory_tier_dump_with_bodies(self, tmp_path: Path, capsys, monkeypatch):
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        _write(tmp_path, "u.md", "name: u_fact\ntype: user\ntier: user", "user body line")
+        _write(tmp_path, "p.md", "name: p_topic\ntype: project\ntier: project", "alpha beta")
+        rc = cli._cmd_memory_tier(tmp_path, "user", True)
+        out = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert out["names"] == ["u_fact"] and out["count"] == 1   # only the user tier
+        assert "user body line" in out["markdown"]                # --with-bodies
+
+    def test_memory_recall_and_exclude_dedup(self, tmp_path: Path, capsys, monkeypatch):
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        _write(tmp_path, "a.md", "name: alpha_pkg\ntier: project", "shared topic keyword")
+        _write(tmp_path, "b.md", "name: beta_pkg\ntier: project", "shared topic keyword")
+        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, set())
+        out = json.loads(capsys.readouterr().out)
+        assert set(out["names"]) == {"alpha_pkg", "beta_pkg"}
+        assert "Auto-recalled" in out["markdown"]
+        # exclude one -> only the other survives (dedup), backfill within limit
+        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, {"alpha_pkg"})
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == ["beta_pkg"]
+        # all excluded -> empty bundle, markdown None (hook stays silent)
+        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, {"alpha_pkg", "beta_pkg"})
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == [] and out["markdown"] is None

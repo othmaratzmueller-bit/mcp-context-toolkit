@@ -1,0 +1,50 @@
+key: escape_user_data_in_html
+title: "XSS-Safe Rendering — Never Inject User Data as HTML"
+short_id: "FE2"
+
+type: frontend
+scope: frontend
+priority: non_negotiable
+modules: [all]
+
+applies_to:
+  files:
+    - "src/**/*.js"
+    - "src/**/*.ts"
+    - "**/*.html"
+  triggers:
+    - "innerHTML"
+    - "outerHTML"
+    - "insertAdjacentHTML"
+
+summary: |
+  Never assign user-derived data to innerHTML/outerHTML or insertAdjacentHTML.
+  Use textContent / createElement so data stays data.
+
+content: |
+  ## XSS-Safe Rendering (NON-NEGOTIABLE)
+
+  Assigning user-derived values to `innerHTML` / `outerHTML` or calling
+  `insertAdjacentHTML` with them executes any embedded markup/script. Build
+  nodes with `createElement` and set text via `textContent`; the browser then
+  treats the value as text, not markup.
+
+examples:
+  forbidden:
+    code: |
+      el.innerHTML = "Hi " + user.name;        // <img onerror=...> runs
+    why: "User data parsed as HTML → script injection"
+  required:
+    code: |
+      const span = document.createElement("span");
+      span.textContent = "Hi " + user.name;    // data stays data
+      el.replaceChildren(span);
+    why: "textContent escapes; no markup is parsed from user input"
+
+compliance_refs:
+  - standard: "CWE"
+    section: "CWE-79"
+    description: "Cross-site Scripting (XSS)"
+
+tags: [xss, frontend, security]
+created: 2026-01-01
