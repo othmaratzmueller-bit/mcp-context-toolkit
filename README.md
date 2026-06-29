@@ -144,10 +144,11 @@ context-toolkit-query --export-studio ./studio         # Context Studio snapshot
 ## Wiring auto-injection (hooks)
 
 The engine gives you the *data*; your agent/host decides *when* to inject it. The whole
-point is deterministic injection — beats hoping the model remembers to query. Three hooks
-cover it (examples assume a Claude-Code-style host that runs a shell command and reads an
-`additionalContext` JSON from stdout — adapt to your host). The hook scripts themselves
-live in the **consuming** repo, not in the engine (it stays host-agnostic):
+point is deterministic injection — beats hoping the model remembers to query. Five hooks
+cover it — three **inject** (rules + memory), two keep the store **healthy** (examples
+assume a Claude-Code-style host that runs a shell command and reads an `additionalContext`
+JSON from stdout — adapt to your host). The hook scripts themselves live in the
+**consuming** repo, not in the engine (it stays host-agnostic):
 
 **1. Rules — per file touched** (e.g. PreToolUse on Edit/Read/Write). Inject the rules
 matching the file you are about to change; dedup by `fingerprint` so an unchanged set
@@ -176,9 +177,34 @@ context-toolkit-query --recall "$PROMPT" --limit 6 --exclude "$ALREADY_INJECTED"
 # -> {names, markdown}: inject .markdown, then add .names to your session set
 ```
 
-Each emits a ready-to-inject `markdown` field plus the identifiers (`fingerprint` /
-`names`) you need for dedup. With these three wired, the model always has the right rules
-for the file it touches and the right memories for the topic — without being asked.
+**4. Memory — re-index on write** (PostToolUse on Edit/Write). When a memory file is
+written, regenerate the flat catalog so a freshly-added note is catalogued **immediately** —
+mechanical + deterministic, no LLM, no `/dream` needed for a note to be findable:
+
+```bash
+context-toolkit-query --reindex   # rebuilds _descriptions.md from ALL memory files (incl. loose)
+```
+
+**5. Memory — staleness nudge at session start** (SessionStart). Show, once, how many
+memory files changed since the last consolidation run so the user can decide to run one —
+**silent when nothing is loose**. No auto-run, no daemon, no monitoring:
+
+```bash
+# memory files newer than the package hot-index = touched since the last consolidation
+find <memory-dir> -name '*.md' ! -name '_*' ! -name 'MEMORY.md' -newer <memory-dir>/MEMORY.md
+# >0 -> inject "N new/changed -> run the consolidation skill"; 0 -> stay silent
+```
+
+The consolidation skill (`/dream`) itself runs **incremental by default**: it processes only
+that loose set (newer-than-index) and asks at start whether to do a full sweep instead — an
+already-curated store should not be re-swept just because three notes were added. Hooks 4+5
+split the work cleanly: the re-index keeps the catalog current at write-time (mechanical),
+while bundling + hot-index curation stay an explicit, gated `/dream` step.
+
+Each emits a ready-to-inject `markdown` field (or runs a mechanical maintenance step) plus
+the identifiers (`fingerprint` / `names`) you need for dedup. With these wired, the model
+always has the right rules for the file it touches and the right memories for the topic —
+and the store stays current without a manual chore — all without being asked.
 
 ## Store format
 

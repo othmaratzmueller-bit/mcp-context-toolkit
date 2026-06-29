@@ -356,6 +356,18 @@ def _cmd_memory_tier(memory_dir: Path, tier: str, with_bodies: bool) -> int:
     return 0
 
 
+def _cmd_reindex(memory_dir: Path) -> int:
+    """Regenerate the flat catalog (_descriptions.md) from ALL memory files —
+    incl. loose, un-bundled ones. Mechanical + deterministic (no LLM): keeps the
+    catalog current on every memory write so a freshly-added note is catalogued
+    immediately. The package hot-index (MEMORY.md) + bundling stay a /dream concern
+    (they need curation judgment, not derivable at write-time)."""
+    from mcp_context_toolkit.indexer import write_descriptions
+    result = write_descriptions(memory_dir)
+    print(json.dumps({"reindexed": result["path"], "count": result["count"]}))
+    return 0
+
+
 def _cmd_bulk_query(
     engine: RulesEngine,
     rtype: str | None,
@@ -508,6 +520,10 @@ def main() -> None:
         "--exclude", default=None,
         help="Comma-separated memory names to exclude from --recall (the hook's dedup set).",
     )
+    parser.add_argument(
+        "--reindex", action="store_true",
+        help="Regenerate _descriptions.md from ALL memory files (incl. loose/un-bundled). Mechanical + deterministic — run on every memory write (PostToolUse hook).",
+    )
     args = parser.parse_args()
 
     # Memory subcommands (recall / tier-dump) — independent of the rules dir, used
@@ -521,6 +537,15 @@ def main() -> None:
             exclude = set(filter(None, (args.exclude or "").split(",")))
             sys.exit(_cmd_memory_recall(memory_dir, args.recall, args.limit, exclude))
         sys.exit(_cmd_memory_tier(memory_dir, args.memory_tier, args.with_bodies))
+
+    # Mechanical re-index of the flat catalog — keeps _descriptions.md current on
+    # every memory write (no LLM). MEMORY.md + bundling stay a /dream concern.
+    if args.reindex:
+        memory_dir = _discover_memory_dir(args.memory_dir)
+        if memory_dir is None or not memory_dir.is_dir():
+            print(json.dumps({"reindexed": None, "count": 0}))
+            sys.exit(0)
+        sys.exit(_cmd_reindex(memory_dir))
 
     try:
         rules_dir = _resolve_rules_dir(args.rules_dir)
