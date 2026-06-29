@@ -33,6 +33,17 @@ _NON_MEMORY = {"MEMORY.md"}
 
 # Recall field weights — name hit counts most, body least.
 _W_NAME, _W_DESC, _W_TAGS, _W_BODY = 3, 2, 2, 1
+# Relative relevance floor for recall(): a candidate must score at least this
+# fraction of the top hit's score to be returned. Drops the long tail of weak
+# single-incidental-word matches that would otherwise surface once the strong
+# matches are excluded — the per-prompt hook walks DOWN the ranking across a
+# same-topic thread (limit + exclude backfill), so without a floor question 4
+# would inject near-misses far below the best match. Anchored to the query's
+# ABSOLUTE best (computed before any exclude, recomputed per call) — so
+# excluding strong hits never lowers the bar for the weak tail. When every
+# match is weak (top itself is low) the relative floor keeps them all: the bar
+# is "comparatively a near-miss", not an absolute quality gate.
+_RECALL_FLOOR_RATIO = 0.25
 
 
 def _norm_link(target: str) -> str:
@@ -208,6 +219,11 @@ class MemoryEngine:
         warmth multiplies relevance, it does not replace it. The engine stays
         pure-read; the caller (MCP) owns the usage data. With no ``boost`` the
         ordering is identical to before (name tiebreak preserved).
+
+        A relevance floor then drops candidates scoring below
+        ``_RECALL_FLOOR_RATIO`` of the top hit, so weak single-word near-misses
+        do not surface behind the strong matches (relevant for the per-prompt
+        hook's exclude-backfill across a same-topic thread).
         """
         terms = set(_WORD_RE.findall(query.lower()))
         if not terms:
@@ -240,6 +256,13 @@ class MemoryEngine:
                 scored.append((base * (1.0 + heat), heat, m))
         # final score desc, then warmer-on-tie, then name for determinism
         scored.sort(key=lambda s: (-s[0], -s[1], s[2].name))
+        # Relevance floor: drop the tail that scores below _RECALL_FLOOR_RATIO of
+        # the best hit. Done BEFORE the limit slice (and the caller's exclude),
+        # anchored to the absolute top — so the per-prompt hook's exclude-backfill
+        # can never walk past it into weak near-misses. See _RECALL_FLOOR_RATIO.
+        if scored:
+            floor = scored[0][0] * _RECALL_FLOOR_RATIO
+            scored = [s for s in scored if s[0] >= floor]
         return [m for _, _, m in scored[:limit]]
 
     def lint(self) -> dict:

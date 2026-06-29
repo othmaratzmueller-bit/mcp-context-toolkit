@@ -249,6 +249,41 @@ class TestRecallBoost:
         assert hits[0].name == "beta"
 
 
+class TestRecallFloor:
+    """Relevance floor: weak single-word near-misses must not surface behind the
+    strong matches — the failure mode the per-prompt hook's exclude-backfill
+    would otherwise walk into on a long same-topic thread."""
+
+    def test_weak_tail_dropped_below_floor(self, tmp_path: Path):
+        # strong: query terms in name AND body -> base 12; weak: one incidental
+        # body word -> base 1. floor = 12 * 0.25 = 3 -> weak (1) dropped.
+        _write(tmp_path, "s.md", "name: alpha_beta_topic\ntier: project", "alpha beta topic")
+        _write(tmp_path, "w.md", "name: gamma_note\ntier: project", "unrelated alpha mention")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert [m.name for m in e.recall("alpha beta topic")] == ["alpha_beta_topic"]
+
+    def test_all_weak_matches_survive_relative_floor(self, tmp_path: Path):
+        # No strong hit -> the top is itself weak -> the relative floor keeps the
+        # whole field (the bar is "near-miss vs the best", not an absolute gate).
+        _write(tmp_path, "a.md", "name: w_one\ntier: project", "topic alpha")
+        _write(tmp_path, "b.md", "name: w_two\ntier: project", "alpha topic")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert {m.name for m in e.recall("alpha")} == {"w_one", "w_two"}
+
+    def test_exclude_backfill_stops_at_floor(self, tmp_path: Path, capsys, monkeypatch):
+        # The user's exact scenario: exclude the strong hit; the hook must NOT
+        # backfill the weak near-miss — it goes silent instead.
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        _write(tmp_path, "s.md", "name: alpha_beta_topic\ntier: project", "alpha beta topic")
+        _write(tmp_path, "w.md", "name: gamma_note\ntier: project", "unrelated alpha mention")
+        cli._cmd_memory_recall(tmp_path, "alpha beta topic", 5, set())
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == ["alpha_beta_topic"]            # weak floored from the start
+        cli._cmd_memory_recall(tmp_path, "alpha beta topic", 5, {"alpha_beta_topic"})
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == [] and out["markdown"] is None  # no backfill into the weak tail
+
+
 class TestUsageStoreConcurrency:
     def test_parallel_opens_not_lost(self, tmp_path: Path):
         # Four processes hammer the same _usage.json. With the fcntl lock the
