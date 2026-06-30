@@ -26,6 +26,18 @@ serves it over MCP so the client pulls only what's relevant:
 Both are just markdown with frontmatter. Git is the storage, history and backup. The
 engine is read-only; you (or a consolidation pass) own the writes.
 
+## The problem
+
+Long agent sessions accumulate context. Rules get crowded out. 
+The agent forgets constraints it saw three hours ago.
+
+## The solution
+
+Don't load everything upfront. Load the right thing at the right moment:
+- Rules inject when you touch a matching file (PreToolUse hook)  
+- Memory injects when the prompt matches (UserPromptSubmit hook)
+- Nothing else enters context until it's needed
+
 ## Two content types
 
 | Type | Query model | Use it for |
