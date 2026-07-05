@@ -10,7 +10,7 @@ from typing import Iterable
 import yaml
 from pydantic import ValidationError
 
-from mcp_context_toolkit.models import Rule, RulePriority, RuleScope, RuleType
+from mcp_context_toolkit.models import Rule, RulePriority, RuleScope, RuleType, Decision
 
 
 _FINGERPRINT_EXCLUDE = {
@@ -22,25 +22,26 @@ _FINGERPRINT_EXCLUDE = {
 }
 
 
-def fingerprint_rules(rules: list["Rule"]) -> str:
-    """Stable 16-char hex hash over the user-visible fields of a rule set.
+def fingerprint_rules(rules: list["Rule"], decisions: list["Decision"] | None = None) -> str:
+    """Stable 16-char hex hash over the user-visible fields of rules and decisions.
 
     Used for live-reload dedup: if a hook stores this fingerprint per file,
-    a subsequent hook invocation can detect whether the rule set matching
-    the file has changed since last time. Catches add/delete, content edits,
-    summary edits, priority changes, title/short_id changes, glob changes.
-
-    Ignores metadata that doesn't affect what the agent sees (source_path,
-    created/reviewed timestamps, owner, review_interval). Rule-order
-    independent because rules are sorted by key before hashing.
+    a subsequent hook invocation can detect whether the rule set or decision set
+    matching the file has changed since last time. Catches add/delete, content edits,
+    summary/reason edits, priority/status changes.
     """
-    if not rules:
+    if not rules and not decisions:
         return "0"
     h = hashlib.sha256()
     for r in sorted(rules, key=lambda x: x.key):
         dump = r.model_dump(mode="json", exclude=_FINGERPRINT_EXCLUDE)
         h.update(json.dumps(dump, sort_keys=True, ensure_ascii=False).encode("utf-8"))
         h.update(b"|")
+    if decisions:
+        for d in sorted(decisions, key=lambda x: x.key):
+            dump = d.model_dump(mode="json", exclude={"source_path"})
+            h.update(json.dumps(dump, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+            h.update(b"|")
     return h.hexdigest()[:16]
 
 
@@ -90,8 +91,10 @@ class RuleLoadError(Exception):
 
 
 class RulesEngine:
-    def __init__(self, rules: list[Rule] | None = None):
+    def __init__(self, rules: list[Rule] | None = None, decisions: list[Decision] | None = None, graph: dict | None = None):
         self._rules: list[Rule] = rules or []
+        self._decisions: list[Decision] = decisions or []
+        self._graph: dict = graph or {}
 
     @classmethod
     def from_directory(cls, root: Path | str) -> "RulesEngine":
@@ -143,11 +146,39 @@ class RulesEngine:
             deduped.append(rule)
 
         self._rules = deduped
+        
+        # Load decisions if decisions directory exists
+        decisions_dir = root_path.parent / "decisions"
+        if decisions_dir.is_dir():
+            self._load_decisions(decisions_dir)
+
+        # Load graph if graph/reference-index.json exists
+        graph_file = root_path.parent / "graph" / "reference-index.json"
+        if graph_file.exists():
+            try:
+                self._graph = json.loads(graph_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
         return {
             "loaded": len(deduped),
             "root": str(root_path),
             "errors": [str(e) for e in errors] + duplicate_errors,
         }
+
+    def _load_decisions(self, decisions_dir: Path):
+        self._decisions = []
+        for yaml_file in sorted(decisions_dir.rglob("*.yaml")):
+            if any(part.startswith("_") for part in yaml_file.relative_to(decisions_dir).parts):
+                continue
+            try:
+                raw = yaml_file.read_text(encoding="utf-8")
+                data = yaml.safe_load(raw)
+                if isinstance(data, dict):
+                    data["source_path"] = str(yaml_file)
+                    self._decisions.append(Decision(**data))
+            except Exception:
+                pass
 
     @staticmethod
     def _iter_rule_files(root: Path) -> Iterable[Path]:
@@ -314,6 +345,33 @@ class RulesEngine:
     ) -> tuple[list[Rule], str]:
         matches = self.query_for_file(file_path)
         return matches, fingerprint_rules(matches)
+
+    def query_decisions_for_file(self, file_path: str) -> list[Decision]:
+        normalized = self._normalize_path(file_path)
+        matches: list[Decision] = []
+        for d in self._decisions:
+            for pattern in d.applies_to.files:
+                if self._glob_match(normalized, pattern):
+                    matches.append(d)
+                    break
+        return matches
+
+    def query_dependencies(self, file_path: str) -> dict:
+        if not self._graph:
+            return {}
+        normalized = self._normalize_path(file_path)
+        py_suffix = normalized.replace("/", ".")
+        if py_suffix.endswith(".py"):
+            py_suffix = py_suffix[:-3]
+
+        for key, val in self._graph.items():
+            if key.startswith("js:"):
+                if normalized.endswith(key[3:]):
+                    return val
+            elif key.startswith("py:"):
+                if py_suffix.endswith(key[3:]):
+                    return val
+        return {}
 
     @staticmethod
     def _normalize_path(file_path: str) -> str:

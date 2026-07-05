@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from mcp_context_toolkit.engine import RulesEngine, _compile_glob, fingerprint_rules
-from mcp_context_toolkit.models import Rule, RuleApplyTo
+from mcp_context_toolkit.models import Rule, RuleApplyTo, Decision, DecisionAppliesTo
 
 
 def _make_rule(key: str, files: list[str], **overrides) -> Rule:
@@ -22,6 +22,19 @@ def _make_rule(key: str, files: list[str], **overrides) -> Rule:
     )
     defaults.update(overrides)
     return Rule(**defaults)  # type: ignore[arg-type]
+
+
+def _make_decision(key: str, files: list[str], **overrides) -> Decision:
+    defaults = dict(
+        key=key,
+        title=f"Decision {key}",
+        date=date(2026, 1, 1),
+        status="accepted",
+        applies_to=DecisionAppliesTo(files=files),
+        reason="Test decision — at least ten chars long.",
+    )
+    defaults.update(overrides)
+    return Decision(**defaults)  # type: ignore[arg-type]
 
 
 class TestCompileGlob:
@@ -69,6 +82,18 @@ class TestRulesEngine:
 
         assert engine.query_for_file("backend/app/api/chat.py") == [r]
         assert engine.query_for_file("backend/app/services/auth/__init__.py") == []
+
+    def test_query_decisions_for_file_matches_globs(self):
+        d_backend = _make_decision("dec_a", ["backend/**/*.py"])
+        d_frontend = _make_decision("dec_b", ["web/**/*.js"])
+        # dec_c has two globs that BOTH match the target — it must still appear once
+        d_overlap = _make_decision("dec_c", ["backend/**/*.py", "backend/app/**/*.py"])
+        engine = RulesEngine(decisions=[d_backend, d_frontend, d_overlap])
+
+        target = "backend/app/services/reporting.py"
+        assert [d.key for d in engine.query_decisions_for_file(target)] == ["dec_a", "dec_c"]
+        # non-matching path yields nothing
+        assert engine.query_decisions_for_file("README.md") == []
 
     def test_query_for_file_sorts_by_priority(self):
         r_low = _make_rule("low", ["**/*.py"], priority="recommended")

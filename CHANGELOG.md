@@ -4,6 +4,25 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc2] — 2026-07-05
+
+### Fixed
+- **`RulesEngine.query_decisions_for_file`** — removed dead/inverted `excludes`
+  branch that read a `DecisionAppliesTo.excludes` attribute the model never
+  defines (always fell through to `False`, so the loop body was unreachable
+  and had no effect on the result). Matching now runs the include-glob check
+  directly, appending each matching `Decision` once per file.
+
+### Removed
+- **`scripts/migrate_changelogs.py`** — dropped this one-off migration tool
+  from the package. It hard-coded a specific repo's folder layout and has no
+  use for generic consumers; git history retains it for anyone who needs it.
+
+### Tests
+- Added `test_query_decisions_for_file_matches_globs` covering include-glob
+  matching and de-duplication of a decision with multiple matching patterns
+  (93 tests, up from 92).
+
 ## [1.0.0-rc1] — 2026-06-29
 
 First public release candidate.
