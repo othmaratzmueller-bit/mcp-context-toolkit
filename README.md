@@ -26,6 +26,19 @@ serves it over MCP so the client pulls only what's relevant:
 Both are just markdown with frontmatter. Git is the storage, history and backup. The
 engine is read-only; you (or a consolidation pass) own the writes.
 
+## The problem
+
+Long agent sessions accumulate context. Rules get crowded out.
+The agent forgets constraints it saw three hours ago.
+
+## The solution
+
+Don't load everything upfront. Load the right thing at the right moment:
+- Rules inject when you touch a matching file (PreToolUse hook)
+- Decisions inject alongside the rules for that same file (the *why* behind it)
+- Memory injects when the prompt matches (UserPromptSubmit hook)
+- Nothing else enters context until it's needed
+
 ## Three content types
 
 | Type | Query model | Use it for |
@@ -252,12 +265,46 @@ your-project/
 │   ├── decisions/          # Architectural decisions / ADRs (*.yaml)
 │   │   ├── 2026-07-05_auth.yaml
 │   │   └── 2026-07-05_mcp.yaml
+│   ├── graph/              # Optional dependency graph (see "Dependency graph" below)
+│   │   └── reference-index.json
 │   └── memory/             # Project-tier memories (*.md)
 │       ├── MEMORY.md       # Human-curated index
 │       └── _descriptions.md # Auto-generated catalog index (run --reindex to update)
 ```
 
 For global user-specific memories that apply across *all* of your projects, place them in `~/.context/memory/` (user-tier).
+
+## Dependency graph (optional)
+
+Drop a `graph/reference-index.json` next to your rules and every per-file query
+*also* returns that file's coupling — what it imports and what imports it — so the
+agent sees the blast radius **before** it edits:
+
+```jsonc
+// query_rules_for_file("backend/app/services/pipeline.py") →
+{
+  "rules":     [ /* … */ ],
+  "decisions": [ /* … */ ],
+  "dependencies": {
+    "imports":     ["py:services.privacy_filter", "py:services.quota_manager"],
+    "imported_by": ["py:api.routers.chat", "py:tasks.summarize"]
+  }
+}
+```
+
+The index is a flat map you generate however you like — the engine only *reads* it and
+ships **no** graph builder, so it stays language-agnostic. Keys are `py:<dotted.module>`
+or `js:<path>`; a queried file matches the entry whose key is a suffix of its path:
+
+```json
+{
+  "py:services.pipeline":       { "imports": ["py:services.privacy_filter"], "imported_by": ["py:api.routers.chat"] },
+  "js:cockpit/cockpit-view.js": { "imports": ["js:cockpit/cockpit-api.js"],  "imported_by": [] }
+}
+```
+
+No graph file, or no matching entry, simply means `dependencies` comes back empty — the
+feature is purely additive.
 
 ## Store format
 
