@@ -373,7 +373,13 @@ The note itself. Link related notes with [[their-name]].
   `_descriptions.md` catalog, one example package under `core/`) showing the
   structure `recall` expects.
 
-Both are illustrative defaults, not production policy — see each directory's
+- **`examples/decisions/`** — two linked ADRs (one `supersedes` the other) showing
+  the decision schema and status lifecycle.
+
+- **`examples/graph/`** — a small `reference-index.json` showing the dependency-graph
+  format (`py:`/`js:` keys, `imports` / `imported_by`).
+
+These are illustrative defaults, not production policy — see each directory's
 `README.md`. They are **inert**: auto-discovery only ever loads `<dir>/.context/rules`
 (or `<dir>/.claude/rules`) and the matching `…/memory`, so nothing under `examples/` is
 ever picked up implicitly. Pointing `CONTEXT_RULES_DIR` straight at the starter pack

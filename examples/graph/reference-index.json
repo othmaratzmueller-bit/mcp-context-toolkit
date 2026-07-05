@@ -1,0 +1,8 @@
+{
+  "py:app.services.pipeline": { "imports": ["py:app.services.auth", "py:app.db.session"], "imported_by": ["py:app.api.routes"] },
+  "py:app.services.auth":     { "imports": ["py:app.db.session"], "imported_by": ["py:app.api.routes", "py:app.services.pipeline"] },
+  "py:app.db.session":        { "imports": [], "imported_by": ["py:app.services.pipeline", "py:app.services.auth"] },
+  "py:app.api.routes":        { "imports": ["py:app.services.pipeline", "py:app.services.auth"], "imported_by": [] },
+  "js:ui/dashboard.js":       { "imports": ["js:ui/api-client.js"], "imported_by": [] },
+  "js:ui/api-client.js":      { "imports": [], "imported_by": ["js:ui/dashboard.js"] }
+}

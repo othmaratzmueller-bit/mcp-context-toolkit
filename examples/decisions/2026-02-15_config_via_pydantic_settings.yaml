@@ -1,0 +1,18 @@
+key: config_via_pydantic_settings
+title: Centralize config in a single typed Settings object
+date: 2026-02-15
+status: accepted          # draft | accepted | rejected | superseded | deprecated
+supersedes: layered_config
+applies_to:
+  modules: []
+  files:
+    - "src/config/**/*.py"
+    - "src/app/settings.py"
+reason: |
+  Decision: Replace the hand-rolled layered loader with a single typed Settings
+  object, validated at startup. Keeps the "resolve once, no call-site sniffing" rule
+  from layered_config but adds type-safety and one import surface for config access.
+  Why: The layered loader worked, but every new key needed manual parsing and
+  validation, and drift crept in when a key was read before it was validated.
+  Alternatives rejected: Keep the hand-rolled loader — rejected, the validation
+  boilerplate was the recurring source of config bugs.
