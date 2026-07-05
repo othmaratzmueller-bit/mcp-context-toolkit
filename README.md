@@ -26,12 +26,13 @@ serves it over MCP so the client pulls only what's relevant:
 Both are just markdown with frontmatter. Git is the storage, history and backup. The
 engine is read-only; you (or a consolidation pass) own the writes.
 
-## Two content types
+## Three content types
 
 | Type | Query model | Use it for |
 | --- | --- | --- |
 | **Rules** | file-path glob → matching rules, by priority | standards, security policies, review gates — anything tied to *which file you touch* |
-| **Memory** | keyword relevance × frecency (hot/cold) | decisions, preferences, lessons — anything worth recalling later |
+| **Decisions** | file-path glob → matching decisions (ADRs) | design decisions, architecture records (ADRs), rationales — *why* something is built the way it is |
+| **Memory** | keyword relevance × frecency (hot/cold) | lessons, user preferences, context — anything worth recalling later |
 
 ## Two tiers
 
@@ -101,14 +102,14 @@ from clobbering each other). Nothing is served staler than your last edit.
 
 ## Tools
 
-**Rules**
+**Rules & Decisions**
 
 | Tool | Purpose |
 | --- | --- |
-| `query_rules_for_file(file_path)` | rules whose globs match a path, by priority |
-| `query_rules(type?, scope?, priority?, module?)` | bulk fetch by metadata |
+| `query_rules_for_file(file_path)` | codebase intelligence context (Rules, Decisions, Dependencies) for the path |
+| `query_rules(type?, scope?, priority?, module?)` | bulk fetch rules by metadata |
 | `get_rule(key)` | full body of one rule |
-| `list_rule_keys(type?, scope?)` | enumerate keys |
+| `list_rule_keys(type?, scope?)` | enumerate rule keys |
 | `validate_rules()` | dry-run validate the rule directory |
 
 **Memory**
@@ -145,10 +146,41 @@ context-toolkit-query --export-studio ./studio         # Context Studio snapshot
 
 The engine gives you the *data*; your agent/host decides *when* to inject it. The whole
 point is deterministic injection — beats hoping the model remembers to query. Five hooks
-cover it — three **inject** (rules + memory), two keep the store **healthy** (examples
-assume a Claude-Code-style host that runs a shell command and reads an `additionalContext`
-JSON from stdout — adapt to your host). The hook scripts themselves live in the
-**consuming** repo, not in the engine (it stays host-agnostic):
+cover it — three **inject** (rules + decisions + memory), two keep the store **healthy**.
+
+### Dual-Compatibility: Claude Code & Google Antigravity
+
+MCP clients have slightly different hook output requirements. To run hooks that work seamlessly across both **Claude Code** and **Google Antigravity**, your hook scripts should return a dual-compatible JSON payload:
+
+1. **Claude Code** expects nested context under `hookSpecificOutput`.
+2. **Google Antigravity** expects a flat JSON with `decision` and `additionalContext` at the root.
+
+Here is the dual-compatible JSON format that your hooks should output:
+
+**For PreToolUse Hooks (e.g. file edit):**
+```json
+{
+  "decision": "allow",
+  "additionalContext": "[Markdown content here]",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "additionalContext": "[Markdown content here]"
+  }
+}
+```
+
+**For SessionStart & UserPromptSubmit Hooks:**
+```json
+{
+  "additionalContext": "[Markdown content here]",
+  "hookSpecificOutput": {
+    "hookEventName": "SessionStart",  // or "UserPromptSubmit"
+    "additionalContext": "[Markdown content here]"
+  }
+}
+```
+
+The hook scripts themselves live in the **consuming** repo, not in the engine (it stays host-agnostic):
 
 **1. Rules — per file touched** (e.g. PreToolUse on Edit/Read/Write). Inject the rules
 matching the file you are about to change; dedup by `fingerprint` so an unchanged set
@@ -206,6 +238,27 @@ the identifiers (`fingerprint` / `names`) you need for dedup. With these wired, 
 always has the right rules for the file it touches and the right memories for the topic —
 and the store stays current without a manual chore — all without being asked.
 
+## Directory structure
+
+Create a `.context` (or `.claude` as fallback) directory in your project root with the following structure:
+
+```
+your-project/
+├── .context/               # Core intelligence folder (rules, decisions, memories)
+│   ├── rules/              # Rule files (*.yaml)
+│   │   ├── security/       # Organized by domain (optional structure)
+│   │   ├── frontend/
+│   │   └── backend/
+│   ├── decisions/          # Architectural decisions / ADRs (*.yaml)
+│   │   ├── 2026-07-05_auth.yaml
+│   │   └── 2026-07-05_mcp.yaml
+│   └── memory/             # Project-tier memories (*.md)
+│       ├── MEMORY.md       # Human-curated index
+│       └── _descriptions.md # Auto-generated catalog index (run --reindex to update)
+```
+
+For global user-specific memories that apply across *all* of your projects, place them in `~/.context/memory/` (user-tier).
+
 ## Store format
 
 A rule (`.context/rules/**/*.yaml`):
@@ -223,6 +276,21 @@ summary: One-liner shown in query results.
 content: |
   ## Full markdown body, fetched via get_rule.
 created: 2026-01-01
+```
+
+A decision (`.context/decisions/**/*.yaml`):
+
+```yaml
+key: graph_injection
+title: Code Graph Context Injection
+date: 2026-07-05
+status: accepted          # draft | accepted | rejected | superseded | deprecated
+applies_to:
+  modules: []
+  files: ["backend/app/**/*.py"]
+reason: |
+  Decision: Need to automatically inject graph coupling into the prompt context via MCP.
+  Why: Without element context, the agent answers generically.
 ```
 
 A memory (`.context/memory/**/*.md`):

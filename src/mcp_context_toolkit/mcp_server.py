@@ -141,13 +141,26 @@ def build_server(
 
     @mcp.tool()
     def query_rules_for_file(file_path: str) -> str:
-        """Return all rules whose applies_to globs match the given file path.
+        """Return codebase intelligence context (Rules, Decisions, Dependencies) for the given file path.
 
         Use this as the first action when opening a file in a session —
-        it filters ~60 repo rules down to the ~5-10 relevant for this file.
+        it filters the repo knowledge down to the relevant context for this file.
         """
-        matches = rules_reloader.current().query_for_file(file_path)
-        return json.dumps([_rule_summary(r) for r in matches], indent=2)
+        engine = rules_reloader.current()
+        matches = engine.query_for_file(file_path)
+        rules_out = [_rule_summary(r) for r in matches]
+
+        decisions = engine.query_decisions_for_file(file_path)
+        decisions_out = [d.model_dump(mode="json") for d in decisions]
+
+        deps = engine.query_dependencies(file_path)
+
+        out = {
+            "rules": rules_out,
+            "decisions": decisions_out,
+            "dependencies": deps
+        }
+        return json.dumps(out, indent=2)
 
     @mcp.tool()
     def get_rule(key: str) -> str:
@@ -366,7 +379,11 @@ def main() -> None:
 
     # Wrap the rules engine in a reloader so an in-session YAML edit (or a
     # parallel session's) is picked up at the next tool call, not just at restart.
-    rules_reloader = _Reloader(lambda: RulesEngine.from_directory(rules_dir), [rules_dir])
+    decisions_dir = rules_dir.parent / "decisions"
+    watch_dirs = [rules_dir]
+    if decisions_dir.is_dir():
+        watch_dirs.append(decisions_dir)
+    rules_reloader = _Reloader(lambda: RulesEngine.from_directory(rules_dir), watch_dirs)
     engine = rules_reloader.current()  # initial build (no reload yet)
 
     # Auto-write fallback markdown so there's always a plain-text reference

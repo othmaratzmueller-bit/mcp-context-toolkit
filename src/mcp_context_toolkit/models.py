@@ -83,3 +83,24 @@ class Rule(BaseModel):
     review_interval_days: int | None = None
 
     source_path: str | None = None
+
+
+DecisionStatus = Literal["draft", "accepted", "rejected", "superseded", "deprecated"]
+
+
+class DecisionAppliesTo(BaseModel):
+    modules: list[str] = []
+    files: list[str] = []
+
+
+class Decision(BaseModel):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    title: str
+    date: date
+    status: DecisionStatus
+
+    applies_to: DecisionAppliesTo
+    reason: str = Field(min_length=10)
+
+    supersedes: str | None = None
+    source_path: str | None = None
