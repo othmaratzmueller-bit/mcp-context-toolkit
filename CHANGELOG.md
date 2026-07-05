@@ -13,13 +13,10 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
   and had no effect on the result). Matching now runs the include-glob check
   directly, appending each matching `Decision` once per file.
 
-### Changed
-- **`scripts/migrate_changelogs.py`** — `build_file_map()` now skips
-  `.venv` / `venv` / `site-packages` / `node_modules` / `.git` /
-  `__pycache__` / `.pytest_cache` / `.mypy_cache` path components. Previously,
-  common basenames (e.g. `sessions.py`, `constants.py`, `__init__.py`) picked
-  up vendored/venv copies alongside the real repo paths, polluting
-  `applies_to.files` in generated decisions with dependency paths.
+### Removed
+- **`scripts/migrate_changelogs.py`** — dropped this one-off migration tool
+  from the package. It hard-coded a specific repo's folder layout and has no
+  use for generic consumers; git history retains it for anyone who needs it.
 
 ### Tests
 - Added `test_query_decisions_for_file_matches_globs` covering include-glob

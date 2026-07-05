@@ -85,12 +85,12 @@ class TestRulesEngine:
 
     def test_query_decisions_for_file_matches_globs(self):
         d_backend = _make_decision("dec_a", ["backend/**/*.py"])
-        d_frontend = _make_decision("dec_b", ["sps_webapp/**/*.js"])
+        d_frontend = _make_decision("dec_b", ["web/**/*.js"])
         # dec_c has two globs that BOTH match the target — it must still appear once
         d_overlap = _make_decision("dec_c", ["backend/**/*.py", "backend/app/**/*.py"])
         engine = RulesEngine(decisions=[d_backend, d_frontend, d_overlap])
 
-        target = "backend/app/services/llm_pipeline.py"
+        target = "backend/app/services/reporting.py"
         assert [d.key for d in engine.query_decisions_for_file(target)] == ["dec_a", "dec_c"]
         # non-matching path yields nothing
         assert engine.query_decisions_for_file("README.md") == []
