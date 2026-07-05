@@ -1,6 +1,6 @@
 [project]
 name = "mcp-context-toolkit"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "Generic MCP server: file-scoped rules + frecency-ranked memory recall from plain markdown stores"
 readme = "README.md"
 license = { text = "MIT" }

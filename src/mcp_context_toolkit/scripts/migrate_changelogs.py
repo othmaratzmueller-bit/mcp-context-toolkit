@@ -11,8 +11,22 @@ CHANGELOG_DIRS = [
 ]
 DECISIONS_DIR = WORKSPACE_ROOT / ".claude" / "decisions"
 
+# Path components that must never contribute files to the map: vendored deps,
+# VCS and caches. Without this, basename matching maps common names like
+# sessions.py / constants.py / __init__.py to their site-packages copies and
+# pollutes every decision's applies_to.files with .venv paths.
+_EXCLUDED_PATH_PARTS = {
+    ".venv", "venv", "site-packages", "node_modules",
+    ".git", "__pycache__", ".pytest_cache", ".mypy_cache",
+}
+
+
 def build_file_map(root_dir: Path) -> dict[str, list[str]]:
-    """Build a mapping of filename -> list of repo-relative paths."""
+    """Build a mapping of filename -> list of repo-relative paths.
+
+    Skips dependency / VCS / cache directories so vendored files with common
+    basenames never leak into applies_to (see _EXCLUDED_PATH_PARTS).
+    """
     file_map = {}
     # Walk directories that contain code
     for folder in ["backend", "sps_webapp", "docs", ".claude"]:
@@ -20,9 +34,12 @@ def build_file_map(root_dir: Path) -> dict[str, list[str]]:
         if not dir_path.is_dir():
             continue
         for p in dir_path.rglob("*"):
-            if p.is_file() and not p.name.startswith("."):
-                rel_path = str(p.relative_to(root_dir))
-                file_map.setdefault(p.name, []).append(rel_path)
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            rel = p.relative_to(root_dir)
+            if _EXCLUDED_PATH_PARTS.intersection(rel.parts):
+                continue
+            file_map.setdefault(p.name, []).append(str(rel))
     return file_map
 
 def clean_key(title: str) -> str:

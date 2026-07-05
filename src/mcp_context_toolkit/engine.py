@@ -350,17 +350,10 @@ class RulesEngine:
         normalized = self._normalize_path(file_path)
         matches: list[Decision] = []
         for d in self._decisions:
-            match = False
-            for excl in getattr(d.applies_to, "excludes", []):
-                if self._glob_match(normalized, excl):
-                    match = False
-                    break
             for pattern in d.applies_to.files:
                 if self._glob_match(normalized, pattern):
-                    match = True
+                    matches.append(d)
                     break
-            if match:
-                matches.append(d)
         return matches
 
     def query_dependencies(self, file_path: str) -> dict:
