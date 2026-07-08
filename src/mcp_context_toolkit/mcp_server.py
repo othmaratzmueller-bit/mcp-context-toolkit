@@ -51,6 +51,18 @@ def _discover_memory_dir() -> Path | None:
     return None
 
 
+def _optional_dir(env_name: str) -> Path | None:
+    """Resolve an optional memory-tier directory from an env var. Returns None if
+    the var is unset/empty or does not point at an existing directory. Used for the
+    cross-project 'user' tier (CONTEXT_USER_MEMORY_DIR) and the org 'core' tier
+    (CONTEXT_CORE_MEMORY_DIR) — both purely additive, absent by default."""
+    raw = os.environ.get(env_name)
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    return p if p.is_dir() else None
+
+
 def _rule_summary(rule: Any) -> dict:
     return {
         "key": rule.key,
@@ -405,23 +417,32 @@ def main() -> None:
     # rebundle from a parallel session refreshes this process at its next call.
     memory_reloader = None
     usage = None
-    mem_dir = _discover_memory_dir()
-    if mem_dir is not None:
-        user_mem = os.environ.get("CONTEXT_USER_MEMORY_DIR")
-        user_mem_dir = Path(user_mem).expanduser() if user_mem else None
-        if user_mem_dir is not None and not user_mem_dir.is_dir():
-            user_mem_dir = None
+    mem_dir = _discover_memory_dir()                       # project tier (optional)
+    user_mem_dir = _optional_dir("CONTEXT_USER_MEMORY_DIR")  # user tier, cross-project (optional)
+    core_mem_dir = _optional_dir("CONTEXT_CORE_MEMORY_DIR")  # core tier, org/institutional (optional)
+    # Register the memory tools if ANY tier is present — NOT only when a project
+    # tier exists. A fresh workspace (no .context/memory) must still expose the
+    # user/core tiers, otherwise a brand-new project silently loses all memory tools.
+    if mem_dir is not None or user_mem_dir is not None or core_mem_dir is not None:
 
         def _load_memory() -> MemoryEngine:
             me = MemoryEngine()
-            me.load_directory(mem_dir, tier="project", strict=False)
+            # Load order IS precedence: project > user > core — the earlier-loaded
+            # tier wins on a name collision (specific project note beats the shared
+            # org reference; the core tier never overrides a personal/project note).
+            if mem_dir is not None:
+                me.load_directory(mem_dir, tier="project", strict=False)
             if user_mem_dir is not None:
                 me.load_directory(user_mem_dir, tier="user", strict=False)
+            if core_mem_dir is not None:
+                me.load_directory(core_mem_dir, tier="core", strict=False)
             return me
 
-        memory_reloader = _Reloader(_load_memory, [mem_dir, user_mem_dir])
-        # Hot/cold (frecency) signal — sidecar in the PROJECT memory dir.
-        usage = UsageStore.for_memory_dir(mem_dir)
+        memory_reloader = _Reloader(_load_memory, [mem_dir, user_mem_dir, core_mem_dir])
+        # Hot/cold (frecency) signal — sidecar lives in the PROJECT memory dir; only
+        # meaningful when a project tier is present.
+        if mem_dir is not None:
+            usage = UsageStore.for_memory_dir(mem_dir)
 
     memory_engine = memory_reloader.current() if memory_reloader is not None else None
     _print_banner(engine, memory_engine)
