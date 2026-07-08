@@ -52,15 +52,25 @@ def _discover_memory_dir() -> Path | None:
 
 
 def _optional_dir(env_name: str) -> Path | None:
-    """Resolve an optional memory-tier directory from an env var. Returns None if
-    the var is unset/empty or does not point at an existing directory. Used for the
-    cross-project 'user' tier (CONTEXT_USER_MEMORY_DIR) and the org 'core' tier
-    (CONTEXT_CORE_MEMORY_DIR) — both purely additive, absent by default."""
+    """Resolve an optional tier directory from an env var. Returns None if the
+    var is unset/empty or does not point at an existing directory. Used for the
+    cross-project 'user' memory tier (CONTEXT_USER_MEMORY_DIR), the org 'core'
+    memory tier (CONTEXT_CORE_MEMORY_DIR) and the shared org RULES tier
+    (CONTEXT_SHARED_RULES_DIR) — all purely additive, absent by default."""
     raw = os.environ.get(env_name)
     if not raw:
         return None
     p = Path(raw).expanduser()
     return p if p.is_dir() else None
+
+
+def _discover_shared_rules_dir() -> Path | None:
+    """Locate the optional SHARED (org) rules tier. Env-only
+    (CONTEXT_SHARED_RULES_DIR), NO walk-up — the shared tier is an explicit
+    deployment choice (org grundregeln mounted read-only), never auto-found in a
+    parent dir the way the project tier is. None → rules stay single-tier and the
+    behaviour is byte-identical to before."""
+    return _optional_dir("CONTEXT_SHARED_RULES_DIR")
 
 
 def _rule_summary(rule: Any) -> dict:
@@ -190,30 +200,48 @@ def build_server(
 
     @mcp.tool()
     def validate_rules() -> str:
-        """Re-validate all rules from disk. Returns {ok, rule_count, errors, warnings}.
+        """Re-validate all rules from disk, across EVERY loaded tier. Returns
+        {ok, rule_count, errors, warnings, roots}.
 
-        Use this to check whether a recent YAML edit broke the rule set,
-        or whether any `conflicts_with` references point to non-existent
-        rules. Does NOT mutate the running engine's rule cache — it reads
-        fresh from disk.
+        Use this to check whether a recent YAML edit broke the rule set, whether
+        any `conflicts_with` references point to non-existent rules, or whether a
+        project rule now collides with a shared non_negotiable rule. Does NOT
+        mutate the running engine's rule cache — it reads fresh from disk.
         """
         import json as _json
-        from pathlib import Path as _Path
 
-        # Re-run validation against the directory the engine was loaded from.
-        # We pull rules_dir from the first rule's source_path (all rules live
-        # under the same root).
+        from mcp_context_toolkit.engine import RuleLoadError
+
         engine = rules_reloader.current()
-        if not engine.rules:
+        roots = engine.roots
+        if not roots:
             return _json.dumps({"ok": False, "error": "no rules loaded"})
-        source = engine.rules[0].source_path
-        if source is None:
-            return _json.dumps({"ok": False, "error": "no source_path on rules"})
-        root = _Path(source).parent
-        while root.name and root.name != "rules":
-            root = root.parent
-        result = RulesEngine.validate_directory(root)
-        return _json.dumps(result, indent=2)
+
+        agg: dict[str, Any] = {
+            "ok": True, "rule_count": 0, "errors": [], "warnings": [], "roots": [],
+        }
+        for root_path, tier in roots:
+            res = RulesEngine.validate_directory(root_path)
+            agg["rule_count"] += res["rule_count"]
+            agg["errors"].extend(f"[{tier}] {e}" for e in res["errors"])
+            agg["warnings"].extend(f"[{tier}] {w}" for w in res["warnings"])
+            agg["roots"].append(
+                {"tier": tier, "root": str(root_path),
+                 "ok": res["ok"], "rule_count": res["rule_count"]}
+            )
+            if not res["ok"]:
+                agg["ok"] = False
+
+        # Cross-tier re-check: reload all tiers together to catch a project rule
+        # that now shadows a shared non_negotiable one (raised only on the
+        # combined load, invisible to per-directory validation).
+        try:
+            RulesEngine.from_roots({tier: rp for rp, tier in roots}, strict=False)
+        except RuleLoadError as e:
+            agg["ok"] = False
+            agg["errors"].append(f"[cross-tier] {e}")
+
+        return _json.dumps(agg, indent=2)
 
     @mcp.tool()
     def query_rules(
@@ -344,7 +372,17 @@ def _print_banner(engine: RulesEngine, memory_engine: MemoryEngine | None) -> No
     rule_breakdown = " · ".join(
         f"{n} {t}" for t, n in sorted(rule_types.items(), key=lambda kv: (-kv[1], kv[0]))
     )
-    data = [("Rules", len(engine.rules), rule_breakdown or "—")]
+    # If a shared org tier is loaded alongside project, name the tiers so the
+    # operator sees the grundregeln are active (mirrors the Memory tier display).
+    rule_tiers = Counter(r.tier for r in engine.rules)
+    if len(rule_tiers) > 1:
+        tier_label = " + ".join(
+            t for t, _ in sorted(rule_tiers.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        rule_detail = f"{tier_label} · {rule_breakdown}" if rule_breakdown else tier_label
+    else:
+        rule_detail = rule_breakdown or "—"
+    data = [("Rules", len(engine.rules), rule_detail)]
     if memory_engine is not None:
         tiers = Counter(m.tier for m in memory_engine.memories)
         tier_breakdown = " + ".join(
@@ -389,13 +427,28 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    # Optional SHARED (org) rules tier — the grundregeln every project inherits
+    # (code-is-law, no-fly-bys, ask-on-drift …). Env-only; absent → single-tier,
+    # byte-identical to before. Loaded AFTER the project tier so project wins on a
+    # (non-security) key collision; a non_negotiable collision fails loud.
+    shared_rules_dir = _discover_shared_rules_dir()
+
     # Wrap the rules engine in a reloader so an in-session YAML edit (or a
     # parallel session's) is picked up at the next tool call, not just at restart.
     decisions_dir = rules_dir.parent / "decisions"
     watch_dirs = [rules_dir]
     if decisions_dir.is_dir():
         watch_dirs.append(decisions_dir)
-    rules_reloader = _Reloader(lambda: RulesEngine.from_directory(rules_dir), watch_dirs)
+    if shared_rules_dir is not None:
+        watch_dirs.append(shared_rules_dir)
+
+    def _load_rules() -> RulesEngine:
+        roots: dict[str, Path | str] = {"project": rules_dir}
+        if shared_rules_dir is not None:
+            roots["shared"] = shared_rules_dir
+        return RulesEngine.from_roots(roots)
+
+    rules_reloader = _Reloader(_load_rules, watch_dirs)
     engine = rules_reloader.current()  # initial build (no reload yet)
 
     # Auto-write fallback markdown so there's always a plain-text reference

@@ -37,6 +37,37 @@ def _discover_rules_dir() -> Path:
     )
 
 
+def _discover_shared_rules_dir() -> Path | None:
+    """Optional SHARED (org) rules tier for the hook path — env-only
+    (CONTEXT_SHARED_RULES_DIR), no walk-up. MUST mirror
+    mcp_server._discover_shared_rules_dir so the hooks see the same grundregeln
+    the MCP tools do. None → single-tier, byte-identical to before."""
+    env = os.environ.get("CONTEXT_SHARED_RULES_DIR")
+    if not env:
+        return None
+    p = Path(env).expanduser().resolve()
+    return p if p.is_dir() else None
+
+
+def _load_all_rule_tiers(
+    rules_dir: Path, *, strict: bool
+) -> tuple[RulesEngine, list[str]]:
+    """Load the project rules tier plus the optional shared org tier
+    (CONTEXT_SHARED_RULES_DIR) into ONE engine, mirroring the MCP server's
+    from_roots wiring. Returns (engine, warnings). A RuleLoadError from a
+    non_negotiable cross-tier collision propagates (the caller decides how to
+    surface it) — everything else is collected into warnings."""
+    engine = RulesEngine()
+    warnings: list[str] = []
+    stats = engine.load_directory(rules_dir, tier="project", strict=strict)
+    warnings += stats.get("errors", [])
+    shared_dir = _discover_shared_rules_dir()
+    if shared_dir is not None:
+        sstats = engine.load_directory(shared_dir, tier="shared", strict=strict)
+        warnings += sstats.get("errors", [])
+    return engine, warnings
+
+
 def _format_markdown(rules: list, decisions: list, deps: dict, file_path: str) -> str:
     if not rules and not decisions and not deps:
         return ""
@@ -128,14 +159,15 @@ def _cmd_validate(rules_dir: Path) -> int:
 
 
 def _cmd_write_fallback(rules_dir: Path, target: Path | None) -> int:
-    engine = RulesEngine()
-    stats = engine.load_directory(rules_dir, strict=False)
-    if stats.get("errors"):
-        for err in stats["errors"]:
-            print(f"[context-toolkit-query] WARN: {err}", file=sys.stderr)
+    # Load BOTH tiers so the MCP-outage fallback lists the shared grundregeln too.
+    engine, warnings = _load_all_rule_tiers(rules_dir, strict=False)
+    for err in warnings:
+        print(f"[context-toolkit-query] WARN: {err}", file=sys.stderr)
     target_path = target or (rules_dir / "_meta" / "fallback_rules.md")
     write_stats = engine.write_fallback_markdown(target_path)
-    print(json.dumps({**stats, **write_stats}, indent=2))
+    print(json.dumps(
+        {"loaded": len(engine.rules), "errors": warnings, **write_stats}, indent=2
+    ))
     return 0
 
 
@@ -257,8 +289,7 @@ def _cmd_export_studio(rules_dir: Path, memory_dir: Path | None, out_dir: Path) 
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    engine = RulesEngine()
-    engine.load_directory(rules_dir, strict=False)
+    engine, _ = _load_all_rule_tiers(rules_dir, strict=False)
     (out_dir / "rules.json").write_text(
         json.dumps(_rules_payload(engine), indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -592,15 +623,15 @@ def main() -> None:
         ))
 
     # Bundle format is used by hooks — be lenient with broken YAMLs so a
-    # single bad file doesn't blind the session to all other rules.
+    # single bad file doesn't blind the session to all other rules. Loads the
+    # project tier plus the optional shared org tier (grundregeln).
     lenient = args.format == "bundle"
     warnings: list[str] = []
-    engine = RulesEngine()
     try:
-        stats = engine.load_directory(rules_dir, strict=not lenient)
-        warnings = stats.get("errors", [])
+        engine, warnings = _load_all_rule_tiers(rules_dir, strict=not lenient)
     except RuleLoadError as e:
         if lenient:
+            engine = RulesEngine()
             warnings = [str(e)]
         else:
             print(f"[context-toolkit-query] load failed: {e}", file=sys.stderr)
