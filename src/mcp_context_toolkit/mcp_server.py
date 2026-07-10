@@ -13,26 +13,38 @@ from mcp_context_toolkit.usage import UsageStore
 # Store-directory conventions tried during walk-up auto-discovery, in order.
 # `.context` is the generic default (matches the tool/env naming); `.claude`
 # is kept as a fallback so a Claude Code repo with an existing .claude/rules
-# store keeps working without configuration.
-_STORE_CONVENTIONS = (".context", ".claude")
+# store keeps working without configuration. Overridable via the env
+# CONTEXT_STORE_CONVENTIONS (comma-separated, e.g. ".talos,.context,.claude")
+# so an embedding product can brand its store dir without forking the engine.
+_DEFAULT_STORE_CONVENTIONS = (".context", ".claude")
 
 
-def _discover_rules_dir() -> Path:
+def _store_conventions() -> tuple:
+    raw = os.environ.get("CONTEXT_STORE_CONVENTIONS", "").strip()
+    if not raw:
+        return _DEFAULT_STORE_CONVENTIONS
+    parts = tuple(p.strip() for p in raw.split(",") if p.strip())
+    return parts or _DEFAULT_STORE_CONVENTIONS
+
+
+def _discover_rules_dir() -> Path | None:
+    """Locate the PROJECT rules tier. Env CONTEXT_RULES_DIR wins, else walk up
+    for <conv>/rules. Returns None if none found — the server then runs with
+    the shared tier only (or no rules at all): a workspace without own rules
+    must NOT lose the memory tools or the shared grundregeln (same gating
+    rationale as the optional memory tiers)."""
     env = os.environ.get("CONTEXT_RULES_DIR")
     if env:
-        return Path(env).expanduser().resolve()
+        p = Path(env).expanduser().resolve()
+        return p if p.is_dir() else None
 
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
-        for conv in _STORE_CONVENTIONS:
+        for conv in _store_conventions():
             rules = candidate / conv / "rules"
             if rules.is_dir():
                 return rules
-
-    raise FileNotFoundError(
-        "No rules directory found. Set CONTEXT_RULES_DIR or create .context/rules/ "
-        "(or .claude/rules/) in the current working tree."
-    )
+    return None
 
 
 def _discover_memory_dir() -> Path | None:
@@ -44,7 +56,7 @@ def _discover_memory_dir() -> Path | None:
         p = Path(env).expanduser()
         return p if p.is_dir() else None
     for candidate in [Path.cwd(), *Path.cwd().parents]:
-        for conv in _STORE_CONVENTIONS:
+        for conv in _store_conventions():
             mem = candidate / conv / "memory"
             if mem.is_dir():
                 return mem
@@ -411,16 +423,15 @@ def _print_banner(engine: RulesEngine, memory_engine: MemoryEngine | None) -> No
 
 
 def main() -> None:
-    try:
-        rules_dir = _discover_rules_dir()
-    except FileNotFoundError as e:
-        print(f"[context-toolkit] {e}", file=sys.stderr)
-        sys.exit(2)
+    # PROJECT rules tier is OPTIONAL (since the coder productization): a
+    # workspace without own rules must not kill the server — memory tools and
+    # the shared grundregeln keep working (same gating rationale as B1 memory).
+    rules_dir = _discover_rules_dir()
 
     # The shipped starter pack (examples/rules) is inert — copy-to-activate. If a
     # misconfigured CONTEXT_RULES_DIR points at it directly, say so loudly so the
     # examples don't silently become someone's production rule set.
-    if "examples" in rules_dir.parts:
+    if rules_dir is not None and "examples" in rules_dir.parts:
         print(
             f"[context-toolkit] NOTE: serving EXAMPLE/starter rules from {rules_dir} "
             f"— inert starter pack, copy into your own rules dir for real use.",
@@ -433,36 +444,49 @@ def main() -> None:
     # (non-security) key collision; a non_negotiable collision fails loud.
     shared_rules_dir = _discover_shared_rules_dir()
 
+    if rules_dir is None and shared_rules_dir is None:
+        print(
+            "[context-toolkit] no rules found (neither project nor shared tier) — "
+            "serving with an empty rule set.",
+            file=sys.stderr,
+        )
+
     # Wrap the rules engine in a reloader so an in-session YAML edit (or a
     # parallel session's) is picked up at the next tool call, not just at restart.
-    decisions_dir = rules_dir.parent / "decisions"
-    watch_dirs = [rules_dir]
-    if decisions_dir.is_dir():
-        watch_dirs.append(decisions_dir)
+    watch_dirs: list = []
+    if rules_dir is not None:
+        watch_dirs.append(rules_dir)
+        decisions_dir = rules_dir.parent / "decisions"
+        if decisions_dir.is_dir():
+            watch_dirs.append(decisions_dir)
     if shared_rules_dir is not None:
         watch_dirs.append(shared_rules_dir)
 
     def _load_rules() -> RulesEngine:
-        roots: dict[str, Path | str] = {"project": rules_dir}
+        roots: dict[str, Path | str] = {}
+        if rules_dir is not None:
+            roots["project"] = rules_dir
         if shared_rules_dir is not None:
             roots["shared"] = shared_rules_dir
-        return RulesEngine.from_roots(roots)
+        return RulesEngine.from_roots(roots) if roots else RulesEngine()
 
     rules_reloader = _Reloader(_load_rules, watch_dirs)
     engine = rules_reloader.current()  # initial build (no reload yet)
 
     # Auto-write fallback markdown so there's always a plain-text reference
     # for the MCP-outage case. Silent on failure — fallback is nice-to-have.
-    try:
-        fallback_target = rules_dir / "_meta" / "fallback_rules.md"
-        stats = engine.write_fallback_markdown(fallback_target)
-        print(
-            f"[context-toolkit] wrote fallback with {stats['written']} critical rules to "
-            f"{fallback_target}",
-            file=sys.stderr,
-        )
-    except Exception as e:  # noqa: BLE001
-        print(f"[context-toolkit] fallback write skipped: {e}", file=sys.stderr)
+    # Only with a project tier: the fallback lives inside the project store.
+    if rules_dir is not None:
+        try:
+            fallback_target = rules_dir / "_meta" / "fallback_rules.md"
+            stats = engine.write_fallback_markdown(fallback_target)
+            print(
+                f"[context-toolkit] wrote fallback with {stats['written']} critical rules to "
+                f"{fallback_target}",
+                file=sys.stderr,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[context-toolkit] fallback write skipped: {e}", file=sys.stderr)
 
     # Memory store is optional — if found, the same MCP also serves recall /
     # get_memory / list_memories / memory_lint. If not, rules-only as before.

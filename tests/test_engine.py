@@ -403,6 +403,48 @@ class TestStoreConventionDiscovery:
         assert _discover_memory_dir(None) == mem
 
 
+class TestStoreConventionsEnv:
+    """CONTEXT_STORE_CONVENTIONS makes the walk-up conventions configurable
+    (branding, e.g. ".talos") without forking the engine. Default unchanged."""
+
+    def test_env_adds_branded_convention(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        rules = tmp_path / ".talos" / "rules"
+        rules.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".talos,.context,.claude")
+        assert _discover_rules_dir() == rules
+
+    def test_default_ignores_unknown_dirs(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        (tmp_path / ".talos" / "rules").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CONTEXT_STORE_CONVENTIONS", raising=False)
+        with pytest.raises(FileNotFoundError):
+            _discover_rules_dir()
+
+    def test_mcp_server_discover_returns_none_without_rules(self, tmp_path: Path, monkeypatch):
+        # Project rules are OPTIONAL for the server: no dir -> None, not raise
+        # (a bare workspace must not lose memory tools / shared grundregeln).
+        from mcp_context_toolkit.mcp_server import _discover_rules_dir as srv_discover
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CONTEXT_RULES_DIR", raising=False)
+        assert srv_discover() is None
+
+    def test_mcp_server_env_conventions(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.mcp_server import _discover_rules_dir as srv_discover
+
+        rules = tmp_path / ".talos" / "rules"
+        rules.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CONTEXT_RULES_DIR", raising=False)
+        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".talos")
+        assert srv_discover() == rules
+
+
 class TestTierLayering:
     """2-tier rules (project + shared org grundregeln). Load order IS precedence:
     project loaded first wins on a non-security collision; a non_negotiable
