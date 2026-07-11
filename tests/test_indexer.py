@@ -44,6 +44,16 @@ class TestBuildDescriptions:
         _write(tmp_path, "b.md", "name: bbb\ntype: project\ndescription: B", "x")
         assert build_descriptions(tmp_path)["content"] == build_descriptions(tmp_path)["content"]
 
+    def test_cited_by_suffix_on_linked_memory(self, tmp_path: Path):
+        # a.md links to b.md → b's catalog line carries a "← cited by: aaa"
+        # suffix; a (nothing cites it) does not. line_index still points right.
+        _write(tmp_path, "a.md", "name: aaa\ntype: feedback\ndescription: A", "links [[bbb]]")
+        _write(tmp_path, "b.md", "name: bbb\ntype: project\ndescription: B", "leaf")
+        r = build_descriptions(tmp_path)
+        lines = r["content"].split("\n")
+        assert lines[r["line_index"]["bbb"] - 1].endswith("← cited by: aaa")
+        assert "← cited by" not in lines[r["line_index"]["aaa"] - 1]
+
 
 class TestBuildMemoryMd:
     def test_lean_toc_by_tier(self):

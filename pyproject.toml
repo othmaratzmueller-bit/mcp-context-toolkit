@@ -1,6 +1,6 @@
 [project]
 name = "mcp-context-toolkit"
-version = "1.0.0rc2"
+version = "1.0.0rc3"
 description = "Generic MCP server: file-scoped rules + frecency-ranked memory recall from plain markdown stores"
 readme = "README.md"
 license = { text = "MIT" }
@@ -43,4 +43,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-mcp_context_toolkit = ["viewer/*.html"]
+mcp_context_toolkit = ["viewer/*.html", "viewer/*.js", "method/*.md"]

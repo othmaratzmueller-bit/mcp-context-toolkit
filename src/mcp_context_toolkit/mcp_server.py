@@ -324,12 +324,19 @@ def build_server(
             this is what makes a memory 'hot' and pulls it forward in future
             recall results and in a consolidation pass's intra-section reorder.
             """
-            m = memory_reloader.current().get(name)
+            engine = memory_reloader.current()
+            m = engine.get(name)
             if m is None:
                 return json.dumps({"error": f"memory not found: {name}"})
             if usage is not None:
                 usage.record_open(name)
-            return json.dumps(m.model_dump(mode="json"), indent=2, ensure_ascii=False)
+            payload = m.model_dump(mode="json")
+            # Inbound edges: which memories link here (the reverse of `links`).
+            # Resolved to the canonical name, so a link via a bundled member slug
+            # is credited to `m` if `m` is the package. Cheap graph context for
+            # navigation + orphan-spotting without a separate memory_lint call.
+            payload["cited_by"] = engine.backlinks(m.name)
+            return json.dumps(payload, indent=2, ensure_ascii=False)
 
         @mcp.tool()
         def list_memories(type: str | None = None, tier: str | None = None) -> str:

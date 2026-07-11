@@ -4,6 +4,34 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc3] — 2026-07-11
+
+### Added
+- **Memory link graph.** `MemoryEngine.edges()` (resolved `(source, target)` pairs) and
+  `backlinks(name)` (inbound edges) expose the `[[link]]` graph; `_descriptions.md` now
+  carries a `← cited by:` suffix, and `get_memory` returns a `cited_by` list. Member-slug
+  links are credited to the package that absorbed them; self-edges are dropped.
+- **Context Studio `Graph` tab.** The exported viewer renders the directed link graph with a
+  vendored [Cytoscape.js](https://js.cytoscape.org/) (MIT) — node colour = tier, size =
+  frecency heat, click a node to open it. `memory.json` gained a resolved `edges` list, and
+  `--export-studio` now also copies `cytoscape.min.js` (Graph tab degrades to a hint if absent).
+- **OKF-compatible frontmatter fields** `resource` (asset URI) and `timestamp` (ISO 8601).
+  Unquoted ISO datetimes are normalized to ISO 8601 (`Z` → `+00:00`).
+- **Always-on working-method block.** `context-toolkit-query --method-block` prints a shipped
+  `method/method_block.md` resource; wire it as a `UserPromptSubmit` hook for re-injection
+  against instruction-decay (opt out with `CONTEXT_METHOD_BLOCK=0`).
+
+### Fixed
+- **Nested `metadata:` frontmatter.** `tier`, `members`, `tags` (and the new `resource`/
+  `timestamp`) are now read from a nested `metadata:` block, not only top-level — matching the
+  fallback `type` already had. Previously a package written with `metadata: { members: … }`
+  parsed with **empty members**, silently disabling member-link resolution (and inflating
+  `memory_lint` broken-link counts) on every such file. Top-level still wins over nested.
+
+### Changed
+- `_memory_payload` sources members from the (now nested-aware) parser and drops the
+  redundant top-level-only `_package_members` file re-read.
+
 ## [1.0.0-rc2] — 2026-07-05
 
 ### Fixed

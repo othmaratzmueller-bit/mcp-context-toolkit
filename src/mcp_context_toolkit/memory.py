@@ -13,6 +13,7 @@ precedence — load the project tier first so it wins on name collision
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 from pathlib import Path
 from typing import Literal, Optional
@@ -66,11 +67,41 @@ class Memory(BaseModel):
     links: list[str] = []           # [[name]] references found in the body
     members: list[str] = []         # for bundled packages: the slugs merged in
     tags: list[str] = []
+    resource: Optional[str] = None  # OKF: URI/path of the asset this concept describes
+    timestamp: Optional[str] = None  # OKF: ISO 8601 last meaningful change (display/tiebreak only)
     source_path: Optional[str] = None
 
 
 def _coerce_type(raw) -> MemoryType:
     return raw if raw in ("user", "feedback", "project", "reference") else "misc"
+
+
+def _meta_get(meta: dict, key: str):
+    """Read a frontmatter key top-level, falling back to a nested ``metadata:``
+    block. The store carries two coexisting frontmatter styles — flat top-level
+    keys and the ``metadata:``-nested convention (bundled packages write
+    ``metadata: { type, tier, members }``). Reading BOTH is what keeps
+    tier/members/tags/resource/timestamp consistent regardless of style; before
+    this, a nested ``members:`` parsed as empty and silently killed the whole
+    package member-resolution on such files (only ``type`` had the fallback)."""
+    if meta.get(key) is not None:
+        return meta[key]
+    nested = meta.get("metadata")
+    if isinstance(nested, dict):
+        return nested.get(key)
+    return None
+
+
+def _coerce_scalar(v) -> Optional[str]:
+    """Normalize an optional scalar frontmatter value to a string. YAML
+    auto-parses an unquoted ISO date/datetime into a date/datetime object, so
+    coerce those back to ISO 8601 (`.isoformat()`) rather than Python's
+    space-separated `str()` form — keeps `timestamp` round-trippable/OKF-shaped."""
+    if v is None:
+        return None
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return v.isoformat()
+    return str(v).strip()
 
 
 def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
@@ -79,17 +110,16 @@ def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
     except OSError as e:  # pragma: no cover - filesystem edge
         raise KnowledgeLoadError(path, f"read failed: {e}") from e
     meta, body = parse_frontmatter(text)
-    # type lives either top-level (`type:`) or nested (`metadata: { type: }`).
-    raw_type = meta.get("type")
-    if raw_type is None and isinstance(meta.get("metadata"), dict):
-        raw_type = meta["metadata"].get("type")
-    tags = meta.get("tags")
+    # type/tier/members/tags/resource/timestamp live either top-level or nested
+    # under a `metadata:` block — read both (see _meta_get).
+    raw_type = _meta_get(meta, "type")
+    tags = _meta_get(meta, "tags")
     tags = [str(t) for t in tags] if isinstance(tags, list) else []
-    members = meta.get("members")
+    members = _meta_get(meta, "members")
     members = [str(x).strip() for x in members] if isinstance(members, list) else []
     # A frontmatter `tier:` (e.g. a bundled package's core/user/project) overrides
     # the load-directory default; fall back to the load tier otherwise.
-    fm_tier = meta.get("tier")
+    fm_tier = _meta_get(meta, "tier")
     resolved_tier = fm_tier if fm_tier in ("core", "user", "project") else tier
     return Memory(
         name=str(meta.get("name") or path.stem).strip(),
@@ -100,6 +130,8 @@ def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
         links=sorted(set(_LINK_RE.findall(body))),
         members=members,
         tags=tags,
+        resource=_coerce_scalar(_meta_get(meta, "resource")),
+        timestamp=_coerce_scalar(_meta_get(meta, "timestamp")),
         source_path=str(path),
     )
 
@@ -112,6 +144,8 @@ class MemoryEngine:
         self._memories: list[Memory] = []
         self._roots: list[tuple[Path, MemoryTier]] = []
         self._member_owner_cache: dict[str, str] | None = None
+        self._edge_cache: list[tuple[str, str]] | None = None
+        self._backlink_cache: dict[str, list[str]] | None = None
 
     @classmethod
     def from_roots(cls, roots: dict[str, str | Path]) -> "MemoryEngine":
@@ -167,6 +201,8 @@ class MemoryEngine:
             self._memories.append(mem)
             added += 1
         self._member_owner_cache = None  # memory set changed → rebuild lazily
+        self._edge_cache = None          # resolved edge list depends on the full set
+        self._backlink_cache = None      # inbound-edge map depends on the full set
         return {"added": added, "skipped": skipped, "tier": tier,
                 "root": str(root_path), "errors": errors}
 
@@ -185,6 +221,45 @@ class MemoryEngine:
                     owners[_norm_link(member)] = m.name
             self._member_owner_cache = owners
         return self._member_owner_cache
+
+    def edges(self) -> list[tuple[str, str]]:
+        """The resolved directed link graph as ``(source_name, target_name)``
+        pairs — deduped, sorted (built once, cached; invalidated on every
+        load_directory alongside the member map).
+
+        Every ``[[link]]`` in a body is resolved exactly the way ``get()``
+        follows it: normalized (kebab/snake + .md folded), and a link to a
+        bundled member slug is credited to the PACKAGE that absorbed it — so an
+        edge never points at a slug ``get()`` could not itself return. A memory
+        linking its own absorbed member is dropped (no self-edge). This is the
+        one primitive behind both backlinks() and the studio graph view."""
+        if self._edge_cache is None:
+            name_by_norm = {_norm_link(m.name): m.name for m in self._memories}
+            owners = self._member_owners()  # normalized member slug -> package
+            seen: set[tuple[str, str]] = set()
+            for m in self._memories:
+                for link in m.links:
+                    norm = _norm_link(link)
+                    target = name_by_norm.get(norm) or owners.get(norm)
+                    if target and target != m.name:
+                        seen.add((m.name, target))
+            self._edge_cache = sorted(seen)
+        return self._edge_cache
+
+    def _backlinks(self) -> dict[str, list[str]]:
+        """Inbound-edge map ``target name -> [source names]`` — the reverse of
+        edges(), cached. Self-references already excluded upstream."""
+        if self._backlink_cache is None:
+            rev: dict[str, set[str]] = {}
+            for src, tgt in self.edges():
+                rev.setdefault(tgt, set()).add(src)
+            self._backlink_cache = {t: sorted(s) for t, s in rev.items()}
+        return self._backlink_cache
+
+    def backlinks(self, name: str) -> list[str]:
+        """Names of memories whose body links resolve to ``name`` (inbound
+        edges), sorted. Empty list when nothing cites it (an orphan-in / leaf)."""
+        return self._backlinks().get(name, [])
 
     def get(self, name: str) -> Optional[Memory]:
         exact = next((m for m in self._memories if m.name == name), None)

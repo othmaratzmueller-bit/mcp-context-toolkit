@@ -96,6 +96,56 @@ class TestMemoryEngine:
         e = MemoryEngine.from_directory(tmp_path)
         assert e.get("a").type == "reference"
 
+    def test_nested_metadata_members_tier_tags(self, tmp_path: Path):
+        # Bundled packages write type/tier/members under a `metadata:` block. All
+        # of them must be read there, not only `type` — before the fix a nested
+        # `members:` parsed empty and killed member-resolution on such files.
+        _write(tmp_path, "pkg.md",
+               "name: pkg\nmetadata:\n  type: package\n  tier: core\n"
+               "  members:\n    - old_a\n    - old_b\n  tags:\n    - t1\n    - t2",
+               "see [[old_a]]")
+        e = MemoryEngine.from_directory(tmp_path)  # load default = project
+        pkg = e.get("pkg")
+        assert pkg.tier == "core"                       # nested tier honored
+        assert pkg.members == ["old_a", "old_b"]        # nested members read
+        assert pkg.tags == ["t1", "t2"]                 # nested tags read
+        assert e.get("old_a").name == "pkg"             # member now resolves
+        assert e.lint()["broken_links"] == {}           # [[old_a]] not broken
+
+    def test_top_level_still_wins_over_nested(self, tmp_path: Path):
+        # A top-level key takes precedence over the nested one (explicit beats
+        # inherited); nested only fills what top-level omits.
+        _write(tmp_path, "a.md",
+               "name: a\ntier: project\nmetadata:\n  tier: core", "x")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("a").tier == "project"
+
+    def test_okf_resource_and_timestamp(self, tmp_path: Path):
+        # OKF-compatible optional fields, both flat and nested. YAML auto-parses
+        # an unquoted ISO datetime into a datetime object → normalized back to
+        # ISO 8601 (Z → +00:00), not Python's space-separated str() form.
+        _write(tmp_path, "flat.md",
+               "name: flat\nresource: file:///x/y.py\ntimestamp: 2026-05-28T14:30:00Z", "x")
+        _write(tmp_path, "nested.md",
+               "name: nested\nmetadata:\n  resource: bq://t\n  timestamp: 2026-01-01T00:00:00Z", "y")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("flat").resource == "file:///x/y.py"
+        assert e.get("flat").timestamp == "2026-05-28T14:30:00+00:00"
+        assert e.get("nested").resource == "bq://t"          # nested fallback
+        assert e.get("nested").timestamp == "2026-01-01T00:00:00+00:00"
+
+    def test_quoted_timestamp_stays_verbatim(self, tmp_path: Path):
+        # Quoting in YAML keeps the exact string (incl. the Z) — no datetime coercion.
+        _write(tmp_path, "q.md", 'name: q\ntimestamp: "2026-05-28T14:30:00Z"', "x")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("q").timestamp == "2026-05-28T14:30:00Z"
+
+    def test_absent_okf_fields_are_none(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback", "x")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("a").resource is None
+        assert e.get("a").timestamp is None
+
     def test_links_extracted_from_body(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a", "links to [[b]] and [[c]]")
         e = MemoryEngine.from_directory(tmp_path)
@@ -173,6 +223,78 @@ class TestMemoryEngine:
         lint = e.lint()
         assert "a" in lint["orphans"]            # a.md not in index
         assert "gone.md" in lint["stale_pointers"]  # index points at missing file
+
+
+class TestBacklinks:
+    """Inbound edges — the reverse of the forward-only Memory.links."""
+
+    def test_reverse_of_forward_link(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a", "points at [[b]]")
+        _write(tmp_path, "b.md", "name: b", "no outbound links")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.get("a").links == ["b"]        # forward edge unchanged
+        assert e.backlinks("b") == ["a"]        # reverse edge computed
+        assert e.backlinks("a") == []           # nothing cites a (leaf-in)
+
+    def test_multiple_sources_sorted(self, tmp_path: Path):
+        _write(tmp_path, "z.md", "name: zeta", "see [[hub]]")
+        _write(tmp_path, "a.md", "name: alpha", "also [[hub]]")
+        _write(tmp_path, "hub.md", "name: hub", "central")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.backlinks("hub") == ["alpha", "zeta"]  # deterministic, sorted
+
+    def test_link_to_member_credits_package(self, tmp_path: Path):
+        # A [[old_slug]] link resolves to the package that absorbed it (like
+        # get()), so the backlink is credited to the package, not the dead slug.
+        _write(tmp_path, "pkg.md", "name: pkg\nmembers: [old_slug]", "package body")
+        _write(tmp_path, "src.md", "name: src", "reference to [[old_slug]]")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.backlinks("pkg") == ["src"]    # credited to the package
+        assert e.backlinks("old_slug") == []    # not to the absorbed slug
+
+    def test_self_link_not_counted(self, tmp_path: Path):
+        # A package linking its own absorbed member must not cite itself.
+        _write(tmp_path, "pkg.md", "name: pkg\nmembers: [mine]", "see [[mine]]")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.backlinks("pkg") == []
+
+    def test_kebab_link_folds_to_snake_target(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a", "cross ref [[some-topic]]")
+        _write(tmp_path, "t.md", "name: some_topic", "target")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.backlinks("some_topic") == ["a"]   # kebab input folds onto snake
+
+    def test_broken_link_produces_no_backlink(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a", "dangling [[ghost]]")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.backlinks("ghost") == []
+
+    def test_cache_invalidated_across_loads(self, tmp_path: Path):
+        # Backlink map is cached; a second load_directory must rebuild it so a
+        # source in the later tier is reflected. (Probe first to populate cache.)
+        proj = tmp_path / "proj"
+        user = tmp_path / "user"
+        _write(proj, "t.md", "name: target\ntype: project", "leaf")
+        _write(user, "s.md", "name: source\ntype: user", "links [[target]]")
+        e = MemoryEngine()
+        e.load_directory(proj, tier="project")
+        assert e.backlinks("target") == []          # caches empty (no source yet)
+        e.load_directory(user, tier="user")          # must drop the stale cache
+        assert e.backlinks("target") == ["source"]
+
+    def test_edges_resolved_deduped_and_backlinks_agree(self, tmp_path: Path):
+        # edges() is the shared primitive: (source, target) pairs, deduped/sorted,
+        # member-slug links credited to the package, self-edges dropped. backlinks
+        # must be its exact reverse.
+        _write(tmp_path, "a.md", "name: a", "links [[b]] and [[b]] again and [[pkg_member]]")
+        _write(tmp_path, "b.md", "name: b", "leaf")
+        _write(tmp_path, "pkg.md", "name: pkg\nmetadata:\n  members:\n    - pkg_member", "self [[pkg_member]]")
+        e = MemoryEngine.from_directory(tmp_path)
+        # (a,b) once despite the duplicate link; (a,pkg) via member credit;
+        # NO (pkg,pkg) self-edge though pkg links its own member.
+        assert e.edges() == [("a", "b"), ("a", "pkg")]
+        assert e.backlinks("b") == ["a"]
+        assert e.backlinks("pkg") == ["a"]
 
 
 class TestUsageStore:
@@ -319,6 +441,15 @@ class TestCliMemoryCommands:
         assert rc == 0
         assert out["names"] == ["u_fact"] and out["count"] == 1   # only the user tier
         assert "user body line" in out["markdown"]                # --with-bodies
+
+    def test_method_block_prints_full_arbeitsweise(self, capsys):
+        # The always-on method block ships as a package resource; the CLI dumps it
+        # verbatim for the UserPromptSubmit hook. All 9 steps must be present.
+        rc = cli._cmd_method_block()
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert out.startswith("WORKING METHOD")
+        assert out.strip().splitlines()[-1].startswith("9.")
 
     def test_memory_recall_and_exclude_dedup(self, tmp_path: Path, capsys, monkeypatch):
         monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
