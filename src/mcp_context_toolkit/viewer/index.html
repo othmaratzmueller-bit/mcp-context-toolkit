@@ -130,6 +130,13 @@
     .ledger { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:14px 16px;
               white-space:pre-wrap; word-break:break-word; font:12.5px/1.55 ui-monospace,Menlo,monospace;
               color:var(--fg); }
+    /* Graph host — Cytoscape needs an explicit height on its container. Fills the
+       viewport below the summary line; the container itself never scrolls (cy pans). */
+    .graph { height:calc(100vh - 190px); min-height:420px; background:var(--panel);
+             border:1px solid var(--line); border-radius:9px; overflow:hidden; }
+    .glegend { display:flex; gap:12px; flex-wrap:wrap; margin-left:auto; }
+    .glegend span { display:inline-flex; align-items:center; gap:5px; }
+    .glegend i { width:9px; height:9px; border-radius:50%; display:inline-block; }
     footer { flex:none; padding:9px 18px; border-top:1px solid var(--line); background:var(--panel);
              color:var(--muted); font-size:11.5px; display:flex; gap:8px; align-items:center; }
     footer a { color:var(--accent); text-decoration:none; }
@@ -141,6 +148,7 @@
     <div class="tabs">
       <button id="tab-review" class="active">Review</button>
       <button id="tab-browse">Browse</button>
+      <button id="tab-graph">Graph</button>
       <button id="tab-pending">Pending</button>
     </div>
     <span class="spacer"></span>
@@ -165,6 +173,9 @@
     <span id="status"></span>
   </footer>
 
+  <!-- Cytoscape (MIT, vendored next to this file, copied by --export-studio). Optional:
+       the Graph tab degrades to a hint if it is absent (pure standalone index.html). -->
+  <script src="cytoscape.min.js"></script>
   <script>
   "use strict";
   // ---- tiny DOM builder — text always via textContent (XSS-safe by construction) ----
@@ -476,6 +487,70 @@
     body.appendChild(el("pre", { class:"ledger", text:text }));
   }
 
+  // ---------------- GRAPH (memory link graph via Cytoscape) ----------------
+  // Nodes = packages, edges = the resolved [[link]] graph from memory.json.edges.
+  // Node colour = tier, node size scales with frecency heat. Click a node → its
+  // drawer (reuses openPackage). Cytoscape is optional: absent → a hint, no crash.
+  let _cy = null;
+  function renderGraph() {
+    const c = $("content"); clear(c);
+    const mem = STATE.data.memory;
+    if (!mem || !Array.isArray(mem.packages)) {
+      c.appendChild(el("div", { class:"empty", text:"No memory.json — run: context-toolkit-query --export-studio <dir>" })); return;
+    }
+    if (typeof window.cytoscape !== "function") {
+      c.appendChild(el("div", { class:"empty", text:"Graph needs cytoscape.min.js next to index.html — re-run: context-toolkit-query --export-studio <dir>" })); return;
+    }
+    const pkgs = mem.packages, edges = Array.isArray(mem.edges) ? mem.edges : [];
+    const tierColor = { core:"#7c9cf0", project:"#54c1b8", user:"#e0b15a", unknown:"#8b94a6" };
+
+    const s = el("div", { class:"summary" });
+    s.appendChild(el("span", {}, el("b", { text:String(pkgs.length) }), " nodes"));
+    s.appendChild(el("span", {}, el("b", { text:String(edges.length) }), " edges"));
+    s.appendChild(el("span", { class:"meta", text:"click a node to open · scroll to zoom · drag to pan" }));
+    const legend = el("div", { class:"glegend" });
+    for (const t of ["core","project","user","unknown"]) {
+      const dot = el("i"); dot.style.background = tierColor[t];
+      legend.appendChild(el("span", {}, dot, t));
+    }
+    s.appendChild(legend);
+    c.appendChild(s);
+
+    const host = el("div", { class:"graph" });
+    c.appendChild(host);
+
+    const maxHeat = Math.max(0.001, ...pkgs.map(p => p.heat || 0));
+    const names = new Set(pkgs.map(p => p.name));
+    const byName = {}; for (const p of pkgs) byName[p.name] = p;
+    const nodes = pkgs.map(p => ({ data: {
+      id: p.name, label: p.name, color: tierColor[p.tier] || tierColor.unknown,
+      size: 16 + Math.round(24 * (p.heat || 0) / maxHeat),
+    }}));
+    const links = edges
+      .filter(e => e && names.has(e.source) && names.has(e.target))
+      .map(e => ({ data: { id: "e:" + e.source + "->" + e.target, source: e.source, target: e.target } }));
+
+    _cy = window.cytoscape({
+      container: host,
+      elements: nodes.concat(links),
+      style: [
+        { selector: "node", style: {
+          "background-color": "data(color)", "width": "data(size)", "height": "data(size)",
+          "label": "data(label)", "color": "#8b94a6", "font-size": "7px",
+          "min-zoomed-font-size": 9, "text-halign": "center", "text-valign": "bottom",
+          "text-margin-y": 2 } },
+        { selector: "edge", style: {
+          "width": 1, "line-color": "#2a313d", "target-arrow-color": "#2a313d",
+          "target-arrow-shape": "triangle", "arrow-scale": 0.7, "curve-style": "bezier",
+          "opacity": 0.75 } },
+        { selector: "node:selected", style: { "border-width": 2, "border-color": "#e3e8f0" } },
+      ],
+      layout: { name: "cose", animate: false, nodeRepulsion: 9000, idealEdgeLength: 75, padding: 24 },
+      wheelSensitivity: 0.2,
+    });
+    _cy.on("tap", "node", evt => { const p = byName[evt.target.id()]; if (p) openPackage(p); });
+  }
+
   // ---------------- filters / helpers ----------------
   function filterItems(items) {
     if (!STATE.q) return items;
@@ -502,15 +577,21 @@
   function render() {
     $("tab-review").classList.toggle("active", STATE.mode === "review");
     $("tab-browse").classList.toggle("active", STATE.mode === "browse");
+    $("tab-graph").classList.toggle("active", STATE.mode === "graph");
     $("tab-pending").classList.toggle("active", STATE.mode === "pending");
     $("export").style.display = STATE.mode === "review" ? "" : "none";
+    // Search only drives review/browse; hide it where it does nothing (graph
+    // would re-layout on every keystroke, pending is a plain text dump).
+    $("search").style.display = (STATE.mode === "review" || STATE.mode === "browse") ? "" : "none";
     if (STATE.mode === "review") renderReview();
     else if (STATE.mode === "browse") renderBrowse();
+    else if (STATE.mode === "graph") renderGraph();
     else renderPending();
   }
 
   $("tab-review").onclick = () => { STATE.mode = "review"; render(); };
   $("tab-browse").onclick = () => { STATE.mode = "browse"; render(); };
+  $("tab-graph").onclick = () => { STATE.mode = "graph"; render(); };
   $("tab-pending").onclick = () => { STATE.mode = "pending"; render(); };
   $("search").addEventListener("input", e => { STATE.q = e.target.value.trim().toLowerCase(); render(); });
   $("export").onclick = exportDecision;

@@ -1,5 +1,9 @@
 # mcp-context-toolkit
 
+[![CI](https://github.com/othmaratzmueller-bit/mcp-context-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/othmaratzmueller-bit/mcp-context-toolkit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+
 > A generic [MCP](https://modelcontextprotocol.io) server that feeds any MCP client
 > the *right context at the right time* — file-scoped **rules** and frecency-ranked
 > **memory**, loaded on demand from plain markdown + YAML-frontmatter stores.
@@ -53,16 +57,29 @@ path, since decisions accumulate unbounded with no lifecycle pruning. Pass
 `statuses=None, top_k=None` for the raw, unfiltered match set (audits, tooling) — the
 default injection path (hooks, `query_rules_for_file`) always uses the cut.
 
-## Two tiers
+## Two-plus tiers
 
-Both content types load from multiple roots tagged by tier:
+Both content types load from multiple roots tagged by tier — tier *names* differ
+by content type:
 
-- **user** — cross-project knowledge (`~/...`), shared across everything you do
-- **project** — locked to one repo
+- **Memory**: `project` (this repo) → `user` (`~/...`, cross-project) → an
+  optional `core` root (institutional/org-wide notes). A single `recall` spans
+  every loaded tier, so a session sees its repo's notes *and* your global ones
+  in one ranked list.
+- **Rules**: `project` (this repo's own rules) + an optional `shared` tier — an
+  org-wide "grundregeln" floor (`CONTEXT_SHARED_RULES_DIR`) for files a repo's
+  own rule globs don't cover.
 
-On a name collision the **project tier wins** (specific beats general). A single
-`recall` spans both tiers, so a session sees its repo's notes *and* your global ones
-in one ranked list.
+On a name/key collision the more specific (project) tier wins for both content
+types.
+
+`query_for_file_tiered(file_path)` — used by the `query_rules_for_file` MCP tool
+and the CLI's `--format bundle` — prefers project-tier matches; the shared tier
+only surfaces as a generic discipline floor when a file matches **zero** project
+rules (a top-level script, a config file, a greenfield repo before its own rules
+exist). This avoids duplicating a shared rule alongside an already-matching, more
+specific project rule. The untiered `query_for_file` still returns the raw match
+set across all loaded tiers.
 
 ## Hot / cold memory (frecency)
 
@@ -136,7 +153,7 @@ from clobbering each other). Nothing is served staler than your last edit.
 | Tool | Purpose |
 | --- | --- |
 | `recall(query, limit?)` | top memories across both tiers, frecency-ranked |
-| `get_memory(name)` | full body + metadata of one memory |
+| `get_memory(name)` | full body + metadata of one memory, plus `cited_by` (inbound `[[links]]`) |
 | `list_memories(type?, tier?)` | enumerate, filterable |
 | `memory_lint()` | hygiene: broken `[[links]]`, index orphans, stale pointers |
 | `memory_usage(limit?)` | hot→cold usage report (opens, recalls, heat) |
@@ -158,8 +175,14 @@ context-toolkit-query --memory-tier user --with-bodies
 
 # Maintenance
 context-toolkit-query --validate                       # validate the rule set
-context-toolkit-query --export-studio ./studio         # Context Studio snapshot + viewer
+context-toolkit-query --export-studio ./studio         # Context Studio snapshot + viewer (incl. Graph tab)
+context-toolkit-query --method-block                   # print the always-on working-method block
 ```
+
+The **Context Studio** viewer (`--export-studio`) has four tabs: *Review* (accept/reject a
+consolidation diff), *Browse* (packages by tier + frecency heat), **Graph** (the resolved
+`[[link]]` graph rendered with a vendored [Cytoscape.js](https://js.cytoscape.org/), MIT —
+node colour = tier, size = heat, click a node to open it) and *Pending* (the flag ledger).
 
 ## Wiring auto-injection (hooks)
 
@@ -355,13 +378,38 @@ description: One-line summary used for recall ranking.
 metadata:
   type: feedback          # user | feedback | project | reference | misc
 tags: [design]
+resource: file:///abs/path/or/uri    # optional (OKF): the asset this note describes
+timestamp: 2026-05-28T14:30:00Z      # optional (OKF): ISO 8601 last meaningful change
 ---
 
 The note itself. Link related notes with [[their-name]].
 ```
 
-`MEMORY.md` in the memory dir is the human-curated index (skipped as a record);
-`memory_lint` checks it against the actual files.
+`type`/`tier`/`members`/`tags`/`resource`/`timestamp` may live **top-level or nested under
+`metadata:`** — both are read (top-level wins). `MEMORY.md` in the memory dir is the
+human-curated index (skipped as a record); `memory_lint` checks it against the actual files.
+
+## OKF interoperability
+
+The store format is deliberately close to the [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog)
+(OKF) — both are *markdown + YAML-frontmatter + markdown-link graph, versioned in git,
+no RDF*. Two conventions arrived at the same shape independently, which makes interop
+nearly free:
+
+- **`resource` + `timestamp`** are the OKF optional fields (URI of the described asset, ISO
+  8601 last-change). Unquoted ISO datetimes are normalized to ISO 8601 (`Z` → `+00:00`);
+  quote to keep a value verbatim.
+- **Links are a graph.** `[[name]]` edges resolve through package bundling (a link to an
+  absorbed member is credited to its package); `get_memory` returns the reverse edges as
+  `cited_by`, and the Studio **Graph** tab renders the whole directed graph.
+- **Portable by construction.** A store is plain files in git — readable in Obsidian/MkDocs,
+  diffable in PRs, consumable without this engine. What the engine *adds* on top of the
+  format is the part OKF leaves to consumers: frecency ranking, lossless bundling, and the
+  reverse-edge/graph views.
+
+Where the engine goes beyond OKF: a *live usage model* (`recall` is ranked by
+frequency+recency, not just keyword) and a *consolidation* mechanism (packages with a
+verified-lossless merge), neither of which the format itself prescribes.
 
 ## Examples — copy to start from zero
 
@@ -401,7 +449,7 @@ lock companion), and one opt-in export:
 | --- | --- | --- |
 | `<memory-dir>/_usage.json` | on every `recall` / `get_memory` | the frecency sidecar (hit counts). Atomic temp-file write, best-effort — a failure never breaks recall. Per-machine, gitignore it. |
 | `<memory-dir>/_usage.json.lock` | during a `recall` / `get_memory` write | a zero-byte `fcntl` lock file that serializes concurrent writers (parallel MCP processes sharing one store). POSIX only; absent on Windows. Gitignore it too. |
-| `<out-dir>/{index.html,rules.json,memory.json}` | only on `--export-studio OUT_DIR` | the offline Context Studio viewer + a metadata snapshot. Opt-in; nothing is written unless you run it. |
+| `<out-dir>/{index.html,cytoscape.min.js,rules.json,memory.json}` | only on `--export-studio OUT_DIR` | the offline Context Studio viewer (+ vendored Cytoscape for the Graph tab) + a metadata snapshot. Opt-in; nothing is written unless you run it. |
 
 Your rule and memory **content** is never created, edited, or deleted by the engine —
 writes are owned by you (or a separate consolidation pass). No network access, no
@@ -428,6 +476,21 @@ Read this before pointing it at a shared or sensitive store.
   `get_memory(name)`) so a single large `.md` can't blow up the context window.
 - **Deterministic & read-only.** Keyword + frecency only, no LLM in the loop; the
   sole self-write is the `_usage.json` frecency sidecar.
+
+## Working method (always-on)
+
+Beyond rules and memory, the toolkit ships an optional **working-method block** — a short,
+named working method (define "done" as an observation → evidence from real sources → intent-gate
+before behaviour changes → surgical edits → verify by observation → stop after 3 failed
+attempts). Print it with `context-toolkit-query --method-block`; a `UserPromptSubmit` hook can
+inject it on **every** prompt so it resists instruction-decay (the same re-injection rationale
+as re-loading rules per agent-spawn). Opt out with `CONTEXT_METHOD_BLOCK=0`.
+
+It is a *loop absorbed from* the `fable-method` idea (format: prohibition in character one,
+named actions), not a dependency. **Honest note:** in this project's own
+A/B eval a prohibition-first *rules* baseline scored slightly higher than the method-loop, so
+always-injecting the loop is a deliberate, opt-in choice, not the measured optimum — wire it if
+the coherent working-method framing helps your models, skip it if your rules already cover it.
 
 ## Design principles
 

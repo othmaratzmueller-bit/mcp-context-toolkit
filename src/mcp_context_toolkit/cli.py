@@ -230,22 +230,6 @@ def _rules_payload(engine: RulesEngine) -> dict:
     }
 
 
-def _package_members(source_path: str | None, fallback_name: str) -> list[str]:
-    """Authoritative member list = the package's frontmatter `members:` list.
-    Falls back to the record's own name for atomic (non-bundled) memory files —
-    NOT a `## header` scan, which over-counts markdown sub-headers inside bodies."""
-    if source_path:
-        try:
-            from mcp_context_toolkit.core import parse_frontmatter
-            meta, _ = parse_frontmatter(Path(source_path).read_text(encoding="utf-8"))
-            members = meta.get("members")
-            if isinstance(members, list) and members:
-                return [str(x) for x in members]
-        except OSError:
-            pass
-    return [fallback_name]
-
-
 def _memory_payload(memory_dir: Path) -> dict:
     """Snapshot the memory store (package files) + frecency heat for Browse."""
     from mcp_context_toolkit.memory import MemoryEngine
@@ -259,7 +243,9 @@ def _memory_payload(memory_dir: Path) -> dict:
     member_total = 0
     packages = []
     for m in engine.memories:
-        members = _package_members(m.source_path, m.name)
+        # Members come from the (now nested-aware) parser; an atomic memory with
+        # no bundled members represents itself so Browse shows a "1 member" row.
+        members = m.members or [m.name]
         nbytes = len(m.body.encode("utf-8"))
         total_bytes += nbytes
         member_total += len(members)
@@ -279,6 +265,9 @@ def _memory_payload(memory_dir: Path) -> dict:
             "recalls": int(u.get("recalls", 0)),
         })
     packages.sort(key=lambda p: (-p["heat"], p["tier"], p["name"]))
+    # Resolved directed link graph (source -> target, member-slug links credited
+    # to their package). Drives the Graph tab; every endpoint is a package node.
+    edges = [{"source": s, "target": t} for s, t in engine.edges()]
     return {
         "kind": "context-studio/memory",
         "stats": {
@@ -286,8 +275,10 @@ def _memory_payload(memory_dir: Path) -> dict:
             "members": member_total,
             "bytes": total_bytes,
             "by_tier": by_tier,
+            "edges": len(edges),
         },
         "packages": packages,
+        "edges": edges,
     }
 
 
@@ -311,15 +302,37 @@ def _cmd_export_studio(rules_dir: Path, memory_dir: Path | None, out_dir: Path) 
         )
         written.append("memory.json")
 
-    # Copy the packaged viewer so out_dir is openable on its own.
+    # Copy the packaged viewer so out_dir is openable on its own. cytoscape.min.js
+    # (MIT, vendored) powers the Graph tab — copied as bytes; if it is missing the
+    # tab just shows a hint, so its absence is non-fatal.
     try:
         viewer = resources.files("mcp_context_toolkit") / "viewer" / "index.html"
         (out_dir / "index.html").write_text(viewer.read_text(encoding="utf-8"), encoding="utf-8")
         written.append("index.html")
     except (FileNotFoundError, ModuleNotFoundError) as e:
         print(f"[context-toolkit-query] viewer not copied ({e})", file=sys.stderr)
+    try:
+        cyto = resources.files("mcp_context_toolkit") / "viewer" / "cytoscape.min.js"
+        (out_dir / "cytoscape.min.js").write_bytes(cyto.read_bytes())
+        written.append("cytoscape.min.js")
+    except (FileNotFoundError, ModuleNotFoundError) as e:
+        print(f"[context-toolkit-query] cytoscape not copied ({e}) — Graph tab disabled", file=sys.stderr)
 
     print(json.dumps({"out_dir": str(out_dir), "written": written}, indent=2))
+    return 0
+
+
+def _cmd_method_block() -> int:
+    """Print the packaged working-method block (the fable-absorbed working method) as
+    plain text — a UserPromptSubmit hook injects it as always-on context to counter
+    instruction-decay. Content-only; the hook wraps it. Empty + rc 0 if the resource
+    is missing (never blocks a prompt)."""
+    from importlib import resources
+    try:
+        res = resources.files("mcp_context_toolkit") / "method" / "method_block.md"
+        sys.stdout.write(res.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ModuleNotFoundError):
+        return 0
     return 0
 
 
@@ -469,7 +482,7 @@ def _cmd_file_query(
     fmt: str,
     warnings: list[str],
 ) -> int:
-    matches = engine.query_for_file(file_path)
+    matches = engine.query_for_file_tiered(file_path)
     decisions = engine.query_decisions_for_file(file_path)
     deps = engine.query_dependencies(file_path)
 
@@ -589,7 +602,15 @@ def main() -> None:
         "--reindex", action="store_true",
         help="Regenerate _descriptions.md from ALL memory files (incl. loose/un-bundled). Mechanical + deterministic — run on every memory write (PostToolUse hook).",
     )
+    parser.add_argument(
+        "--method-block", action="store_true",
+        help="Print the packaged working-method block (fable-absorbed working method) as plain text — a UserPromptSubmit hook injects it as always-on context.",
+    )
     args = parser.parse_args()
+
+    # Method-block dump — store-independent, no rules/memory dir needed.
+    if args.method_block:
+        sys.exit(_cmd_method_block())
 
     # Memory subcommands (recall / tier-dump) — independent of the rules dir, used
     # by the auto-recall hooks. Resolve memory dir; emit empty bundle if none.

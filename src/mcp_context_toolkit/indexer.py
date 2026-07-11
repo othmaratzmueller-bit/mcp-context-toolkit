@@ -48,7 +48,10 @@ def build_descriptions(
     for m in mems:
         desc = " ".join((m.description or "").split())  # collapse whitespace/newlines
         fname = Path(m.source_path).name if m.source_path else f"{m.name}.md"
-        lines.append(f"- **{m.name}** ({m.type}) — {desc} → {fname}")
+        # Inbound edges (who links here). Sorted → byte-stable, safe to commit.
+        cited = eng.backlinks(m.name)
+        suffix = f"  ← cited by: {', '.join(cited)}" if cited else ""
+        lines.append(f"- **{m.name}** ({m.type}) — {desc} → {fname}{suffix}")
         line_index[m.name] = len(lines)  # 1-based line number of this entry
 
     return {

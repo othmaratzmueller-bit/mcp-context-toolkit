@@ -445,6 +445,20 @@ class RulesEngine:
         matches = self.query_for_file(file_path)
         return matches, fingerprint_rules(matches)
 
+    def query_for_file_tiered(self, file_path: str) -> list[Rule]:
+        """Project-tier matches if any; otherwise the shared-tier floor.
+
+        The shared org grundregeln use broad (``**/*``) globs, so they would
+        otherwise inject on every file and duplicate the project rules that
+        already cover it. This surfaces them ONLY where no project rule
+        matches — a generic discipline floor for files outside the project's
+        rule globs (a top-level script, a config, a greenfield repo). With no
+        shared tier loaded, every match is project-tier → identical to
+        query_for_file."""
+        matches = self.query_for_file(file_path)
+        project = [r for r in matches if r.tier == "project"]
+        return project if project else matches
+
     def query_decisions_for_file(
         self,
         file_path: str,
