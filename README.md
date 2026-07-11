@@ -5,8 +5,9 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
 > A generic [MCP](https://modelcontextprotocol.io) server that feeds any MCP client
-> the *right context at the right time* — file-scoped **rules** and frecency-ranked
-> **memory**, loaded on demand from plain markdown + YAML-frontmatter stores.
+> the *right context at the right time* — file-scoped **rules**, frecency-ranked
+> **memory**, and a navigable **link-graph**, loaded on demand from plain markdown +
+> YAML-frontmatter stores ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible).
 
 **By [Othmar Atzmüller](https://github.com/othmaratzmueller-bit).** MIT-licensed —
 fork freely; a credit back is appreciated.
