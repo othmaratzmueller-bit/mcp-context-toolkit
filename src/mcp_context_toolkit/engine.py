@@ -10,7 +10,7 @@ from typing import Iterable
 import yaml
 from pydantic import ValidationError
 
-from mcp_context_toolkit.models import Rule, RulePriority, RuleScope, RuleType, Decision
+from mcp_context_toolkit.models import Rule, RulePriority, RuleScope, RuleTier, RuleType, Decision
 
 
 _FINGERPRINT_EXCLUDE = {
@@ -19,7 +19,26 @@ _FINGERPRINT_EXCLUDE = {
     "last_reviewed",
     "review_interval_days",
     "owner",
+    "tier",
 }
+
+# Sharpness lint (see validate_directory): the injected visibility window and
+# the modal/prohibition tokens (DE+EN) that must appear inside it. Word-bounded
+# so "no"/"nur" never match inside other words ("nothing", "nurture").
+_SHARPNESS_WINDOW = 160
+_SHARPNESS_RE = re.compile(
+    r"\b(nie|niemals|immer|muss|müssen|muessen|kein|keine|nur|erst|stopp|stop|"
+    r"pflicht(?:-review)?|verboten|jede[rs]?|"
+    r"never|always|must|every|no|not|only|first|forbidden|required)\b",
+    re.IGNORECASE,
+)
+
+# Decision injection cut (see query_decisions_for_file): decisions accumulate
+# unbounded on hot files, so injection defaults to the newest TOP_K accepted
+# ones. Measured before the cut: 27 decisions / 31.5k chars = 78 % of the
+# injected payload on a single hot file.
+DECISION_INJECT_STATUSES: tuple[str, ...] = ("accepted",)
+DECISION_TOP_K = 8
 
 
 def fingerprint_rules(rules: list["Rule"], decisions: list["Decision"] | None = None) -> str:
@@ -95,24 +114,52 @@ class RulesEngine:
         self._rules: list[Rule] = rules or []
         self._decisions: list[Decision] = decisions or []
         self._graph: dict = graph or {}
+        self._roots: list[tuple[Path, RuleTier]] = []
 
     @classmethod
-    def from_directory(cls, root: Path | str) -> "RulesEngine":
+    def from_directory(cls, root: Path | str, tier: RuleTier = "project") -> "RulesEngine":
         engine = cls()
-        engine.load_directory(root)
+        engine.load_directory(root, tier=tier)
+        return engine
+
+    @classmethod
+    def from_roots(
+        cls, roots: dict[str, Path | str], *, strict: bool = True
+    ) -> "RulesEngine":
+        """Build from a {tier: path} mapping. The project tier is loaded BEFORE
+        the shared tier, so on a (non-security) key collision the project rule
+        wins — specific beats general, exactly like MemoryEngine.from_roots.
+        A non_negotiable rule on either side of a collision raises RuleLoadError
+        (see load_directory). Mirrors the memory 2-tier wiring."""
+        engine = cls()
+        for tier in ("project", "shared"):
+            if tier in roots:
+                engine.load_directory(roots[tier], tier=tier, strict=strict)  # type: ignore[arg-type]
+        for tier, path in sorted(roots.items()):
+            if tier not in ("project", "shared"):
+                engine.load_directory(path, tier="unknown", strict=strict)
         return engine
 
     def load_directory(
-        self, root: Path | str, *, strict: bool = True
+        self, root: Path | str, *, tier: RuleTier = "project", strict: bool = True
     ) -> dict:
-        """Load all rule YAMLs under root.
+        """Load all rule YAMLs under root and ACCUMULATE onto already-loaded
+        rules (does not replace prior tiers). Vorbild: MemoryEngine.load_directory.
+
+        Load order IS precedence: load the higher-precedence tier first
+        (project), then the shared org tier. On a cross-tier key collision the
+        already-loaded (earlier) rule wins and the incoming one is skipped —
+        EXCEPT when a non_negotiable rule is on either side of the collision:
+        that raises RuleLoadError UNCONDITIONALLY (a security rule must never be
+        silently shadowed or downgraded — W4 fail-fast). This guard is NOT
+        relaxed by strict=False.
 
         strict=True (default): raises RuleLoadError if any file fails to parse
-        or validate. Used for CI, pytest, manual validation.
+        or validate, or on a same-tier duplicate key. Used for CI, pytest.
 
-        strict=False: skips broken files, loads the valid ones, returns stats
-        including the list of errors. Used by the hook path so a single broken
-        YAML does not blind the user to all other rules.
+        strict=False: skips broken files / same-tier dups, loads the valid ones,
+        returns stats including the list of errors. Used by the hook path so a
+        single broken YAML does not blind the user to all other rules.
         """
         root_path = Path(root)
         if not root_path.exists():
@@ -124,6 +171,7 @@ class RulesEngine:
         for yaml_file in self._iter_rule_files(root_path):
             try:
                 rule = self._load_file(yaml_file)
+                rule.tier = tier
                 loaded.append(rule)
             except RuleLoadError as e:
                 errors.append(e)
@@ -132,36 +180,62 @@ class RulesEngine:
             details = "\n".join(str(e) for e in errors)
             raise RuleLoadError(root_path, f"{len(errors)} rule(s) failed to load:\n{details}")
 
-        keys_seen: set[str] = set()
-        deduped: list[Rule] = []
+        existing_by_key = {r.key: r for r in self._rules}
+        within_tier_seen: set[str] = set()
+        added = 0
+        shadowed = 0
         duplicate_errors: list[str] = []
         for rule in loaded:
-            if rule.key in keys_seen:
+            # Same-tier duplicate key — as before (raise in strict, skip lenient).
+            if rule.key in within_tier_seen:
                 msg = f"duplicate rule key: {rule.key} (source: {rule.source_path})"
                 if strict:
                     raise RuleLoadError(root_path, msg)
                 duplicate_errors.append(msg)
                 continue
-            keys_seen.add(rule.key)
-            deduped.append(rule)
+            within_tier_seen.add(rule.key)
 
-        self._rules = deduped
-        
-        # Load decisions if decisions directory exists
-        decisions_dir = root_path.parent / "decisions"
-        if decisions_dir.is_dir():
-            self._load_decisions(decisions_dir)
+            prior = existing_by_key.get(rule.key)
+            if prior is not None:
+                # Cross-tier collision: the earlier tier wins. A non_negotiable
+                # rule on EITHER side is a hard error regardless of strict — no
+                # project rule may silently shadow (or downgrade) a security rule.
+                if rule.priority == "non_negotiable" or prior.priority == "non_negotiable":
+                    raise RuleLoadError(
+                        root_path,
+                        f"non_negotiable rule collision on key '{rule.key}': tier "
+                        f"'{tier}' ({rule.priority}, {rule.source_path}) collides with "
+                        f"already-loaded tier '{prior.tier}' ({prior.priority}, "
+                        f"{prior.source_path}). A non_negotiable rule must not be "
+                        f"silently overridden — resolve the key clash.",
+                    )
+                shadowed += 1
+                continue
+            self._rules.append(rule)
+            existing_by_key[rule.key] = rule
+            added += 1
 
-        # Load graph if graph/reference-index.json exists
-        graph_file = root_path.parent / "graph" / "reference-index.json"
-        if graph_file.exists():
-            try:
-                self._graph = json.loads(graph_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+        self._roots.append((root_path, tier))
+
+        # Decisions + graph: the FIRST loaded tier that provides them wins (no
+        # cross-tier replace). On a single-tier load this is identical to before.
+        if not self._decisions:
+            decisions_dir = root_path.parent / "decisions"
+            if decisions_dir.is_dir():
+                self._load_decisions(decisions_dir)
+
+        if not self._graph:
+            graph_file = root_path.parent / "graph" / "reference-index.json"
+            if graph_file.exists():
+                try:
+                    self._graph = json.loads(graph_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
 
         return {
-            "loaded": len(deduped),
+            "loaded": added,
+            "shadowed": shadowed,
+            "tier": tier,
             "root": str(root_path),
             "errors": [str(e) for e in errors] + duplicate_errors,
         }
@@ -204,6 +278,13 @@ class RulesEngine:
     @property
     def rules(self) -> list[Rule]:
         return list(self._rules)
+
+    @property
+    def roots(self) -> list[tuple[Path, RuleTier]]:
+        """The (path, tier) pairs this engine was loaded from, in load order.
+        Used by validate_rules to re-check every tier and by the reloader to
+        watch every root — not just the project one."""
+        return list(self._roots)
 
     def get_rule(self, key: str) -> Rule | None:
         return next((r for r in self._rules if r.key == key), None)
@@ -254,6 +335,24 @@ class RulesEngine:
                         f"{rule.key} conflicts_with unknown rule "
                         f"'{conflict.rule}' (source: {rule.source_path})"
                     )
+
+        # Sharpness lint: eval-backed finding (2026-07) — on weak models a rule
+        # only works when its INJECTED window (the first ~160 summary chars)
+        # names the concrete prohibited/required action with a modal verb
+        # ("NEVER invent an API signature", "EVERY db.query MUST filter").
+        # Virtue prose buries the rule below the visibility cut. Warn (never
+        # error) when a non_negotiable/mandatory summary opens without one.
+        for rule in loaded:
+            if rule.priority == "recommended":
+                continue
+            head = " ".join(rule.summary.split())[:_SHARPNESS_WINDOW]
+            if not _SHARPNESS_RE.search(head):
+                warnings.append(
+                    f"{rule.key}: summary opens without a modal/prohibition "
+                    f"(NIE/IMMER/MUSS/NEVER/ALWAYS/MUST/EVERY...) in the first "
+                    f"{_SHARPNESS_WINDOW} chars — weak models will miss the rule "
+                    f"(source: {rule.source_path})"
+                )
 
         return {
             "ok": len(errors) == 0,
@@ -346,15 +445,32 @@ class RulesEngine:
         matches = self.query_for_file(file_path)
         return matches, fingerprint_rules(matches)
 
-    def query_decisions_for_file(self, file_path: str) -> list[Decision]:
+    def query_decisions_for_file(
+        self,
+        file_path: str,
+        statuses: tuple[str, ...] | None = DECISION_INJECT_STATUSES,
+        top_k: int | None = DECISION_TOP_K,
+    ) -> list[Decision]:
+        """Match decisions for a file, cut for injection by default.
+
+        Decisions accumulate unbounded on hot files (no lifecycle pruning),
+        so the default returns only the ``top_k`` newest with an allowed
+        ``status`` — pass ``statuses=None`` / ``top_k=None`` for the raw,
+        unfiltered match set (audits, tooling).
+        """
         normalized = self._normalize_path(file_path)
         matches: list[Decision] = []
         for d in self._decisions:
+            if statuses is not None and d.status not in statuses:
+                continue
             for pattern in d.applies_to.files:
                 if self._glob_match(normalized, pattern):
                     matches.append(d)
                     break
-        return matches
+        # Newest first; equal dates keep deterministic key order (stable sorts).
+        matches.sort(key=lambda d: d.key)
+        matches.sort(key=lambda d: d.date, reverse=True)
+        return matches if top_k is None else matches[:top_k]
 
     def query_dependencies(self, file_path: str) -> dict:
         if not self._graph:

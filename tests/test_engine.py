@@ -37,6 +37,36 @@ def _make_decision(key: str, files: list[str], **overrides) -> Decision:
     return Decision(**defaults)  # type: ignore[arg-type]
 
 
+def _write_rule_yaml(
+    d: Path, key: str, *, priority: str = "mandatory",
+    files: list[str] | None = None, title: str | None = None,
+) -> None:
+    """Write a minimal but schema-valid rule YAML into directory ``d`` — used by
+    the tier-layering tests that exercise real from_roots / load_directory loads."""
+    d.mkdir(parents=True, exist_ok=True)
+    files = files or ["**/*"]
+    title = title or f"Rule {key}"
+    files_block = "\n".join(f'    - "{f}"' for f in files)
+    (d / f"{key}.yaml").write_text(
+        f"""key: {key}
+title: "{title}"
+type: workflow
+scope: all
+priority: {priority}
+modules: [all]
+applies_to:
+  files:
+{files_block}
+summary: |
+  Summary for {key} — at least ten characters.
+content: |
+  Body for {key}.
+created: 2026-07-08
+""",
+        encoding="utf-8",
+    )
+
+
 class TestCompileGlob:
     @pytest.mark.parametrize(
         "path,pattern,expected",
@@ -94,6 +124,35 @@ class TestRulesEngine:
         assert [d.key for d in engine.query_decisions_for_file(target)] == ["dec_a", "dec_c"]
         # non-matching path yields nothing
         assert engine.query_decisions_for_file("README.md") == []
+
+    def test_query_decisions_filters_status_by_default(self):
+        accepted = _make_decision("dec_ok", ["backend/**/*.py"])
+        draft = _make_decision("dec_draft", ["backend/**/*.py"], status="draft")
+        superseded = _make_decision(
+            "dec_old", ["backend/**/*.py"], status="superseded"
+        )
+        engine = RulesEngine(decisions=[accepted, draft, superseded])
+
+        target = "backend/app/x.py"
+        assert [d.key for d in engine.query_decisions_for_file(target)] == ["dec_ok"]
+        # statuses=None disables the filter (raw access for audits/tooling)
+        raw = engine.query_decisions_for_file(target, statuses=None, top_k=None)
+        assert {d.key for d in raw} == {"dec_ok", "dec_draft", "dec_old"}
+
+    def test_query_decisions_top_k_keeps_newest(self):
+        decisions = [
+            _make_decision(f"dec_{i:02d}", ["backend/**/*.py"], date=date(2026, 1, i))
+            for i in range(1, 13)
+        ]
+        engine = RulesEngine(decisions=decisions)
+
+        cut = engine.query_decisions_for_file("backend/app/x.py")
+        assert len(cut) == 8
+        # newest first, oldest four (01-04) dropped
+        assert cut[0].key == "dec_12"
+        assert {d.key for d in cut} == {f"dec_{i:02d}" for i in range(5, 13)}
+        # top_k=None returns the full match set
+        assert len(engine.query_decisions_for_file("backend/app/x.py", top_k=None)) == 12
 
     def test_query_for_file_sorts_by_priority(self):
         r_low = _make_rule("low", ["**/*.py"], priority="recommended")
@@ -371,3 +430,193 @@ class TestStoreConventionDiscovery:
         monkeypatch.chdir(tmp_path)
 
         assert _discover_memory_dir(None) == mem
+
+
+class TestSharpnessLint:
+    """validate_directory warnt, wenn eine non_negotiable/mandatory-Summary in den
+    ersten 160 Zeichen kein Modal-/Verbots-Token traegt (eval-belegtes Format:
+    schwache Modelle verfehlen Regeln, deren Gebot hinter dem Injektions-Fenster
+    liegt). recommended ist ausgenommen."""
+
+    def _write(self, d: Path, key: str, summary: str, priority: str = "mandatory"):
+        _write_rule_yaml(d, key, priority=priority)
+        p = d / f"{key}.yaml"
+        s = p.read_text(encoding="utf-8")
+        import re
+        p.write_text(re.sub(r"summary: \|\n  .*\n", f"summary: |\n  {summary}\n", s), encoding="utf-8")
+
+    def test_virtue_summary_warns(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        self._write(d, "vague_rule", "Work carefully and verify things thoroughly when editing code here.")
+        r = RulesEngine.validate_directory(d)
+        assert any("modal/prohibition" in w for w in r["warnings"])
+
+    def test_prohibition_summary_passes(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        self._write(d, "sharp_rule", "NEVER invent an API signature from memory - open the source first.")
+        r = RulesEngine.validate_directory(d)
+        assert not any("modal/prohibition" in w for w in r["warnings"])
+
+    def test_recommended_is_exempt(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        self._write(d, "soft_rule", "Consider extracting helpers when files grow large over time here.",
+                    priority="recommended")
+        r = RulesEngine.validate_directory(d)
+        assert not any("modal/prohibition" in w for w in r["warnings"])
+
+    def test_modal_outside_window_warns(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        filler = "This paragraph describes background context of the system architecture in a descriptive tone for a while now " * 2
+        self._write(d, "buried_rule", filler + " NEVER do the bad thing.")
+        r = RulesEngine.validate_directory(d)
+        assert any("modal/prohibition" in w for w in r["warnings"])
+
+
+class TestStoreConventionsEnv:
+    """CONTEXT_STORE_CONVENTIONS makes the walk-up conventions configurable
+    (branding, e.g. ".acme") without forking the engine. Default unchanged."""
+
+    def test_env_adds_branded_convention(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        rules = tmp_path / ".acme" / "rules"
+        rules.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".acme,.context,.claude")
+        assert _discover_rules_dir() == rules
+
+    def test_default_ignores_unknown_dirs(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.cli import _discover_rules_dir
+
+        (tmp_path / ".acme" / "rules").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CONTEXT_STORE_CONVENTIONS", raising=False)
+        with pytest.raises(FileNotFoundError):
+            _discover_rules_dir()
+
+    def test_mcp_server_discover_returns_none_without_rules(self, tmp_path: Path, monkeypatch):
+        # Project rules are OPTIONAL for the server: no dir -> None, not raise
+        # (a bare workspace must not lose memory tools / shared grundregeln).
+        from mcp_context_toolkit.mcp_server import _discover_rules_dir as srv_discover
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CONTEXT_RULES_DIR", raising=False)
+        assert srv_discover() is None
+
+    def test_mcp_server_env_conventions(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.mcp_server import _discover_rules_dir as srv_discover
+
+        rules = tmp_path / ".acme" / "rules"
+        rules.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CONTEXT_RULES_DIR", raising=False)
+        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".acme")
+        assert srv_discover() == rules
+
+
+class TestTierLayering:
+    """2-tier rules (project + shared org grundregeln). Load order IS precedence:
+    project loaded first wins on a non-security collision; a non_negotiable
+    collision on either side is a hard error (a security rule is never shadowed)."""
+
+    def test_from_roots_accumulates_both_tiers(self, tmp_path: Path):
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        _write_rule_yaml(proj, "proj_only")
+        _write_rule_yaml(shared, "shared_only")
+
+        e = RulesEngine.from_roots({"project": proj, "shared": shared})
+        assert {r.key for r in e.rules} == {"proj_only", "shared_only"}
+        assert e.get_rule("proj_only").tier == "project"     # type: ignore[union-attr]
+        assert e.get_rule("shared_only").tier == "shared"    # type: ignore[union-attr]
+
+    def test_roots_property_records_load_order(self, tmp_path: Path):
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        _write_rule_yaml(proj, "a")
+        _write_rule_yaml(shared, "b")
+
+        e = RulesEngine.from_roots({"project": proj, "shared": shared})
+        assert [t for _, t in e.roots] == ["project", "shared"]
+
+    def test_project_wins_on_mandatory_collision(self, tmp_path: Path):
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        _write_rule_yaml(proj, "dup", title="Project version", priority="mandatory")
+        _write_rule_yaml(shared, "dup", title="Shared version", priority="recommended")
+
+        e = RulesEngine.from_roots({"project": proj, "shared": shared})
+        rule = e.get_rule("dup")
+        assert rule is not None
+        assert rule.title == "Project version"   # project loaded first wins
+        assert rule.tier == "project"
+        assert len(e.rules) == 1
+
+    def test_non_negotiable_shadow_raises_when_incoming(self, tmp_path: Path):
+        # shared carries a non_negotiable rule, project re-uses the key at a lower
+        # priority -> project (first) would silently downgrade the security rule.
+        from mcp_context_toolkit.engine import RuleLoadError
+
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        _write_rule_yaml(proj, "sec", priority="mandatory")
+        _write_rule_yaml(shared, "sec", priority="non_negotiable")
+
+        with pytest.raises(RuleLoadError):
+            RulesEngine.from_roots({"project": proj, "shared": shared})
+
+    def test_non_negotiable_shadow_raises_when_existing(self, tmp_path: Path):
+        # project owns the non_negotiable; a shared key clash is still an error.
+        from mcp_context_toolkit.engine import RuleLoadError
+
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        _write_rule_yaml(proj, "sec", priority="non_negotiable")
+        _write_rule_yaml(shared, "sec", priority="mandatory")
+
+        with pytest.raises(RuleLoadError):
+            RulesEngine.from_roots({"project": proj, "shared": shared})
+
+    def test_non_negotiable_collision_not_relaxed_by_lenient(self, tmp_path: Path):
+        # The security guard fires even with strict=False (security > leniency).
+        from mcp_context_toolkit.engine import RuleLoadError
+
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        _write_rule_yaml(proj, "sec", priority="mandatory")
+        _write_rule_yaml(shared, "sec", priority="non_negotiable")
+
+        with pytest.raises(RuleLoadError):
+            RulesEngine.from_roots({"project": proj, "shared": shared}, strict=False)
+
+    def test_shared_only_tier_loads(self, tmp_path: Path):
+        shared = tmp_path / "shared"
+        _write_rule_yaml(shared, "grundregel")
+
+        e = RulesEngine.from_roots({"shared": shared})
+        assert [r.key for r in e.rules] == ["grundregel"]
+        assert e.get_rule("grundregel").tier == "shared"   # type: ignore[union-attr]
+
+    def test_load_directory_accumulates_and_reports_shadowed(self, tmp_path: Path):
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        _write_rule_yaml(proj, "a")
+        _write_rule_yaml(proj, "b")
+        _write_rule_yaml(shared, "a")   # mandatory collision -> project wins, shadowed
+        _write_rule_yaml(shared, "c")
+
+        e = RulesEngine()
+        s1 = e.load_directory(proj, tier="project")
+        assert s1["loaded"] == 2 and s1["shadowed"] == 0
+        s2 = e.load_directory(shared, tier="shared")
+        assert s2["loaded"] == 1      # only c is new
+        assert s2["shadowed"] == 1    # a collided, project kept
+        assert {r.key for r in e.rules} == {"a", "b", "c"}
+        assert e.get_rule("a").tier == "project"   # type: ignore[union-attr]
+
+    def test_fingerprint_ignores_tier(self, tmp_path: Path):
+        # Same content, different tier -> identical fingerprint (tier is excluded,
+        # so the live-reload hook does not see a spurious "rules changed" signal).
+        r_proj = _make_rule("x", ["**/*"], tier="project")
+        r_shared = _make_rule("x", ["**/*"], tier="shared")
+        assert fingerprint_rules([r_proj]) == fingerprint_rules([r_shared])

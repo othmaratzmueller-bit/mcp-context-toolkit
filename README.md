@@ -47,6 +47,12 @@ Don't load everything upfront. Load the right thing at the right moment:
 | **Decisions** | file-path glob → matching decisions (ADRs) | design decisions, architecture records (ADRs), rationales — *why* something is built the way it is |
 | **Memory** | keyword relevance × frecency (hot/cold) | lessons, user preferences, context — anything worth recalling later |
 
+Decisions injection is cut by default (`query_decisions_for_file`): only the newest
+`DECISION_TOP_K` (8) decisions with an allowed `status` (`accepted`) are returned for a
+path, since decisions accumulate unbounded with no lifecycle pruning. Pass
+`statuses=None, top_k=None` for the raw, unfiltered match set (audits, tooling) — the
+default injection path (hooks, `query_rules_for_file`) always uses the cut.
+
 ## Two tiers
 
 Both content types load from multiple roots tagged by tier:

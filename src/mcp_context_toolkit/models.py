@@ -15,6 +15,10 @@ RuleType = Literal[
 RuleScope = Literal["backend", "frontend", "database", "infrastructure", "docs", "all"]
 RulePriority = Literal["non_negotiable", "mandatory", "recommended"]
 RuleLanguage = Literal["python", "javascript", "css", "html", "yaml", "sql"]
+# Which layer a rule was loaded from. 'project' = the repo-local rule set
+# (CONTEXT_RULES_DIR), 'shared' = the org grundregeln (CONTEXT_SHARED_RULES_DIR).
+# Default 'project' keeps single-tier callers byte-identical. Mirrors MemoryTier.
+RuleTier = Literal["shared", "project", "unknown"]
 
 
 class RuleApplyTo(BaseModel):
@@ -82,6 +86,7 @@ class Rule(BaseModel):
     last_reviewed: date | None = None
     review_interval_days: int | None = None
 
+    tier: RuleTier = "project"
     source_path: str | None = None
 
 
