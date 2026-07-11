@@ -33,6 +33,13 @@ _SHARPNESS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Decision injection cut (see query_decisions_for_file): decisions accumulate
+# unbounded on hot files, so injection defaults to the newest TOP_K accepted
+# ones. Measured before the cut: 27 decisions / 31.5k chars = 78 % of the
+# injected payload on a single hot file.
+DECISION_INJECT_STATUSES: tuple[str, ...] = ("accepted",)
+DECISION_TOP_K = 8
+
 
 def fingerprint_rules(rules: list["Rule"], decisions: list["Decision"] | None = None) -> str:
     """Stable 16-char hex hash over the user-visible fields of rules and decisions.
@@ -438,15 +445,32 @@ class RulesEngine:
         matches = self.query_for_file(file_path)
         return matches, fingerprint_rules(matches)
 
-    def query_decisions_for_file(self, file_path: str) -> list[Decision]:
+    def query_decisions_for_file(
+        self,
+        file_path: str,
+        statuses: tuple[str, ...] | None = DECISION_INJECT_STATUSES,
+        top_k: int | None = DECISION_TOP_K,
+    ) -> list[Decision]:
+        """Match decisions for a file, cut for injection by default.
+
+        Decisions accumulate unbounded on hot files (no lifecycle pruning),
+        so the default returns only the ``top_k`` newest with an allowed
+        ``status`` — pass ``statuses=None`` / ``top_k=None`` for the raw,
+        unfiltered match set (audits, tooling).
+        """
         normalized = self._normalize_path(file_path)
         matches: list[Decision] = []
         for d in self._decisions:
+            if statuses is not None and d.status not in statuses:
+                continue
             for pattern in d.applies_to.files:
                 if self._glob_match(normalized, pattern):
                     matches.append(d)
                     break
-        return matches
+        # Newest first; equal dates keep deterministic key order (stable sorts).
+        matches.sort(key=lambda d: d.key)
+        matches.sort(key=lambda d: d.date, reverse=True)
+        return matches if top_k is None else matches[:top_k]
 
     def query_dependencies(self, file_path: str) -> dict:
         if not self._graph:

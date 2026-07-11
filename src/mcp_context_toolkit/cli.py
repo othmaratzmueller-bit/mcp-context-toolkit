@@ -479,6 +479,9 @@ def _cmd_file_query(
             "fingerprint": fingerprint_rules(matches, decisions),
             "markdown": markdown if markdown else None,
             "rule_count": len(matches),
+            # Compact IDs for the hook's repeat-touch reminder line
+            # (priority-sorted like matches; short_id falls back to key).
+            "short_ids": [r.short_id or r.key for r in matches],
             "warnings": warnings,
         }
         print(json.dumps(out))

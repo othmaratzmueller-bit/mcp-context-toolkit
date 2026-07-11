@@ -125,6 +125,35 @@ class TestRulesEngine:
         # non-matching path yields nothing
         assert engine.query_decisions_for_file("README.md") == []
 
+    def test_query_decisions_filters_status_by_default(self):
+        accepted = _make_decision("dec_ok", ["backend/**/*.py"])
+        draft = _make_decision("dec_draft", ["backend/**/*.py"], status="draft")
+        superseded = _make_decision(
+            "dec_old", ["backend/**/*.py"], status="superseded"
+        )
+        engine = RulesEngine(decisions=[accepted, draft, superseded])
+
+        target = "backend/app/x.py"
+        assert [d.key for d in engine.query_decisions_for_file(target)] == ["dec_ok"]
+        # statuses=None disables the filter (raw access for audits/tooling)
+        raw = engine.query_decisions_for_file(target, statuses=None, top_k=None)
+        assert {d.key for d in raw} == {"dec_ok", "dec_draft", "dec_old"}
+
+    def test_query_decisions_top_k_keeps_newest(self):
+        decisions = [
+            _make_decision(f"dec_{i:02d}", ["backend/**/*.py"], date=date(2026, 1, i))
+            for i in range(1, 13)
+        ]
+        engine = RulesEngine(decisions=decisions)
+
+        cut = engine.query_decisions_for_file("backend/app/x.py")
+        assert len(cut) == 8
+        # newest first, oldest four (01-04) dropped
+        assert cut[0].key == "dec_12"
+        assert {d.key for d in cut} == {f"dec_{i:02d}" for i in range(5, 13)}
+        # top_k=None returns the full match set
+        assert len(engine.query_decisions_for_file("backend/app/x.py", top_k=None)) == 12
+
     def test_query_for_file_sorts_by_priority(self):
         r_low = _make_rule("low", ["**/*.py"], priority="recommended")
         r_high = _make_rule("high", ["**/*.py"], priority="non_negotiable")
