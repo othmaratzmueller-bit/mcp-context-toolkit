@@ -403,6 +403,46 @@ class TestStoreConventionDiscovery:
         assert _discover_memory_dir(None) == mem
 
 
+class TestSharpnessLint:
+    """validate_directory warnt, wenn eine non_negotiable/mandatory-Summary in den
+    ersten 160 Zeichen kein Modal-/Verbots-Token traegt (eval-belegtes Format:
+    schwache Modelle verfehlen Regeln, deren Gebot hinter dem Injektions-Fenster
+    liegt). recommended ist ausgenommen."""
+
+    def _write(self, d: Path, key: str, summary: str, priority: str = "mandatory"):
+        _write_rule_yaml(d, key, priority=priority)
+        p = d / f"{key}.yaml"
+        s = p.read_text(encoding="utf-8")
+        import re
+        p.write_text(re.sub(r"summary: \|\n  .*\n", f"summary: |\n  {summary}\n", s), encoding="utf-8")
+
+    def test_virtue_summary_warns(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        self._write(d, "vague_rule", "Work carefully and verify things thoroughly when editing code here.")
+        r = RulesEngine.validate_directory(d)
+        assert any("modal/prohibition" in w for w in r["warnings"])
+
+    def test_prohibition_summary_passes(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        self._write(d, "sharp_rule", "NEVER invent an API signature from memory - open the source first.")
+        r = RulesEngine.validate_directory(d)
+        assert not any("modal/prohibition" in w for w in r["warnings"])
+
+    def test_recommended_is_exempt(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        self._write(d, "soft_rule", "Consider extracting helpers when files grow large over time here.",
+                    priority="recommended")
+        r = RulesEngine.validate_directory(d)
+        assert not any("modal/prohibition" in w for w in r["warnings"])
+
+    def test_modal_outside_window_warns(self, tmp_path: Path):
+        d = tmp_path / "rules"
+        filler = "This paragraph describes background context of the system architecture in a descriptive tone for a while now " * 2
+        self._write(d, "buried_rule", filler + " NEVER do the bad thing.")
+        r = RulesEngine.validate_directory(d)
+        assert any("modal/prohibition" in w for w in r["warnings"])
+
+
 class TestStoreConventionsEnv:
     """CONTEXT_STORE_CONVENTIONS makes the walk-up conventions configurable
     (branding, e.g. ".talos") without forking the engine. Default unchanged."""

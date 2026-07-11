@@ -22,6 +22,17 @@ _FINGERPRINT_EXCLUDE = {
     "tier",
 }
 
+# Sharpness lint (see validate_directory): the injected visibility window and
+# the modal/prohibition tokens (DE+EN) that must appear inside it. Word-bounded
+# so "no"/"nur" never match inside other words ("nothing", "nurture").
+_SHARPNESS_WINDOW = 160
+_SHARPNESS_RE = re.compile(
+    r"\b(nie|niemals|immer|muss|müssen|muessen|kein|keine|nur|erst|stopp|stop|"
+    r"pflicht(?:-review)?|verboten|jede[rs]?|"
+    r"never|always|must|every|no|not|only|first|forbidden|required)\b",
+    re.IGNORECASE,
+)
+
 
 def fingerprint_rules(rules: list["Rule"], decisions: list["Decision"] | None = None) -> str:
     """Stable 16-char hex hash over the user-visible fields of rules and decisions.
@@ -317,6 +328,24 @@ class RulesEngine:
                         f"{rule.key} conflicts_with unknown rule "
                         f"'{conflict.rule}' (source: {rule.source_path})"
                     )
+
+        # Sharpness lint: eval-backed finding (2026-07) — on weak models a rule
+        # only works when its INJECTED window (the first ~160 summary chars)
+        # names the concrete prohibited/required action with a modal verb
+        # ("NEVER invent an API signature", "EVERY db.query MUST filter").
+        # Virtue prose buries the rule below the visibility cut. Warn (never
+        # error) when a non_negotiable/mandatory summary opens without one.
+        for rule in loaded:
+            if rule.priority == "recommended":
+                continue
+            head = " ".join(rule.summary.split())[:_SHARPNESS_WINDOW]
+            if not _SHARPNESS_RE.search(head):
+                warnings.append(
+                    f"{rule.key}: summary opens without a modal/prohibition "
+                    f"(NIE/IMMER/MUSS/NEVER/ALWAYS/MUST/EVERY...) in the first "
+                    f"{_SHARPNESS_WINDOW} chars — weak models will miss the rule "
+                    f"(source: {rule.source_path})"
+                )
 
         return {
             "ok": len(errors) == 0,
