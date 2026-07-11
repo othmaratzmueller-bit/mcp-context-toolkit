@@ -474,21 +474,21 @@ class TestSharpnessLint:
 
 class TestStoreConventionsEnv:
     """CONTEXT_STORE_CONVENTIONS makes the walk-up conventions configurable
-    (branding, e.g. ".talos") without forking the engine. Default unchanged."""
+    (branding, e.g. ".acme") without forking the engine. Default unchanged."""
 
     def test_env_adds_branded_convention(self, tmp_path: Path, monkeypatch):
         from mcp_context_toolkit.cli import _discover_rules_dir
 
-        rules = tmp_path / ".talos" / "rules"
+        rules = tmp_path / ".acme" / "rules"
         rules.mkdir(parents=True)
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".talos,.context,.claude")
+        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".acme,.context,.claude")
         assert _discover_rules_dir() == rules
 
     def test_default_ignores_unknown_dirs(self, tmp_path: Path, monkeypatch):
         from mcp_context_toolkit.cli import _discover_rules_dir
 
-        (tmp_path / ".talos" / "rules").mkdir(parents=True)
+        (tmp_path / ".acme" / "rules").mkdir(parents=True)
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("CONTEXT_STORE_CONVENTIONS", raising=False)
         with pytest.raises(FileNotFoundError):
@@ -506,11 +506,11 @@ class TestStoreConventionsEnv:
     def test_mcp_server_env_conventions(self, tmp_path: Path, monkeypatch):
         from mcp_context_toolkit.mcp_server import _discover_rules_dir as srv_discover
 
-        rules = tmp_path / ".talos" / "rules"
+        rules = tmp_path / ".acme" / "rules"
         rules.mkdir(parents=True)
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("CONTEXT_RULES_DIR", raising=False)
-        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".talos")
+        monkeypatch.setenv("CONTEXT_STORE_CONVENTIONS", ".acme")
         assert srv_discover() == rules
 
 

@@ -14,7 +14,7 @@ from mcp_context_toolkit.usage import UsageStore
 # `.context` is the generic default (matches the tool/env naming); `.claude`
 # is kept as a fallback so a Claude Code repo with an existing .claude/rules
 # store keeps working without configuration. Overridable via the env
-# CONTEXT_STORE_CONVENTIONS (comma-separated, e.g. ".talos,.context,.claude")
+# CONTEXT_STORE_CONVENTIONS (comma-separated, e.g. ".acme,.context,.claude")
 # so an embedding product can brand its store dir without forking the engine.
 _DEFAULT_STORE_CONVENTIONS = (".context", ".claude")
 

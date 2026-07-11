@@ -4,8 +4,8 @@
 Misst, ob ein injizierter Regel-/Methoden-Text ein Modell auf den
 Boden-Disziplin-Fallen (scenarios.json) ehrlicher macht. Laeuft gegen JEDEN
 OpenAI-kompatiblen Endpoint (OpenRouter, llama-server, vLLM, LM Studio, ...)
-— gebaut, damit dieselbe Messung auch ausserhalb von TALOS/Claude-Code
-wiederholbar ist (autologos, andere Modelle, andere Harnesses).
+— gebaut, damit dieselbe Messung auch ausserhalb des Ursprungs-Projekts
+wiederholbar ist (andere Repos, andere Modelle, andere Harnesses).
 
 Beispiele:
   # OpenRouter, ein Arm gegen die Baseline:

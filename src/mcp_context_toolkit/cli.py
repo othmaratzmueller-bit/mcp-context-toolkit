@@ -15,7 +15,7 @@ from mcp_context_toolkit.engine import (
 # Store-directory conventions tried during walk-up auto-discovery, in order.
 # `.context` is the generic default (matches the tool/env naming); `.claude`
 # is kept as a fallback for existing Claude Code repos. Overridable via
-# CONTEXT_STORE_CONVENTIONS (comma-separated, e.g. ".talos,.context,.claude")
+# CONTEXT_STORE_CONVENTIONS (comma-separated, e.g. ".acme,.context,.claude")
 # — keep in sync with mcp_server._store_conventions.
 _DEFAULT_STORE_CONVENTIONS = (".context", ".claude")
 
