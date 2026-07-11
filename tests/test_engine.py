@@ -154,6 +154,25 @@ class TestRulesEngine:
         # top_k=None returns the full match set
         assert len(engine.query_decisions_for_file("backend/app/x.py", top_k=None)) == 12
 
+    def test_query_for_file_tiered_floors_only_on_zero_match(self):
+        # Shared-tier grundregeln use broad **/* globs (always match); a project
+        # rule scoped to backend/**.
+        floor = _make_rule("gr_floor", ["**/*"], tier="shared")
+        proj = _make_rule("proj_backend", ["backend/**/*.py"], tier="project")
+        engine = RulesEngine([floor, proj])
+
+        # Matched file: project rule wins, shared floor suppressed (no dup).
+        assert [r.key for r in engine.query_for_file_tiered("backend/app/x.py")] == ["proj_backend"]
+        # Zero-match file (outside project globs): the shared floor surfaces.
+        assert [r.key for r in engine.query_for_file_tiered("scripts/tool.sh")] == ["gr_floor"]
+
+    def test_query_for_file_tiered_identical_without_shared(self):
+        # No shared tier → every match is project-tier → same as query_for_file.
+        r = _make_rule("only", ["**/*.py"], tier="project")
+        engine = RulesEngine([r])
+        p = "backend/app/x.py"
+        assert engine.query_for_file_tiered(p) == engine.query_for_file(p)
+
     def test_query_for_file_sorts_by_priority(self):
         r_low = _make_rule("low", ["**/*.py"], priority="recommended")
         r_high = _make_rule("high", ["**/*.py"], priority="non_negotiable")

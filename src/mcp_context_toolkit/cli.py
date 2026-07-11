@@ -469,7 +469,7 @@ def _cmd_file_query(
     fmt: str,
     warnings: list[str],
 ) -> int:
-    matches = engine.query_for_file(file_path)
+    matches = engine.query_for_file_tiered(file_path)
     decisions = engine.query_decisions_for_file(file_path)
     deps = engine.query_dependencies(file_path)
 

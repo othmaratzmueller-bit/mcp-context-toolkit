@@ -181,7 +181,7 @@ def build_server(
         it filters the repo knowledge down to the relevant context for this file.
         """
         engine = rules_reloader.current()
-        matches = engine.query_for_file(file_path)
+        matches = engine.query_for_file_tiered(file_path)
         rules_out = [_rule_summary(r) for r in matches]
 
         decisions = engine.query_decisions_for_file(file_path)

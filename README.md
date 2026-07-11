@@ -53,16 +53,29 @@ path, since decisions accumulate unbounded with no lifecycle pruning. Pass
 `statuses=None, top_k=None` for the raw, unfiltered match set (audits, tooling) — the
 default injection path (hooks, `query_rules_for_file`) always uses the cut.
 
-## Two tiers
+## Two-plus tiers
 
-Both content types load from multiple roots tagged by tier:
+Both content types load from multiple roots tagged by tier — tier *names* differ
+by content type:
 
-- **user** — cross-project knowledge (`~/...`), shared across everything you do
-- **project** — locked to one repo
+- **Memory**: `project` (this repo) → `user` (`~/...`, cross-project) → an
+  optional `core` root (institutional/org-wide notes). A single `recall` spans
+  every loaded tier, so a session sees its repo's notes *and* your global ones
+  in one ranked list.
+- **Rules**: `project` (this repo's own rules) + an optional `shared` tier — an
+  org-wide "grundregeln" floor (`CONTEXT_SHARED_RULES_DIR`) for files a repo's
+  own rule globs don't cover.
 
-On a name collision the **project tier wins** (specific beats general). A single
-`recall` spans both tiers, so a session sees its repo's notes *and* your global ones
-in one ranked list.
+On a name/key collision the more specific (project) tier wins for both content
+types.
+
+`query_for_file_tiered(file_path)` — used by the `query_rules_for_file` MCP tool
+and the CLI's `--format bundle` — prefers project-tier matches; the shared tier
+only surfaces as a generic discipline floor when a file matches **zero** project
+rules (a top-level script, a config file, a greenfield repo before its own rules
+exist). This avoids duplicating a shared rule alongside an already-matching, more
+specific project rule. The untiered `query_for_file` still returns the raw match
+set across all loaded tiers.
 
 ## Hot / cold memory (frecency)
 
