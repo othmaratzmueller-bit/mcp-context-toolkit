@@ -32,6 +32,13 @@ PRICING = {
     "google/gemini-3.1-pro-preview": (0.00215, 0.01292),
     "google/gemini-3.5-flash": (0.00129, 0.00775),
     "qwen3.5-9b": (0.0, 0.0),
+    "openai/gpt-5.6-luna": (0.001, 0.006),      # $1/$6 pro 1M (OpenRouter 2026-07)
+    "openai/gpt-5.6-terra": (0.0025, 0.015),    # $2.5/$15 pro 1M
+    "anthropic/claude-haiku-4.5": (0.001, 0.005),  # $1/$5 pro 1M
+    "qwen/qwen3.6-27b": (0.000285, 0.0024),             # dense 27B (Timeline-Hype 2026-07)
+    "qwen/qwen3.6-35b-a3b": (0.00014, 0.001),           # MoE 35B/3A
+    "qwen/qwen3-coder-next": (0.00011, 0.0008),         # coder MoE, Reasoning nicht schaltbar
+    "qwen/qwen3-next-80b-a3b-instruct": (0.00009, 0.0011),  # MoE 80B/3A instruct
 }
 
 
@@ -70,6 +77,9 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--base-url", required=True)
     ap.add_argument("--api-key-env", default="OPENROUTER_API_KEY")
+    ap.add_argument("--api-key-file", default="",
+                    help="Pfad zu einer Datei mit dem API-Key (z.B. ein Docker-Secret). "
+                         "Hat Vorrang vor --api-key-env; der Wert wird nie geloggt.")
     ap.add_argument("--mode", choices=["or", "llama"], required=True)
     ap.add_argument("--thinking", choices=["on", "off"], default="on")
     ap.add_argument("--max-tokens", type=int, default=0)
@@ -78,7 +88,12 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    key = "" if a.api_key_env == "NONE" else os.environ.get(a.api_key_env, "")
+    if a.api_key_file:
+        key = Path(a.api_key_file).read_text(encoding="utf-8").strip()
+    elif a.api_key_env == "NONE":
+        key = ""
+    else:
+        key = os.environ.get(a.api_key_env, "")
     arms = [("baseline", ""), ("grundregeln", load_arm("grundregeln_v2.md")),
             ("regeln+workflow", load_arm("method.md+grundregeln_v2.md"))]
     think = a.thinking == "on"
