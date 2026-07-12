@@ -49,7 +49,7 @@ Panel**. Zwei Wege:
   liest die Subjekt-Antwort + die Referenzen + `task.md` und vergibt security/quality/correct.
   Zwei unabhängige Richter → Kreuzvalidierung.
 - **Portabel:** ein starkes OpenRouter-Modell als Judge (analog `../run_eval.py`), falls
-  ausserhalb von TALOS/Claude-Code reproduziert wird.
+  ausserhalb dieser Umgebung reproduziert wird.
 
 ## Neues Modell / verschärfte Regel testen
 

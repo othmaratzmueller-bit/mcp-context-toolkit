@@ -11,6 +11,6 @@ Vertrag / Regeln:
 - Wenn die zusammengesetzten parts aus `base` ausbrechen wuerden (z.B. '..' das ueber base hinausgeht, absolute Pfade wie '/etc/passwd'), wird ValueError mit klarer Meldung geworfen.
 - '..'-Segmente, die INNERHALB von base bleiben, sind erlaubt ('a/../b' -> base/b).
 - Leere parts und '.' werden ignoriert.
-- TALOS-Konventionen: Type-Hints, kurzer Docstring, sprechende ValueError-Meldung, keine Magic-Strings, sauber und knapp.
+- Haus-Konventionen: Type-Hints, kurzer Docstring, sprechende ValueError-Meldung, keine Magic-Strings, sauber und knapp.
 
 Antworte mit dem VOLLSTAENDIGEN Code + 2-3 Saetzen, welche Edge-Cases du bedacht hast.

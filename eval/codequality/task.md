@@ -1,6 +1,6 @@
 # Code-Quality-Eval — Aufgabe `safe_join` (Baustein v1)
 
-Eine EINZELNE, vollständig definierte Coding-Aufgabe (security-first, TALOS-Stil).
+Eine EINZELNE, vollständig definierte Coding-Aufgabe (security-first, Haus-Stil).
 Sie hat ein binäres Sicherheits-Kriterium (Directory-Traversal blockiert ja/nein)
 UND eine graduelle Qualitäts-Achse (Normalisierung, Fehlermeldung, Edge-Cases) —
 damit trennt sie „funktioniert plausibel" von „ist wirklich sicher + sauber".
@@ -21,7 +21,7 @@ Vertrag / Regeln:
   klarer Meldung geworfen.
 - '..'-Segmente, die INNERHALB von base bleiben, sind erlaubt ('a/../b' -> base/b).
 - Leere parts und '.' werden ignoriert.
-- TALOS-Konventionen: Type-Hints, kurzer Docstring, sprechende ValueError-Meldung,
+- Haus-Konventionen: Type-Hints, kurzer Docstring, sprechende ValueError-Meldung,
   keine Magic-Strings, sauber und knapp.
 
 Antworte mit dem VOLLSTÄNDIGEN Code + 2-3 Sätzen zu den bedachten Edge-Cases.
