@@ -1,0 +1,3 @@
+# Lauf-Ergebnisse (Modell-Antworten, point-in-time) — reproduzierbar via sweep.sh, nicht versioniert.
+out/
+*.log
