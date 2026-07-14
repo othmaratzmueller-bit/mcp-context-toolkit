@@ -27,6 +27,12 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
   fallback `type` already had. Previously a package written with `metadata: { members: … }`
   parsed with **empty members**, silently disabling member-link resolution (and inflating
   `memory_lint` broken-link counts) on every such file. Top-level still wins over nested.
+- **One invalid rule file no longer aborts the whole load on the serving path.**
+  `RulesEngine` gained a `load_errors` property that accumulates tier-prefixed
+  skip reasons from a lenient (`strict=False`) `load_directory` call, mirroring
+  the `MemoryEngine`'s existing lenient behaviour. `strict=True` (the default,
+  used by CI/`validate_rules()`) is unchanged — it still raises on the first
+  bad file.
 
 ### Changed
 - `_memory_payload` sources members from the (now nested-aware) parser and drops the

@@ -115,6 +115,12 @@ class RulesEngine:
         self._decisions: list[Decision] = decisions or []
         self._graph: dict = graph or {}
         self._roots: list[tuple[Path, RuleTier]] = []
+        # Files skipped during a lenient (strict=False) load — parse/validation
+        # failures and same-tier duplicate keys. Empty after a strict load (it
+        # would have raised). Surfaced by the runtime callers (server banner,
+        # coder onboarding) so a single broken project YAML degrades LOUDLY
+        # ("6 loaded, 10 skipped") instead of silently blanking the rule set.
+        self._load_errors: list[str] = []
 
     @classmethod
     def from_directory(cls, root: Path | str, tier: RuleTier = "project") -> "RulesEngine":
@@ -232,12 +238,15 @@ class RulesEngine:
                 except Exception:
                     pass
 
+        all_errors = [str(e) for e in errors] + duplicate_errors
+        self._load_errors.extend(f"[{tier}] {msg}" for msg in all_errors)
+
         return {
             "loaded": added,
             "shadowed": shadowed,
             "tier": tier,
             "root": str(root_path),
-            "errors": [str(e) for e in errors] + duplicate_errors,
+            "errors": all_errors,
         }
 
     def _load_decisions(self, decisions_dir: Path):
@@ -278,6 +287,12 @@ class RulesEngine:
     @property
     def rules(self) -> list[Rule]:
         return list(self._rules)
+
+    @property
+    def load_errors(self) -> list[str]:
+        """Files skipped during lenient loads (tier-prefixed). Empty after a
+        strict load. Read by the runtime callers to report degraded loads."""
+        return list(self._load_errors)
 
     @property
     def roots(self) -> list[tuple[Path, RuleTier]]:

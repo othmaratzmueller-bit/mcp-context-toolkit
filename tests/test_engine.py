@@ -608,6 +608,28 @@ class TestTierLayering:
         with pytest.raises(RuleLoadError):
             RulesEngine.from_roots({"project": proj, "shared": shared}, strict=False)
 
+    def test_broken_project_yaml_does_not_blank_shared_tier(self, tmp_path: Path):
+        # Reproduces the Coder bug (2026-07-14): a schema-invalid project YAML
+        # (missing `created`) must NOT take down the valid shared grundregeln.
+        # from_roots(strict=False) loads the shared tier and accumulates the
+        # skipped project file into engine.load_errors (surfaced by the banner).
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        proj.mkdir(parents=True)
+        (proj / "broken.yaml").write_text(
+            "key: p_broken\ntitle: Broken\ntype: workflow\nscope: all\n"
+            "priority: mandatory\nmodules: [all]\n"
+            "applies_to:\n  files:\n    - \"**/*\"\n"
+            "summary: MUSS geladen werden aber created fehlt.\ncontent: body\n",
+            encoding="utf-8",
+        )
+        _write_rule_yaml(shared, "g_code_is_law")
+
+        e = RulesEngine.from_roots({"project": proj, "shared": shared}, strict=False)
+        assert [r.key for r in e.rules] == ["g_code_is_law"]
+        assert len(e.load_errors) == 1
+        assert "[project]" in e.load_errors[0]
+
     def test_shared_only_tier_loads(self, tmp_path: Path):
         shared = tmp_path / "shared"
         _write_rule_yaml(shared, "grundregel")
