@@ -409,6 +409,60 @@ class TestStarterPackNotAutoLoaded:
         assert "EXAMPLE" not in capsys.readouterr().err
 
 
+class TestRulesPayloadStudioFields:
+    """The studio/export payload carries the fields an embedding host (the VS Code
+    extension) needs: per-rule source_path + tier, and a top-level skipped list."""
+
+    def test_payload_has_source_path_and_tier(self, tmp_path: Path):
+        from mcp_context_toolkit.cli import _rules_payload
+
+        proj = tmp_path / "proj" / "rules"
+        _write_rule_yaml(proj, "a")
+        engine = RulesEngine.from_roots({"project": proj}, strict=False)
+        payload = _rules_payload(engine)
+
+        assert payload["rules"][0]["tier"] == "project"
+        assert payload["rules"][0]["source_path"].endswith("a.yaml")
+        assert payload["skipped"] == []
+
+    def test_payload_skipped_lists_invalid_files(self, tmp_path: Path):
+        from mcp_context_toolkit.cli import _rules_payload
+
+        proj = tmp_path / "proj" / "rules"
+        shared = tmp_path / "shared"
+        proj.mkdir(parents=True)
+        (proj / "broken.yaml").write_text(
+            "key: p_broken\ntitle: Broken\ntype: workflow\nscope: all\n"
+            "priority: mandatory\nmodules: [all]\n"
+            "applies_to:\n  files:\n    - \"**/*\"\n"
+            "summary: created fehlt also invalide.\ncontent: body\n",
+            encoding="utf-8",
+        )
+        _write_rule_yaml(shared, "g_valid")
+        engine = RulesEngine.from_roots({"project": proj, "shared": shared}, strict=False)
+        payload = _rules_payload(engine)
+
+        assert payload["stats"]["rules"] == 1
+        assert len(payload["skipped"]) == 1
+        assert "[project]" in payload["skipped"][0]
+
+    def test_load_tiers_shared_only_when_no_project(self, tmp_path: Path, monkeypatch):
+        # A fresh workspace (no project rules) must still surface the shared
+        # grundregeln — _load_all_rule_tiers tolerates rules_dir=None. Mirrors the
+        # server's project-optional wiring; this is what feeds the VS Code plugin
+        # in a workspace that has no .context/rules of its own.
+        from mcp_context_toolkit import cli as cli_mod
+
+        shared = tmp_path / "shared"
+        _write_rule_yaml(shared, "g_floor")
+        monkeypatch.setattr(cli_mod, "_discover_shared_rules_dir", lambda: shared)
+
+        engine, warnings = cli_mod._load_all_rule_tiers(None, strict=False)
+        assert [r.key for r in engine.rules] == ["g_floor"]
+        assert engine.rules[0].tier == "shared"
+        assert warnings == []
+
+
 class TestStoreConventionDiscovery:
     """Auto-discovery accepts `.context/` (generic default) and `.claude/`
     (Claude Code fallback). `.context/` wins when both are present."""

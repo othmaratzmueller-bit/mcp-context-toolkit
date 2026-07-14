@@ -4,6 +4,22 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc4] — 2026-07-15
+
+### Added
+- **Embedding-host support in the rules payload.** `_rules_payload()` (CLI) now emits a
+  per-rule `source_path` (the YAML file the rule was loaded from) and `tier`, plus a
+  top-level `skipped` list of schema-invalid files. Lets a host embedding the toolkit
+  (e.g. an editor extension) open the underlying rule file, badge its tier, and flag
+  invalid files without re-implementing the engine's own loader/validator.
+- **Project rules tier is now optional on the CLI.** `--export-studio`, `--validate`,
+  and plain query now run shared-only when a workspace has no `.context/rules` of its
+  own but a shared org tier (`CONTEXT_SHARED_RULES_DIR`) exists, instead of hard-failing
+  with exit 2. `_load_all_rule_tiers`/`_cmd_validate`/`_cmd_write_fallback`/
+  `_cmd_export_studio` now accept `Path | None` for `rules_dir`. Mirrors the MCP server's
+  existing project-optional wiring and is what lets an embedding host (e.g. the VS Code
+  extension) show the shared grundregeln in any fresh workspace, not only the toolkit repo.
+
 ## [1.0.0-rc3] — 2026-07-11
 
 ### Added
