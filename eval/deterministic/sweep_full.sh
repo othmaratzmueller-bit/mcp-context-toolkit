@@ -6,7 +6,8 @@
 # Kosten-Deckel: --max-tokens 6000 (cloud). Key via secrets/openrouter.txt (nie geloggt).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; cd "$HERE"
-KEY="/home/othmar-atzmueller/talos/secrets/openrouter.txt"
+# Key-Datei via Env konfigurierbar — kein Repo-/User-spezifischer Hardcode (Leak-Audit 2026-07-17).
+KEY="${OPENROUTER_KEY_FILE:?Set OPENROUTER_KEY_FILE to a file containing your OpenRouter API key}"
 OR="https://openrouter.ai/api/v1"
 OUT="$HERE/out/sweep"; mkdir -p "$OUT"
 RUN="python3 $HERE/run_tasks.py"
