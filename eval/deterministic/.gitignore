@@ -1,0 +1,5 @@
+# Regenerierbare Roh-Outputs (Modell-Antworten, Reviews) — nicht versionieren.
+out/
+**/out/
+__pycache__/
+*.pyc
