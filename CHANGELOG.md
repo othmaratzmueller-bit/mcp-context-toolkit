@@ -35,6 +35,12 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 - `_memory_payload` sources members from the (now nested-aware) parser and drops the
   redundant top-level-only `_package_members` file re-read.
 
+- **Context Studio visual relaunch.** Dark theme is now the default, with a
+  one-click light/dark toggle (persisted in `localStorage`). The viewer inlines
+  the new knot-graph logo, refreshes cards/tabs/interactions with theme-aware
+  transitions, and the Graph tab respects the active theme. A standalone
+  `logo.svg` is shipped as package data.
+
 ## [1.0.0-rc2] — 2026-07-05
 
 ### Fixed

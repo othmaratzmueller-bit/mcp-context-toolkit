@@ -43,4 +43,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-mcp_context_toolkit = ["viewer/*.html", "viewer/*.js", "method/*.md"]
+mcp_context_toolkit = ["viewer/*.html", "viewer/*.js", "viewer/*.svg", "method/*.md"]

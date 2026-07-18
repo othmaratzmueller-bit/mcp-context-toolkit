@@ -16,11 +16,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Context Studio</title>
   <style>
+    /* ---- theme: dark is the default; [data-theme="light"] overrides ----
+       Applied before first paint (see the inline script in <head>) so there is
+       no FOUC flash on reload. Toggle persists in localStorage("ctx-theme"). */
     :root {
       --bg:#0f1218; --panel:#171b22; --panel2:#1d222b; --line:#2a313d;
       --fg:#e3e8f0; --muted:#8b94a6; --accent:#7c9cf0; --accent-dim:#3a4a78;
       --ok:#5fc99a; --warn:#e0b15a; --danger:#d97b86; --merge:#54c1b8; --info:#8b94a6;
       --core:#7c9cf0; --project:#54c1b8; --user:#e0b15a; --unknown:#8b94a6;
+      --shadow:0 1px 3px rgba(0,0,0,.35);
+      --shadow-lg:0 8px 28px rgba(0,0,0,.45);
+      --scrim:rgba(0,0,0,.5);
+    }
+    [data-theme="light"] {
+      --bg:#f7f8fa; --panel:#ffffff; --panel2:#f0f2f5; --line:#e2e6ec;
+      --fg:#1a1f26; --muted:#6b7280; --accent:#4263eb; --accent-dim:#c3d0ff;
+      --ok:#0ca678; --warn:#e8a33d; --danger:#e0384f; --merge:#0ca678; --info:#6b7280;
+      --core:#4263eb; --project:#0ca678; --user:#e8a33d; --unknown:#6b7280;
+      --shadow:0 1px 2px rgba(15,23,42,.06);
+      --shadow-lg:0 8px 24px rgba(15,23,42,.12);
+      --scrim:rgba(15,23,42,.35);
     }
     * { box-sizing:border-box; }
     /* Fill the container EXACTLY (works standalone and inside a fixed-height iframe)
@@ -29,7 +44,8 @@
        document-level scrollbar on top of main's. */
     html, body { height:100%; }
     body { margin:0; height:100%; overflow:hidden; display:flex; flex-direction:column;
-           font:14px/1.5 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); }
+           font:14px/1.5 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg);
+           font-feature-settings:"cv02","cv03","cv04"; transition:background .2s ease,color .2s ease; }
     /* Subtle, theme-matched scrollbars (the default chrome looks heavy on dark). */
     main::-webkit-scrollbar, .drawer::-webkit-scrollbar { width:10px; }
     main::-webkit-scrollbar-track, .drawer::-webkit-scrollbar-track { background:transparent; }
@@ -37,21 +53,38 @@
     main:hover::-webkit-scrollbar-thumb, .drawer:hover::-webkit-scrollbar-thumb { background:var(--accent-dim); }
     .topbar { display:flex; align-items:center; gap:16px; padding:12px 18px;
               background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
-    .brand { font-size:15px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
-    .brand .dot { color:var(--accent); }
-    .tabs { display:flex; gap:4px; }
-    .tabs button { padding:6px 14px; background:transparent; border:1px solid transparent;
-                   border-radius:7px; color:var(--muted); font-size:13px; cursor:pointer; }
-    .tabs button.active { color:var(--fg); background:var(--panel2); border-color:var(--line); }
+    .brand { display:flex; align-items:center; gap:8px; font-size:15px; font-weight:600;
+             letter-spacing:.01em; white-space:nowrap; }
+    .brand svg { width:20px; height:20px; flex:none; }
+    .tabs { display:flex; gap:2px; }
+    .tabs button { padding:7px 14px; background:transparent; border:none;
+                   border-bottom:2px solid transparent; color:var(--muted); font-size:13px;
+                   cursor:pointer; transition:color .12s ease,border-color .12s ease; }
+    .tabs button:hover { color:var(--fg); }
+    .tabs button.active { color:var(--fg); border-bottom-color:var(--accent); }
     .spacer { flex:1; }
     .search { padding:7px 11px; background:var(--bg); border:1px solid var(--line);
-              border-radius:7px; color:var(--fg); font-size:13px; width:230px; }
+              border-radius:8px; color:var(--fg); font-size:13px; width:230px;
+              transition:border-color .12s ease,box-shadow .12s ease; }
+    .search:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-dim); }
     .btn { padding:7px 13px; border:1px solid var(--accent-dim); background:rgba(124,156,240,.14);
-           color:var(--accent); border-radius:7px; font-size:13px; cursor:pointer; }
+           color:var(--accent); border-radius:8px; font-size:13px; cursor:pointer;
+           transition:background .12s ease,transform .05s ease; }
     .btn:hover { background:rgba(124,156,240,.26); }
+    .btn:active { transform:translateY(1px); }
     .btn:disabled { opacity:.4; cursor:not-allowed; }
     .btn.ghost { border-color:var(--line); background:transparent; color:var(--muted); }
     .btn.ghost:hover { background:var(--panel2); color:var(--fg); }
+    .icon-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px;
+                padding:0; border:1px solid var(--line); background:transparent; color:var(--muted);
+                border-radius:8px; cursor:pointer; transition:color .12s ease,border-color .12s ease; }
+    .icon-btn:hover { color:var(--fg); border-color:var(--accent-dim); }
+    .icon-btn svg { width:16px; height:16px; }
+    /* Theme-toggle icons: show the sun in dark mode (click → go light),
+       show the moon in light mode (click → go dark). */
+    .icon-btn .icon-moon { display:none; }
+    [data-theme="light"] .icon-btn .icon-sun { display:none; }
+    [data-theme="light"] .icon-btn .icon-moon { display:block; }
     main { flex:1; overflow-y:auto; padding:18px; }
     .wrap { max-width:980px; margin:0 auto; }
     .summary { color:var(--muted); font-size:13px; margin-bottom:14px; display:flex;
@@ -59,10 +92,14 @@
     .summary b { color:var(--fg); }
     .subtabs { display:flex; gap:6px; margin-bottom:14px; }
     .subtabs button { padding:5px 12px; background:var(--panel); border:1px solid var(--line);
-                      border-radius:6px; color:var(--muted); font-size:12px; cursor:pointer; }
+                      border-radius:7px; color:var(--muted); font-size:12px; cursor:pointer;
+                      transition:color .12s ease,border-color .12s ease; }
+    .subtabs button:hover { color:var(--fg); }
     .subtabs button.active { color:var(--fg); border-color:var(--accent-dim); }
-    .card { background:var(--panel); border:1px solid var(--line); border-radius:9px;
-            padding:13px 15px; margin-bottom:10px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            padding:13px 15px; margin-bottom:10px; box-shadow:var(--shadow);
+            transition:border-color .12s ease,box-shadow .12s ease; }
+    .card:hover { border-color:var(--accent-dim); }
     .card .head { display:flex; align-items:center; gap:10px; }
     .card .title { font-weight:600; font-size:13.5px; word-break:break-word; }
     .card .detail { color:var(--muted); font-size:12.5px; margin-top:6px; white-space:pre-wrap; }
@@ -83,7 +120,7 @@
     .meta { color:var(--muted); font-size:11.5px; flex:none; }
     .chk { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; flex:none; }
     .diff { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:9px; }
-    .diff .col { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px 10px;
+    .diff .col { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px;
                  font:12px/1.45 ui-monospace,Menlo,monospace; white-space:pre-wrap; word-break:break-word;
                  max-height:220px; overflow-y:auto; }
     .diff .col h4 { margin:0 0 5px; font:600 10px/1 system-ui; text-transform:uppercase;
@@ -92,59 +129,84 @@
     .col.after { border-left:2px solid var(--ok); }
     .move { margin-top:8px; font:12px/1.4 ui-monospace,monospace; color:var(--fg); }
     .move .arrow { color:var(--accent); margin:0 7px; }
-    .evidence { margin-top:8px; padding:7px 10px; background:var(--bg); border-radius:6px;
+    .evidence { margin-top:8px; padding:7px 10px; background:var(--bg); border-radius:8px;
                 border-left:2px solid var(--muted); font-size:12px; color:var(--muted); white-space:pre-wrap; }
     .heat { display:inline-block; width:60px; height:6px; background:var(--line); border-radius:3px;
             overflow:hidden; vertical-align:middle; }
-    .heat i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--warn)); }
+    .heat i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--warn));
+              transition:width .3s ease; }
     .row { display:flex; align-items:center; gap:11px; padding:9px 13px; background:var(--panel);
-           border:1px solid var(--line); border-radius:8px; margin-bottom:7px; cursor:pointer; }
-    .row:hover { border-color:var(--accent-dim); }
+           border:1px solid var(--line); border-radius:9px; margin-bottom:7px; cursor:pointer;
+           transition:border-color .12s ease,background .12s ease; }
+    .row:hover { border-color:var(--accent-dim); background:var(--panel2); }
     .row .nm { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .row .desc { color:var(--muted); font-size:12px; flex:1; overflow:hidden; text-overflow:ellipsis;
                  white-space:nowrap; }
-    .group-title { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+    .group-title { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
                    margin:16px 0 8px; display:flex; gap:8px; align-items:center; }
     .empty { text-align:center; color:var(--muted); padding:60px 20px; }
     .drop { border:2px dashed var(--line); border-radius:12px; padding:48px 24px; text-align:center;
-            color:var(--muted); cursor:pointer; }
+            color:var(--muted); cursor:pointer; transition:border-color .12s ease,background .12s ease,color .12s ease; }
+    .drop:hover { border-color:var(--accent-dim); }
     .drop.over { border-color:var(--accent); color:var(--fg); background:var(--panel); }
     .drop input { display:none; }
     .drawer { position:fixed; top:0; right:0; width:min(560px,92vw); height:100vh; background:var(--panel);
               border-left:1px solid var(--line); padding:18px 20px; overflow-y:auto; transform:translateX(100%);
-              transition:transform .18s ease; z-index:30; }
+              transition:transform .18s ease; z-index:30; box-shadow:var(--shadow-lg); }
     .drawer.open { transform:translateX(0); }
     .drawer h2 { margin:0 0 3px; font-size:16px; word-break:break-word; }
     .drawer .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
     .drawer pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
                   white-space:pre-wrap; word-break:break-word; font:12.5px/1.5 ui-monospace,monospace; }
     .drawer .close-btn { position:absolute; top:14px; right:16px; background:transparent; border:none;
-                         color:var(--muted); font-size:22px; cursor:pointer; line-height:1; }
+                         color:var(--muted); font-size:22px; cursor:pointer; line-height:1;
+                         transition:color .12s ease; }
     .drawer .close-btn:hover { color:var(--fg); }
-    .scrim { position:fixed; inset:0; background:rgba(0,0,0,.45); opacity:0; pointer-events:none;
+    .scrim { position:fixed; inset:0; background:var(--scrim); opacity:0; pointer-events:none;
              transition:opacity .18s; z-index:20; }
     .scrim.open { opacity:1; pointer-events:auto; }
     .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
     .chip { font-size:11px; padding:2px 9px; background:var(--bg); border:1px solid var(--line);
             border-radius:16px; color:var(--muted); }
-    .ledger { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:14px 16px;
+    .ledger { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px;
               white-space:pre-wrap; word-break:break-word; font:12.5px/1.55 ui-monospace,Menlo,monospace;
-              color:var(--fg); }
+              color:var(--fg); box-shadow:var(--shadow); }
     /* Graph host — Cytoscape needs an explicit height on its container. Fills the
        viewport below the summary line; the container itself never scrolls (cy pans). */
     .graph { height:calc(100vh - 190px); min-height:420px; background:var(--panel);
-             border:1px solid var(--line); border-radius:9px; overflow:hidden; }
+             border:1px solid var(--line); border-radius:10px; overflow:hidden; box-shadow:var(--shadow); }
     .glegend { display:flex; gap:12px; flex-wrap:wrap; margin-left:auto; }
     .glegend span { display:inline-flex; align-items:center; gap:5px; }
     .glegend i { width:9px; height:9px; border-radius:50%; display:inline-block; }
     footer { flex:none; padding:9px 18px; border-top:1px solid var(--line); background:var(--panel);
              color:var(--muted); font-size:11.5px; display:flex; gap:8px; align-items:center; }
     footer a { color:var(--accent); text-decoration:none; }
+    footer a:hover { text-decoration:underline; }
   </style>
+  <!-- Apply the saved theme BEFORE first paint — avoids a flash of the wrong theme on reload. -->
+  <script>
+    (function(){ try { var t = localStorage.getItem("ctx-theme") || "dark";
+      if (t === "light") document.documentElement.setAttribute("data-theme","light"); } catch(_){} })();
+  </script>
 </head>
 <body>
   <div class="topbar">
-    <span class="brand">Context <span class="dot">●</span> Studio</span>
+    <span class="brand">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <defs>
+          <linearGradient id="ctx-grad" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#7c9cf0"/><stop offset="1" stop-color="#54c1b8"/>
+          </linearGradient>
+        </defs>
+        <g stroke="url(#ctx-grad)" stroke-width="2.5" stroke-linecap="round" opacity="0.55">
+          <line x1="16" y1="16" x2="32" y2="32"/><line x1="48" y1="16" x2="32" y2="32"/><line x1="32" y1="50" x2="32" y2="32"/>
+        </g>
+        <circle cx="16" cy="16" r="6" fill="#7c9cf0"/><circle cx="48" cy="16" r="6" fill="#54c1b8"/><circle cx="32" cy="50" r="6" fill="#e0b15a"/>
+        <circle cx="32" cy="32" r="8.5" fill="none" stroke="url(#ctx-grad)" stroke-width="2.5"/>
+        <circle cx="32" cy="32" r="4" fill="url(#ctx-grad)"/>
+      </svg>
+      Context Studio
+    </span>
     <div class="tabs">
       <button id="tab-review" class="active">Review</button>
       <button id="tab-browse">Browse</button>
@@ -154,6 +216,16 @@
     <span class="spacer"></span>
     <input id="search" class="search" placeholder="Filter…" autocomplete="off">
     <button id="export" class="btn" disabled>Export decision.json</button>
+    <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme" title="Toggle theme">
+      <!-- Sun (shown in dark mode) / Moon (shown in light mode) — swapped via CSS. -->
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+    </button>
   </div>
 
   <main><div class="wrap" id="content"></div></main>
@@ -502,7 +574,14 @@
       c.appendChild(el("div", { class:"empty", text:"Graph needs cytoscape.min.js next to index.html — re-run: context-toolkit-query --export-studio <dir>" })); return;
     }
     const pkgs = mem.packages, edges = Array.isArray(mem.edges) ? mem.edges : [];
-    const tierColor = { core:"#7c9cf0", project:"#54c1b8", user:"#e0b15a", unknown:"#8b94a6" };
+    // Tier + neutral colours read from the CSS variables so the graph follows the
+    // active theme (dark/light). Falls back to the dark defaults if a var is unset.
+    const css = (name, fb) => { const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return v || fb; };
+    const tierColor = { core:css("--core","#7c9cf0"), project:css("--project","#54c1b8"),
+                        user:css("--user","#e0b15a"), unknown:css("--unknown","#8b94a6") };
+    const edgeColor = css("--line","#2a313d");
+    const labelColor = css("--muted","#8b94a6");
+    const selBorder = css("--fg","#e3e8f0");
 
     const s = el("div", { class:"summary" });
     s.appendChild(el("span", {}, el("b", { text:String(pkgs.length) }), " nodes"));
@@ -536,14 +615,14 @@
       style: [
         { selector: "node", style: {
           "background-color": "data(color)", "width": "data(size)", "height": "data(size)",
-          "label": "data(label)", "color": "#8b94a6", "font-size": "7px",
+          "label": "data(label)", "color": labelColor, "font-size": "7px",
           "min-zoomed-font-size": 9, "text-halign": "center", "text-valign": "bottom",
           "text-margin-y": 2 } },
         { selector: "edge", style: {
-          "width": 1, "line-color": "#2a313d", "target-arrow-color": "#2a313d",
+          "width": 1, "line-color": edgeColor, "target-arrow-color": edgeColor,
           "target-arrow-shape": "triangle", "arrow-scale": 0.7, "curve-style": "bezier",
           "opacity": 0.75 } },
-        { selector: "node:selected", style: { "border-width": 2, "border-color": "#e3e8f0" } },
+        { selector: "node:selected", style: { "border-width": 2, "border-color": selBorder } },
       ],
       layout: { name: "cose", animate: false, nodeRepulsion: 9000, idealEdgeLength: 75, padding: 24 },
       wheelSensitivity: 0.2,
@@ -598,6 +677,17 @@
   $("drawer-close").onclick = closeDrawer;
   $("scrim").onclick = closeDrawer;
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+
+  // Theme toggle: flip the data-theme attr + persist to localStorage. Re-renders the
+  // graph (if open) so Cytoscape picks up the new edge/label colours.
+  $("theme-toggle").onclick = () => {
+    const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    const next = cur === "light" ? "dark" : "light";
+    if (next === "light") document.documentElement.setAttribute("data-theme","light");
+    else document.documentElement.removeAttribute("data-theme");
+    try { localStorage.setItem("ctx-theme", next); } catch(_){}
+    if (STATE.mode === "graph" && _cy) renderGraph();
+  };
 
   // ---------------- boot ----------------
   (async function () {
