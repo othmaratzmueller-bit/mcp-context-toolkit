@@ -27,6 +27,9 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
   fallback `type` already had. Previously a package written with `metadata: { members: … }`
   parsed with **empty members**, silently disabling member-link resolution (and inflating
   `memory_lint` broken-link counts) on every such file. Top-level still wins over nested.
+- **Stale `__version__` in `__init__.py`.** The package-level `__version__` was `"0.1.0"`
+  instead of `"1.0.0rc3"`, causing `importlib.metadata.version()` and runtime version checks
+  to report the wrong version.
 
 ### Changed
 - `_memory_payload` sources members from the (now nested-aware) parser and drops the

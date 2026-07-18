@@ -6,25 +6,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from mcp_context_toolkit.core import (
+    discover_shared_rules_dir,
+    store_conventions,
+    warn_if_example_rules,
+)
 from mcp_context_toolkit.engine import RulesEngine
 from mcp_context_toolkit.memory import MemoryEngine
 from mcp_context_toolkit.usage import UsageStore
-
-# Store-directory conventions tried during walk-up auto-discovery, in order.
-# `.context` is the generic default (matches the tool/env naming); `.claude`
-# is kept as a fallback so a Claude Code repo with an existing .claude/rules
-# store keeps working without configuration. Overridable via the env
-# CONTEXT_STORE_CONVENTIONS (comma-separated, e.g. ".acme,.context,.claude")
-# so an embedding product can brand its store dir without forking the engine.
-_DEFAULT_STORE_CONVENTIONS = (".context", ".claude")
-
-
-def _store_conventions() -> tuple:
-    raw = os.environ.get("CONTEXT_STORE_CONVENTIONS", "").strip()
-    if not raw:
-        return _DEFAULT_STORE_CONVENTIONS
-    parts = tuple(p.strip() for p in raw.split(",") if p.strip())
-    return parts or _DEFAULT_STORE_CONVENTIONS
 
 
 def _discover_rules_dir() -> Path | None:
@@ -40,7 +29,7 @@ def _discover_rules_dir() -> Path | None:
 
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
-        for conv in _store_conventions():
+        for conv in store_conventions():
             rules = candidate / conv / "rules"
             if rules.is_dir():
                 return rules
@@ -56,7 +45,7 @@ def _discover_memory_dir() -> Path | None:
         p = Path(env).expanduser()
         return p if p.is_dir() else None
     for candidate in [Path.cwd(), *Path.cwd().parents]:
-        for conv in _store_conventions():
+        for conv in store_conventions():
             mem = candidate / conv / "memory"
             if mem.is_dir():
                 return mem
@@ -74,15 +63,6 @@ def _optional_dir(env_name: str) -> Path | None:
         return None
     p = Path(raw).expanduser()
     return p if p.is_dir() else None
-
-
-def _discover_shared_rules_dir() -> Path | None:
-    """Locate the optional SHARED (org) rules tier. Env-only
-    (CONTEXT_SHARED_RULES_DIR), NO walk-up — the shared tier is an explicit
-    deployment choice (org grundregeln mounted read-only), never auto-found in a
-    parent dir the way the project tier is. None → rules stay single-tier and the
-    behaviour is byte-identical to before."""
-    return _optional_dir("CONTEXT_SHARED_RULES_DIR")
 
 
 def _rule_summary(rule: Any) -> dict:
@@ -435,21 +415,14 @@ def main() -> None:
     # the shared grundregeln keep working (same gating rationale as B1 memory).
     rules_dir = _discover_rules_dir()
 
-    # The shipped starter pack (examples/rules) is inert — copy-to-activate. If a
-    # misconfigured CONTEXT_RULES_DIR points at it directly, say so loudly so the
-    # examples don't silently become someone's production rule set.
-    if rules_dir is not None and "examples" in rules_dir.parts:
-        print(
-            f"[context-toolkit] NOTE: serving EXAMPLE/starter rules from {rules_dir} "
-            f"— inert starter pack, copy into your own rules dir for real use.",
-            file=sys.stderr,
-        )
+    if rules_dir is not None:
+        warn_if_example_rules(rules_dir)
 
     # Optional SHARED (org) rules tier — the grundregeln every project inherits
     # (code-is-law, no-fly-bys, ask-on-drift …). Env-only; absent → single-tier,
     # byte-identical to before. Loaded AFTER the project tier so project wins on a
     # (non-security) key collision; a non_negotiable collision fails loud.
-    shared_rules_dir = _discover_shared_rules_dir()
+    shared_rules_dir = discover_shared_rules_dir()
 
     if rules_dir is None and shared_rules_dir is None:
         print(

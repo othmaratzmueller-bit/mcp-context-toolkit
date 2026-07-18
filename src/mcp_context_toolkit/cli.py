@@ -6,26 +6,16 @@ import os
 import sys
 from pathlib import Path
 
+from mcp_context_toolkit.core import (
+    discover_shared_rules_dir,
+    store_conventions,
+    warn_if_example_rules,
+)
 from mcp_context_toolkit.engine import (
     RuleLoadError,
     RulesEngine,
     fingerprint_rules,
 )
-
-# Store-directory conventions tried during walk-up auto-discovery, in order.
-# `.context` is the generic default (matches the tool/env naming); `.claude`
-# is kept as a fallback for existing Claude Code repos. Overridable via
-# CONTEXT_STORE_CONVENTIONS (comma-separated, e.g. ".acme,.context,.claude")
-# — keep in sync with mcp_server._store_conventions.
-_DEFAULT_STORE_CONVENTIONS = (".context", ".claude")
-
-
-def _store_conventions() -> tuple:
-    raw = os.environ.get("CONTEXT_STORE_CONVENTIONS", "").strip()
-    if not raw:
-        return _DEFAULT_STORE_CONVENTIONS
-    parts = tuple(p.strip() for p in raw.split(",") if p.strip())
-    return parts or _DEFAULT_STORE_CONVENTIONS
 
 
 def _discover_rules_dir() -> Path:
@@ -35,7 +25,7 @@ def _discover_rules_dir() -> Path:
 
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
-        for conv in _store_conventions():
+        for conv in store_conventions():
             rules = candidate / conv / "rules"
             if rules.is_dir():
                 return rules
@@ -44,18 +34,6 @@ def _discover_rules_dir() -> Path:
         "No rules directory found. Set CONTEXT_RULES_DIR or create .context/rules/ "
         "(or .claude/rules/)."
     )
-
-
-def _discover_shared_rules_dir() -> Path | None:
-    """Optional SHARED (org) rules tier for the hook path — env-only
-    (CONTEXT_SHARED_RULES_DIR), no walk-up. MUST mirror
-    mcp_server._discover_shared_rules_dir so the hooks see the same grundregeln
-    the MCP tools do. None → single-tier, byte-identical to before."""
-    env = os.environ.get("CONTEXT_SHARED_RULES_DIR")
-    if not env:
-        return None
-    p = Path(env).expanduser().resolve()
-    return p if p.is_dir() else None
 
 
 def _load_all_rule_tiers(
@@ -70,7 +48,7 @@ def _load_all_rule_tiers(
     warnings: list[str] = []
     stats = engine.load_directory(rules_dir, tier="project", strict=strict)
     warnings += stats.get("errors", [])
-    shared_dir = _discover_shared_rules_dir()
+    shared_dir = discover_shared_rules_dir()
     if shared_dir is not None:
         sstats = engine.load_directory(shared_dir, tier="shared", strict=strict)
         warnings += sstats.get("errors", [])
@@ -137,27 +115,12 @@ def _rule_to_summary_dict(r) -> dict:
     }
 
 
-def _warn_if_example_rules(rules_dir: Path) -> None:
-    """The shipped starter pack (``examples/rules``) is INERT — copy-to-activate,
-    never a production default. Auto-discovery (``<dir>/.context/rules`` or
-    ``<dir>/.claude/rules``) can never reach it, but a misconfigured
-    ``CONTEXT_RULES_DIR`` / ``--rules-dir`` could point at it directly. Say so
-    loudly so the examples don't silently 'poison' a real rule set."""
-    if "examples" in rules_dir.parts:
-        print(
-            f"[context-toolkit-query] NOTE: loading EXAMPLE/starter rules from "
-            f"{rules_dir}. These are an inert starter pack — copy them into your "
-            f"own rules directory for real use.",
-            file=sys.stderr,
-        )
-
-
 def _resolve_rules_dir(arg: str | None) -> Path:
     if arg:
         resolved = Path(arg).expanduser().resolve()
     else:
         resolved = _discover_rules_dir()
-    _warn_if_example_rules(resolved)
+    warn_if_example_rules(resolved)
     return resolved
 
 
@@ -191,7 +154,7 @@ def _discover_memory_dir(arg: str | None) -> Path | None:
         return Path(env).expanduser().resolve()
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
-        for conv in _store_conventions():
+        for conv in store_conventions():
             mem = candidate / conv / "memory"
             if mem.is_dir():
                 return mem
