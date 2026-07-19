@@ -1,0 +1,180 @@
+{
+  "name": "vscode-memory-explorer",
+  "displayName": "Memory Explorer",
+  "description": "Explore, edit and manage MCP Context Toolkit memories in VS Code",
+  "version": "0.0.1",
+  "publisher": "mcp-context-toolkit",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "memory.explorer.view",
+        "title": "Memory Explorer: Show Explorer",
+        "icon": "$(books)"
+      },
+      {
+        "command": "memory.recall",
+        "title": "Memory: Recall",
+        "icon": "$(search)"
+      },
+      {
+        "command": "memory.get",
+        "title": "Memory: Get by Name",
+        "icon": "$(open-file)"
+      },
+      {
+        "command": "memory.list",
+        "title": "Memory: List All",
+        "icon": "$(list-filter)"
+      },
+      {
+        "command": "memory.validate",
+        "title": "Memory: Validate Links",
+        "icon": "$(check)"
+      },
+      {
+        "command": "memory.edit",
+        "title": "Memory: Edit",
+        "icon": "$(pencil)"
+      },
+      {
+        "command": "memory.delete",
+        "title": "Memory: Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "memory.duplicate",
+        "title": "Memory: Duplicate",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "memory.share",
+        "title": "Memory: Share",
+        "icon": "$(share)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "memory.explorer.view",
+          "when": "memoryExplorerEnabled"
+        },
+        {
+          "command": "memory.recall",
+          "when": "memoryExplorerEnabled"
+        },
+        {
+          "command": "memory.get",
+          "when": "memoryExplorerEnabled"
+        },
+        {
+          "command": "memory.list",
+          "when": "memoryExplorerEnabled"
+        },
+        {
+          "command": "memory.validate",
+          "when": "memoryExplorerEnabled"
+        },
+        {
+          "command": "memory.edit",
+          "when": "memoryExplorerEnabled && memoryExplorerSelection"
+        },
+        {
+          "command": "memory.delete",
+          "when": "memoryExplorerEnabled && memoryExplorerSelection"
+        },
+        {
+          "command": "memory.duplicate",
+          "when": "memoryExplorerEnabled && memoryExplorerSelection"
+        },
+        {
+          "command": "memory.share",
+          "when": "memoryExplorerEnabled && memoryExplorerSelection"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "memory.explorer.view",
+          "when": "resourceExtname == .md && memoryExplorerEnabled"
+        }
+      ]
+    },
+    "views": {
+      "memoryExplorer": [
+        {
+          "id": "memoryTree",
+          "name": "🧠 Memories",
+          "contextualTitle": "Memory Explorer"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "memoryTree",
+        "placeHolder": "No memories found. Add a memory file to your .context/memory or .claude/memory directory.",
+        "support": "https://github.com/othmaratzmueller-bit/mcp-context-toolkit"
+      }
+    ],
+    "configuration": {
+      "title": "Memory Explorer",
+      "properties": {
+        "memoryExplorer.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Memory Explorer sidebar panel"
+        },
+        "memoryExplorer.sortBy": {
+          "type": "string",
+          "default": "frecency",
+          "enum": [
+            "frecency",
+            "name",
+            "date",
+            "type"
+          ],
+          "description": "Sort memories by"
+        },
+        "memoryExplorer.showMetadata": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show metadata (type, tier, usage) in explorer"
+        },
+        "memoryExplorer.autoExpand": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-expand tier folders in explorer"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "webpack --mode production --devtool source-map",
+    "watch": "webpack --mode development --watch --devtool inline-source-map",
+    "lint": "eslint src --ext .ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.84.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "glob": "^7.2.0",
+    "mocha": "^10.0.0",
+    "ts-loader": "^9.6.2",
+    "typescript": "^5.0.0",
+    "webpack": "^5.0.0",
+    "webpack-cli": "^5.0.0"
+  },
+  "dependencies": {
+    "fast-glob": "^3.3.0"
+  }
+}

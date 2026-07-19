@@ -455,7 +455,7 @@ class TestRulesPayloadStudioFields:
 
         shared = tmp_path / "shared"
         _write_rule_yaml(shared, "g_floor")
-        monkeypatch.setattr(cli_mod, "_discover_shared_rules_dir", lambda: shared)
+        monkeypatch.setattr(cli_mod, "discover_shared_rules_dir", lambda: shared)
 
         engine, warnings = cli_mod._load_all_rule_tiers(None, strict=False)
         assert [r.key for r in engine.rules] == ["g_floor"]

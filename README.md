@@ -1,5 +1,9 @@
 # mcp-context-toolkit
 
+<p align="center">
+  <img src="src/mcp_context_toolkit/viewer/logo.svg" width="96" height="96" alt="mcp-context-toolkit logo">
+</p>
+
 [![CI](https://github.com/othmaratzmueller-bit/mcp-context-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/othmaratzmueller-bit/mcp-context-toolkit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
@@ -9,8 +13,10 @@
 > **memory**, and a navigable **link-graph**, loaded on demand from plain markdown +
 > YAML-frontmatter stores ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible).
 
-**By [Othmar Atzmüller](https://github.com/othmaratzmueller-bit).** MIT-licensed —
-fork freely; a credit back is appreciated.
+**By [Othmar Atzmüller](https://github.com/othmaratzmueller-bit)** and
+<img src="assets/talos-logo.png" alt="TALOS" height="18" align="absmiddle"> **TALOS**
+(the AI coding harness this toolkit was built inside). MIT-licensed — fork
+freely; a credit back is appreciated.
 
 ## The idea
 

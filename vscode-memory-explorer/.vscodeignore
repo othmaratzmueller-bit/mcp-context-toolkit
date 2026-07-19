@@ -1,0 +1,24 @@
+# Compiled output
+out
+src
+node_modules
+
+# VS Code test
+.vscode-test
+.vscode-test-out
+
+# Editor directories
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# TypeScript cache
+*.tsbuildinfo
