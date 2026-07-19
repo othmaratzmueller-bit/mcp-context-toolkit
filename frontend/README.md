@@ -23,8 +23,12 @@ cd studio && python3 -m http.server                  # then open http://localhos
 ```
 
 `--export-studio` writes `rules.json`, `memory.json` (if a memory store is found),
-and copies `index.html`. Memory dir resolves from `--memory-dir` →
-`CONTEXT_MEMORY_DIR` → `.claude/memory` auto-discovery.
+and copies `index.html`. If the memory dir also holds a pending-decision ledger
+(`_DREAM_PENDING.md`) and/or a preview-gate diff (`_PENDING_DIFF.json`, the canonical
+path all curation skills write to), those are copied too as `pending.md` and
+`diff.json` — a host embedding the viewer (e.g. an editor extension) can inject them
+straight into `window.CONTEXT_DATA` without a manual file picker. Memory dir resolves
+from `--memory-dir` → `CONTEXT_MEMORY_DIR` → `.claude/memory` auto-discovery.
 
 ## Three ways the viewer finds data (in order)
 

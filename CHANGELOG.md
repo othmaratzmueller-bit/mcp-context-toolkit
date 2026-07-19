@@ -4,6 +4,16 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc5] — 2026-07-19
+
+### Added
+- **`--export-studio` now also copies the preview-gate ledger/diff.** If the memory dir
+  holds `_DREAM_PENDING.md` (the `/dream` consolidation ledger) and/or the canonical
+  `_PENDING_DIFF.json` (the preview-gate output all curation skills write to), `_cmd_export_studio`
+  copies them into the output dir as `pending.md` / `diff.json` alongside `rules.json`/
+  `memory.json`/`index.html`. Lets an embedding host (e.g. an editor extension) inject
+  both into `window.CONTEXT_DATA` and auto-load them without a manual file picker.
+
 ## [1.0.0-rc4] — 2026-07-15
 
 ### Added

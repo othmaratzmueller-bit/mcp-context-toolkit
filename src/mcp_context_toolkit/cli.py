@@ -277,9 +277,13 @@ def _memory_payload(memory_dir: Path) -> dict:
     }
 
 
+_PENDING_FILENAME = "_DREAM_PENDING.md"  # the /dream consolidation's human-decision ledger
+_PENDING_DIFF_FILENAME = "_PENDING_DIFF.json"  # canonical preview-gate output, all curation skills
+
+
 def _cmd_export_studio(rules_dir: Path | None, memory_dir: Path | None, out_dir: Path) -> int:
-    """Write rules.json (+ memory.json if a store is found) and copy the bundled
-    Context Studio viewer into out_dir. Self-contained: open out_dir/index.html."""
+    """Write rules.json (+ memory.json/pending.md/diff.json if found) and copy the
+    bundled Context Studio viewer into out_dir. Self-contained: open out_dir/index.html."""
     from importlib import resources
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -296,6 +300,20 @@ def _cmd_export_studio(rules_dir: Path | None, memory_dir: Path | None, out_dir:
             encoding="utf-8",
         )
         written.append("memory.json")
+
+        pending_path = memory_dir / _PENDING_FILENAME
+        if pending_path.is_file():
+            (out_dir / "pending.md").write_text(
+                pending_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            written.append("pending.md")
+
+        diff_path = memory_dir / _PENDING_DIFF_FILENAME
+        if diff_path.is_file():
+            (out_dir / "diff.json").write_text(
+                diff_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            written.append("diff.json")
 
     # Copy the packaged viewer so out_dir is openable on its own. cytoscape.min.js
     # (MIT, vendored) powers the Graph tab — copied as bytes; if it is missing the
