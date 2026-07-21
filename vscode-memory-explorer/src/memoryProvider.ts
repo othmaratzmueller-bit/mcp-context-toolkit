@@ -29,9 +29,18 @@ export class MemoryProvider {
     process.env.HOME || process.env.USERPROFILE || '';
 
   // Project-tier memory conventions, tried in order — mirrors the engine's
-  // auto-discovery (CONTEXT_STORE_CONVENTIONS). `.context` is the generic
-  // default; `.claude` is kept as a fallback for existing Claude Code repos.
-  private readonly projectMemoryDirs = ['.context/memory', '.claude/memory'];
+  // auto-discovery (CONTEXT_STORE_CONVENTIONS, same env var + same default
+  // order the engine's core.py::store_conventions() uses). `.context` is the
+  // generic default; `.claude` is a fallback for existing Claude Code repos.
+  // Overridable so an embedding product (e.g. `.talos`) can brand its store
+  // dir without forking this extension.
+  private readonly projectMemoryDirs: string[] = (() => {
+    const raw = (process.env.CONTEXT_STORE_CONVENTIONS || '').trim();
+    const conventions = raw
+      ? raw.split(',').map((c) => c.trim()).filter(Boolean)
+      : ['.context', '.claude'];
+    return conventions.map((c) => path.join(c, 'memory'));
+  })();
 
   // User-tier (cross-project) memory. Overridable via CONTEXT_USER_MEMORY_DIR
   // (the same env var the engine reads); falls back to ~/.context/memory.

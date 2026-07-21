@@ -21,7 +21,11 @@ Sechs Fallen (`scenarios.json`), jede mit eingebautem Konflikt:
 NICHT Konzeption/Verständnis (die „Decke" — die regelt keine Regel), NICHT
 Langzeit-Persistenz über viele Turns, NICHT projekt-spezifisches Regelwissen.
 Kleine Stichproben (reps=2) sind richtungsweisend, nicht signifikant — für
-Entscheidungen reps erhöhen.
+Entscheidungen reps erhöhen. Die Decke (Korrektheit/Qualität gegen eine
+Gold-Referenz) misst der Schwester-Eval `codequality/` — siehe `codequality/README.md`.
+Ein dritter Schwester-Eval, `deterministic/`, ersetzt den LLM-Judge fuer mehrere Achsen
+(correctness/security/honesty/robustness/craft) durch lauffaehigen Code als Judge —
+reproduzierbar und ohne Judging-Kosten, siehe `deterministic/README.md`.
 
 ## Schnellstart
 

@@ -37,17 +37,20 @@ def _discover_rules_dir() -> Path:
 
 
 def _load_all_rule_tiers(
-    rules_dir: Path, *, strict: bool
+    rules_dir: Path | None, *, strict: bool
 ) -> tuple[RulesEngine, list[str]]:
-    """Load the project rules tier plus the optional shared org tier
+    """Load the (optional) project rules tier plus the optional shared org tier
     (CONTEXT_SHARED_RULES_DIR) into ONE engine, mirroring the MCP server's
-    from_roots wiring. Returns (engine, warnings). A RuleLoadError from a
+    from_roots wiring. ``rules_dir`` may be None — a workspace without its own
+    rules still surfaces the shared grundregeln (shared-only), exactly like the
+    server's main(). Returns (engine, warnings). A RuleLoadError from a
     non_negotiable cross-tier collision propagates (the caller decides how to
     surface it) — everything else is collected into warnings."""
     engine = RulesEngine()
     warnings: list[str] = []
-    stats = engine.load_directory(rules_dir, tier="project", strict=strict)
-    warnings += stats.get("errors", [])
+    if rules_dir is not None:
+        stats = engine.load_directory(rules_dir, tier="project", strict=strict)
+        warnings += stats.get("errors", [])
     shared_dir = discover_shared_rules_dir()
     if shared_dir is not None:
         sstats = engine.load_directory(shared_dir, tier="shared", strict=strict)
@@ -124,18 +127,39 @@ def _resolve_rules_dir(arg: str | None) -> Path:
     return resolved
 
 
-def _cmd_validate(rules_dir: Path) -> int:
-    result = RulesEngine.validate_directory(rules_dir)
+def _cmd_validate(rules_dir: Path | None) -> int:
+    # Validate the project tier when present, else fall back to the shared org
+    # tier so a shared-only workspace still gets a real validation result.
+    target = rules_dir if rules_dir is not None else discover_shared_rules_dir()
+    if target is None:
+        print(json.dumps(
+            {"ok": False, "rule_count": 0,
+             "errors": ["no rules directory found (neither project nor shared)"],
+             "warnings": []},
+            indent=2,
+        ))
+        return 1
+    result = RulesEngine.validate_directory(target)
     print(json.dumps(result, indent=2))
     return 0 if result["ok"] else 1
 
 
-def _cmd_write_fallback(rules_dir: Path, target: Path | None) -> int:
+def _cmd_write_fallback(rules_dir: Path | None, target: Path | None) -> int:
     # Load BOTH tiers so the MCP-outage fallback lists the shared grundregeln too.
     engine, warnings = _load_all_rule_tiers(rules_dir, strict=False)
     for err in warnings:
         print(f"[context-toolkit-query] WARN: {err}", file=sys.stderr)
-    target_path = target or (rules_dir / "_meta" / "fallback_rules.md")
+    # The default fallback lives under the PROJECT store's _meta/. With no project
+    # tier and no explicit target there is nowhere canonical to write it — skip
+    # loudly rather than guess a location.
+    if target is None and rules_dir is None:
+        print(json.dumps(
+            {"loaded": len(engine.rules), "written": 0,
+             "note": "no project rules dir and no --write-fallback target — skipped"},
+            indent=2,
+        ))
+        return 0
+    target_path = target or (rules_dir / "_meta" / "fallback_rules.md")  # type: ignore[operator]
     write_stats = engine.write_fallback_markdown(target_path)
     print(json.dumps(
         {"loaded": len(engine.rules), "errors": warnings, **write_stats}, indent=2
@@ -182,14 +206,22 @@ def _rules_payload(engine: RulesEngine) -> dict:
             "type": r.type,
             "scope": r.scope,
             "priority": r.priority,
+            "tier": r.tier,
             "summary": r.summary.strip(),
             "files": list(r.applies_to.files),
             "tags": list(r.tags),
+            # Absolute path to the YAML — lets an embedding host (the VS Code
+            # extension) open the rule source directly. Null for in-memory rules.
+            "source_path": r.source_path,
         })
     return {
         "kind": "context-studio/rules",
         "stats": {"rules": len(out_rules), "by_priority": by_priority, "by_type": by_type},
         "rules": out_rules,
+        # Files skipped by a lenient load (schema-invalid / dup key), tier-prefixed.
+        # Empty on a clean store. Surfaced so a viewer can flag them instead of
+        # silently under-reporting the rule count.
+        "skipped": engine.load_errors,
     }
 
 
@@ -245,9 +277,13 @@ def _memory_payload(memory_dir: Path) -> dict:
     }
 
 
-def _cmd_export_studio(rules_dir: Path, memory_dir: Path | None, out_dir: Path) -> int:
-    """Write rules.json (+ memory.json if a store is found) and copy the bundled
-    Context Studio viewer into out_dir. Self-contained: open out_dir/index.html."""
+_PENDING_FILENAME = "_DREAM_PENDING.md"  # the /dream consolidation's human-decision ledger
+_PENDING_DIFF_FILENAME = "_PENDING_DIFF.json"  # canonical preview-gate output, all curation skills
+
+
+def _cmd_export_studio(rules_dir: Path | None, memory_dir: Path | None, out_dir: Path) -> int:
+    """Write rules.json (+ memory.json/pending.md/diff.json if found) and copy the
+    bundled Context Studio viewer into out_dir. Self-contained: open out_dir/index.html."""
     from importlib import resources
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -264,6 +300,20 @@ def _cmd_export_studio(rules_dir: Path, memory_dir: Path | None, out_dir: Path) 
             encoding="utf-8",
         )
         written.append("memory.json")
+
+        pending_path = memory_dir / _PENDING_FILENAME
+        if pending_path.is_file():
+            (out_dir / "pending.md").write_text(
+                pending_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            written.append("pending.md")
+
+        diff_path = memory_dir / _PENDING_DIFF_FILENAME
+        if diff_path.is_file():
+            (out_dir / "diff.json").write_text(
+                diff_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            written.append("diff.json")
 
     # Copy the packaged viewer so out_dir is openable on its own. cytoscape.min.js
     # (MIT, vendored) powers the Graph tab — copied as bytes; if it is missing the
@@ -597,10 +647,17 @@ def main() -> None:
         sys.exit(_cmd_reindex(memory_dir))
 
     try:
-        rules_dir = _resolve_rules_dir(args.rules_dir)
+        rules_dir: Path | None = _resolve_rules_dir(args.rules_dir)
     except FileNotFoundError as e:
-        print(f"[context-toolkit-query] {e}", file=sys.stderr)
-        sys.exit(2)
+        # Project tier is OPTIONAL when a shared org tier exists — mirror the MCP
+        # server's main(). A fresh workspace without its own rules still surfaces
+        # the shared grundregeln (validate / export-studio / query all run
+        # shared-only) instead of hard-failing with exit 2.
+        if discover_shared_rules_dir() is not None:
+            rules_dir = None
+        else:
+            print(f"[context-toolkit-query] {e}", file=sys.stderr)
+            sys.exit(2)
 
     # Validate subcommand
     if args.validate:

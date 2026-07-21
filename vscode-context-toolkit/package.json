@@ -1,0 +1,95 @@
+{
+  "name": "context-toolkit",
+  "displayName": "Context Toolkit — Rules & Memory",
+  "description": "Sieh und pflege die mcp-context-toolkit Regeln und das Memory direkt im Editor — kein eigenes Web-Frontend noetig.",
+  "version": "1.0.0",
+  "publisher": "mcp-context-toolkit",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "contextToolkit",
+          "title": "Context Toolkit",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "contextToolkit": [
+        {
+          "id": "contextRules",
+          "name": "Regeln",
+          "type": "webview",
+          "icon": "media/icon.svg",
+          "contextualTitle": "Context Toolkit"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "contextToolkit.openStudio",
+        "title": "Studio öffnen (Regeln + Memory)",
+        "category": "Context Toolkit",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "contextToolkit.refresh",
+        "title": "Neu laden",
+        "category": "Context Toolkit",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "contextToolkit.validate",
+        "title": "Regeln validieren",
+        "category": "Context Toolkit",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "contextToolkit.rulesForCurrentFile",
+        "title": "Regeln für die aktuelle Datei",
+        "category": "Context Toolkit",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "contextToolkit.openRule",
+        "title": "Regel-Quelle öffnen",
+        "category": "Context Toolkit"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "contextToolkit.openStudio",
+          "when": "view == contextRules",
+          "group": "navigation@1"
+        },
+        {
+          "command": "contextToolkit.validate",
+          "when": "view == contextRules",
+          "group": "navigation@2"
+        },
+        {
+          "command": "contextToolkit.rulesForCurrentFile",
+          "when": "view == contextRules",
+          "group": "navigation@3"
+        },
+        {
+          "command": "contextToolkit.refresh",
+          "when": "view == contextRules",
+          "group": "navigation@4"
+        }
+      ]
+    }
+  }
+}

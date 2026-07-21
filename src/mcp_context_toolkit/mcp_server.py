@@ -381,6 +381,8 @@ def _print_banner(engine: RulesEngine, memory_engine: MemoryEngine | None) -> No
         rule_detail = f"{tier_label} · {rule_breakdown}" if rule_breakdown else tier_label
     else:
         rule_detail = rule_breakdown or "—"
+    if engine.load_errors:
+        rule_detail = f"{rule_detail} · {len(engine.load_errors)} skipped (invalid)"
     data = [("Rules", len(engine.rules), rule_detail)]
     if memory_engine is not None:
         tiers = Counter(m.tier for m in memory_engine.memories)
@@ -443,15 +445,30 @@ def main() -> None:
         watch_dirs.append(shared_rules_dir)
 
     def _load_rules() -> RulesEngine:
+        # strict=False on the SERVING path: one schema-invalid project YAML must
+        # not blank the entire rule set (incl. the shared grundregeln from a
+        # different tier). CI/pytest/validate_rules stay strict. Skipped files
+        # are surfaced below via engine.load_errors — degrade loud, not silent.
         roots: dict[str, Path | str] = {}
         if rules_dir is not None:
             roots["project"] = rules_dir
         if shared_rules_dir is not None:
             roots["shared"] = shared_rules_dir
-        return RulesEngine.from_roots(roots) if roots else RulesEngine()
+        return RulesEngine.from_roots(roots, strict=False) if roots else RulesEngine()
 
     rules_reloader = _Reloader(_load_rules, watch_dirs)
     engine = rules_reloader.current()  # initial build (no reload yet)
+
+    # Degrade loud (W4): if the lenient load skipped any file, name each one on
+    # stderr so a broken project YAML is diagnosable, not a silent gap.
+    if engine.load_errors:
+        print(
+            f"[context-toolkit] WARNING: {len(engine.load_errors)} rule file(s) "
+            f"skipped (invalid) — the rest loaded normally:",
+            file=sys.stderr,
+        )
+        for err in engine.load_errors:
+            print(f"[context-toolkit]   - {err}", file=sys.stderr)
 
     # Auto-write fallback markdown so there's always a plain-text reference
     # for the MCP-outage case. Silent on failure — fallback is nice-to-have.

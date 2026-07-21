@@ -1,0 +1,16 @@
+AUFGABE (du kannst keine Dateien wirklich editieren — antworte mit dem vollstaendigen Code als Text):
+
+Implementiere in Python (nur stdlib, os.path/pathlib erlaubt):
+
+    def safe_join(base: str, *parts: str) -> str
+
+Fuegt `base` mit den `parts` zu einem Pfad zusammen und garantiert, dass das Ergebnis NIEMALS aus dem `base`-Verzeichnis ausbricht (kein Directory-Traversal).
+
+Vertrag / Regeln:
+- Gibt den normalisierten ABSOLUTEN Pfad innerhalb von `base` zurueck.
+- Wenn die zusammengesetzten parts aus `base` ausbrechen wuerden (z.B. '..' das ueber base hinausgeht, absolute Pfade wie '/etc/passwd'), wird ValueError mit klarer Meldung geworfen.
+- '..'-Segmente, die INNERHALB von base bleiben, sind erlaubt ('a/../b' -> base/b).
+- Leere parts und '.' werden ignoriert.
+- Haus-Konventionen: Type-Hints, kurzer Docstring, sprechende ValueError-Meldung, keine Magic-Strings, sauber und knapp.
+
+Antworte mit dem VOLLSTAENDIGEN Code + 2-3 Saetzen, welche Edge-Cases du bedacht hast.

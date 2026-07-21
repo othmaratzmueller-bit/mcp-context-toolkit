@@ -13,8 +13,10 @@
 > **memory**, and a navigable **link-graph**, loaded on demand from plain markdown +
 > YAML-frontmatter stores ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible).
 
-**By [Othmar Atzmüller](https://github.com/othmaratzmueller-bit).** MIT-licensed —
-fork freely; a credit back is appreciated.
+**By [Othmar Atzmüller](https://github.com/othmaratzmueller-bit)** and
+<img src="assets/talos-logo.png" alt="TALOS" height="18" align="absmiddle"> **TALOS**
+(the AI coding harness this toolkit was built inside). MIT-licensed — fork
+freely; a credit back is appreciated.
 
 ## The idea
 
@@ -455,6 +457,7 @@ lock companion), and one opt-in export:
 | `<memory-dir>/_usage.json` | on every `recall` / `get_memory` | the frecency sidecar (hit counts). Atomic temp-file write, best-effort — a failure never breaks recall. Per-machine, gitignore it. |
 | `<memory-dir>/_usage.json.lock` | during a `recall` / `get_memory` write | a zero-byte `fcntl` lock file that serializes concurrent writers (parallel MCP processes sharing one store). POSIX only; absent on Windows. Gitignore it too. |
 | `<out-dir>/{index.html,cytoscape.min.js,rules.json,memory.json}` | only on `--export-studio OUT_DIR` | the offline Context Studio viewer (+ vendored Cytoscape for the Graph tab) + a metadata snapshot. Opt-in; nothing is written unless you run it. |
+| `<out-dir>/{pending.md,diff.json}` | only on `--export-studio OUT_DIR`, and only if found | copied from `_DREAM_PENDING.md` / the canonical `_PENDING_DIFF.json` in the memory dir, so an embedding host (e.g. an editor extension) can auto-load them into the viewer. |
 
 Your rule and memory **content** is never created, edited, or deleted by the engine —
 writes are owned by you (or a separate consolidation pass). No network access, no

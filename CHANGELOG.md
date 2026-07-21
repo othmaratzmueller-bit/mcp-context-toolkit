@@ -4,6 +4,32 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc5] — 2026-07-19
+
+### Added
+- **`--export-studio` now also copies the preview-gate ledger/diff.** If the memory dir
+  holds `_DREAM_PENDING.md` (the `/dream` consolidation ledger) and/or the canonical
+  `_PENDING_DIFF.json` (the preview-gate output all curation skills write to), `_cmd_export_studio`
+  copies them into the output dir as `pending.md` / `diff.json` alongside `rules.json`/
+  `memory.json`/`index.html`. Lets an embedding host (e.g. an editor extension) inject
+  both into `window.CONTEXT_DATA` and auto-load them without a manual file picker.
+
+## [1.0.0-rc4] — 2026-07-15
+
+### Added
+- **Embedding-host support in the rules payload.** `_rules_payload()` (CLI) now emits a
+  per-rule `source_path` (the YAML file the rule was loaded from) and `tier`, plus a
+  top-level `skipped` list of schema-invalid files. Lets a host embedding the toolkit
+  (e.g. an editor extension) open the underlying rule file, badge its tier, and flag
+  invalid files without re-implementing the engine's own loader/validator.
+- **Project rules tier is now optional on the CLI.** `--export-studio`, `--validate`,
+  and plain query now run shared-only when a workspace has no `.context/rules` of its
+  own but a shared org tier (`CONTEXT_SHARED_RULES_DIR`) exists, instead of hard-failing
+  with exit 2. `_load_all_rule_tiers`/`_cmd_validate`/`_cmd_write_fallback`/
+  `_cmd_export_studio` now accept `Path | None` for `rules_dir`. Mirrors the MCP server's
+  existing project-optional wiring and is what lets an embedding host (e.g. the VS Code
+  extension) show the shared grundregeln in any fresh workspace, not only the toolkit repo.
+
 ## [1.0.0-rc3] — 2026-07-11
 
 ### Added
@@ -27,19 +53,16 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
   fallback `type` already had. Previously a package written with `metadata: { members: … }`
   parsed with **empty members**, silently disabling member-link resolution (and inflating
   `memory_lint` broken-link counts) on every such file. Top-level still wins over nested.
-- **Stale `__version__` in `__init__.py`.** The package-level `__version__` was `"0.1.0"`
-  instead of `"1.0.0rc3"`, causing `importlib.metadata.version()` and runtime version checks
-  to report the wrong version.
+- **One invalid rule file no longer aborts the whole load on the serving path.**
+  `RulesEngine` gained a `load_errors` property that accumulates tier-prefixed
+  skip reasons from a lenient (`strict=False`) `load_directory` call, mirroring
+  the `MemoryEngine`'s existing lenient behaviour. `strict=True` (the default,
+  used by CI/`validate_rules()`) is unchanged — it still raises on the first
+  bad file.
 
 ### Changed
 - `_memory_payload` sources members from the (now nested-aware) parser and drops the
   redundant top-level-only `_package_members` file re-read.
-
-- **Context Studio visual relaunch.** Dark theme is now the default, with a
-  one-click light/dark toggle (persisted in `localStorage`). The viewer inlines
-  the new knot-graph logo, refreshes cards/tabs/interactions with theme-aware
-  transitions, and the Graph tab respects the active theme. A standalone
-  `logo.svg` is shipped as package data.
 
 ## [1.0.0-rc2] — 2026-07-05
 
