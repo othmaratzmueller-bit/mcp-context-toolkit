@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,9 +25,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]" ruff build
 
-      - name: Lint (ruff) — advisory
+      - name: Lint (ruff)
         run: ruff check src tests
-        continue-on-error: true
 
       - name: Test (pytest)
         run: pytest -q

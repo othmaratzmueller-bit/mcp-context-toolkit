@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import datetime
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -131,6 +133,11 @@ class _Reloader:
         self._watch = [Path(d) for d in watch_dirs if d is not None]
         self._mtime = self._scan()
         self._engine = self._loader()
+
+    @property
+    def watch_dirs(self) -> list[Path]:
+        """Watched dirs as a public, copy-stable view (read-only)."""
+        return list(self._watch)
 
     def _scan(self) -> float:
         return max((_tree_mtime(d) for d in self._watch), default=0.0)
@@ -285,11 +292,31 @@ def build_server(
             tier — use this to pull project AND user-global knowledge on demand.
             Ranking blends
             keyword relevance with frecency (frequently/recently used memories
-            are pulled forward). Returns summaries; follow up with
+            are pulled forward) and **backlink structure** (memories cited by
+            many others rise naturally). Returns summaries; follow up with
             get_memory(name) for the full body — which also marks it as used.
+
+            Backlink boost: log-dampened, ``log1p(inbound_links) * 0.1`` —
+            a memory with 10 inbound links gets ~+0.24 to its score, so
+            structurally important knowledge surfaces without explicit usage
+            while the boost never dominates the base relevance.
             """
             boosts = usage.boosts() if usage is not None else {}
-            hits = memory_reloader.current().recall(query, limit=limit, boost=boosts)
+            # Backlink boost from graph: {name: log(1 + backlink_count) * 0.1}
+            # log(1+x) dampens the effect for highly-cited memories, keeps it
+            # proportional but bounded.
+            backlink_boosts = {}
+            edges = memory_reloader.current().edges()
+            inbound: dict[str, int] = {}
+            for src, tgt in edges:
+                inbound.setdefault(tgt, 0)
+                inbound[tgt] += 1
+            for name, count in inbound.items():
+                # log(1+x) * 0.1: 1→0, 10→0.3, 100→0.43, never dominates base score
+                backlink_boosts[name] = math.log1p(count) * 0.1
+            hits = memory_reloader.current().recall(
+                query, limit=limit, boost=boosts, backlink_boost=backlink_boosts
+            )
             if usage is not None:
                 usage.record_recall([m.name for m in hits])
             return json.dumps(
@@ -326,6 +353,88 @@ def build_server(
             return json.dumps(
                 [_memory_summary(m) for m in ms], indent=2, ensure_ascii=False
             )
+
+        @mcp.tool()
+        def memory_dream_status(
+            files_threshold: int = 3,
+            lint_threshold: int = 2,
+        ) -> str:
+            """Check if the memory store needs consolidation (dream).
+
+            Returns a status report with:
+            - files_changed_since_last_dream: N memory files modified within the
+              recent-change window (7-day mtime heuristic — see note below)
+            - lint_issues: {broken_links: X, orphans: Y, stale_pointers: Z}
+            - recommendation: "dream fällig" or "kein dringender Bedarf"
+
+            Thresholds are configurable:
+            - files_threshold: trigger if N+ files changed since last dream
+            - lint_threshold: trigger if N+ lint issues exist
+
+            This is the trigger for `/context-dream` — when the store grows
+            raw (many changes, broken links, orphans) it's time to consolidate
+            (merge dupes, compress, repair links, normalize names). Always
+            git-backed/revertible.
+
+            Note: "since last dream" is approximated by a 7-day mtime window,
+            not a tracked last-run timestamp. A memory file modified in the
+            last 7 days counts as "changed"; older files are assumed
+            consolidated. This keeps the tool stateless (no marker file) at
+            the cost of over-counting after a quiet week.
+            """
+            engine = memory_reloader.current()
+
+            # Get lint report
+            lint = engine.lint()
+
+            # Count lint issues
+            broken_links = sum(
+                len(missing) for missing in lint.get("broken_links", {}).values()
+            )
+            orphans_count = len(lint.get("orphans", []))
+            stale_pointers = len(lint.get("stale_pointers", []))
+            total_lint_issues = broken_links + orphans_count + stale_pointers
+
+            # Count recently-changed memory files (7-day mtime heuristic — see
+            # the docstring note: this is a stateless proxy for "since last
+            # dream", not a tracked last-run timestamp).
+            _RECENT_DAYS = 7
+            _INTERNAL_FILES = {"MEMORY.md", "_descriptions.md"}
+            now = datetime.datetime.now()
+            files_changed = 0
+            for memory_root in memory_reloader.watch_dirs:
+                try:
+                    for md in memory_root.rglob("*.md"):
+                        if md.name in _INTERNAL_FILES or md.name.startswith("_"):
+                            continue
+                        file_mtime = datetime.datetime.fromtimestamp(md.stat().st_mtime)
+                        if (now - file_mtime).days <= _RECENT_DAYS:
+                            files_changed += 1
+                except OSError:
+                    pass
+
+            # Determine recommendation
+            if files_changed >= files_threshold or total_lint_issues >= lint_threshold:
+                recommendation = "🧠 dream fällig"
+            elif files_changed > 0 or total_lint_issues > 0:
+                recommendation = "💡 dream empfohlen"
+            else:
+                recommendation = "✅ kein dringender Bedarf"
+
+            status = {
+                "files_changed_since_last_dream": files_changed,
+                "lint_issues": lint,
+                "broken_links": broken_links,
+                "orphans": orphans_count,
+                "stale_pointers": stale_pointers,
+                "total_lint_issues": total_lint_issues,
+                "recommendation": recommendation,
+                "thresholds": {
+                    "files_threshold": files_threshold,
+                    "lint_threshold": lint_threshold,
+                },
+            }
+            return json.dumps(status, indent=2, ensure_ascii=False)
 
         @mcp.tool()
         def memory_lint() -> str:
@@ -393,7 +502,7 @@ def _print_banner(engine: RulesEngine, memory_engine: MemoryEngine | None) -> No
             "Memory", len(memory_engine.memories),
             f"{tier_breakdown} · frecency-ranked" if tier_breakdown else "—",
         ))
-        data.append(("Tools", 10, "5 rules · 5 memory"))
+        data.append(("Tools", 11, "5 rules · 6 memory"))
     else:
         data.append(("Memory", 0, "(no store found)"))
         data.append(("Tools", 5, "5 rules"))

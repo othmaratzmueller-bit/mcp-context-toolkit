@@ -64,3 +64,4 @@ class TestReloader:
         _write_mem(tmp_path, "a")
         r = _Reloader(lambda: MemoryEngine.from_directory(tmp_path), [tmp_path, None])
         assert r.current().get("a") is not None
+

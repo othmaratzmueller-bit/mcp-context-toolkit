@@ -18,7 +18,7 @@ flowchart LR
     subgraph engine["engine.py / core.py"]
         RULES["Rules engine<br/>glob match by file path,<br/>priority sort, tiered<br/>(project > shared)"]
         DECISIONS["Decisions (ADRs)<br/>glob match, status cut,<br/>DECISION_TOP_K newest"]
-        MEMORY["memory.py<br/>recall: relevance x frecency,<br/>tiered (project > user > core)"]
+        MEMORY["memory.py<br/>recall: relevance x frecency<br/>+ backlink boost,<br/>tiered (project > user > core)"]
         USAGE["usage.py<br/>hit tracking -> frecency"]
     end
 
@@ -58,4 +58,7 @@ flowchart LR
   writers are the operator and offline tools (`indexer.py`, `bundler.py`).
 - **Frecency, not recency.** `usage.py` records hits per memory; recall ranks
   by keyword relevance weighted with frequency + recency, so long-lived,
-  often-used knowledge stays hot without manual pinning.
+  often-used knowledge stays hot without manual pinning. On top, the MCP
+  `recall` tool adds a log-dampened **backlink boost** (`log1p(inbound) * 0.1`)
+  from the `[[link]]` graph, so structurally central memories rise without
+  explicit usage.
