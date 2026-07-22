@@ -19,7 +19,8 @@ a run, `MEMORY.md` ≤ before.
 - The memory store (`$CONTEXT_MEMORY_DIR`) is git-tracked → every run is a
   revertible commit. Not in git → **abort**.
 - Toolkit MCP with memory tools (`memory_lint`, `recall`, `memory_usage`) or the
-  `context-toolkit-query`/engine CLI as fallback.
+  `context-toolkit-query`/engine CLI as fallback. `memory_dream_status` tells you
+  whether a run is due (changed files + lint issues vs. thresholds).
 - **Truncation guard:** if `MEMORY.md` exceeds the load budget (partially loaded),
   `Read` the whole file first — never operate on the truncated context copy.
 

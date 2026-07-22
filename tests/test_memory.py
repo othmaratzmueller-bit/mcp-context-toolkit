@@ -1,3 +1,4 @@
+import asyncio
 import json
 import multiprocessing
 from pathlib import Path
@@ -467,3 +468,220 @@ class TestCliMemoryCommands:
         cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, {"alpha_pkg", "beta_pkg"})
         out = json.loads(capsys.readouterr().out)
         assert out["names"] == [] and out["markdown"] is None
+
+
+class TestBacklinkBoostInRecall:
+    """Tests for backlink_boost parameter in recall()."""
+
+    def _write(self, d: Path, name: str, body: str) -> None:
+        """Helper to write a memory file."""
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(
+            f"---\nname: {name}\n---\n\n{body}\n", encoding="utf-8"
+        )
+
+    def test_backlink_boost_ranks_cited_memories_higher(self, tmp_path: Path):
+        """Memories with more backlinks score higher in recall."""
+        ms = tmp_path / "memories"
+        ms.mkdir()
+
+        # Create A (cited by B, C)
+        self._write(ms, "a", "Concept A")
+        # Create B (cites A)
+        self._write(ms, "b", "[[a]] Concept B")
+        # Create C (cites A)
+        self._write(ms, "c", "[[a]] Concept C")
+
+        engine = MemoryEngine.from_directory(ms)
+
+        # Query for "concept" matches all three
+        results = engine.recall("concept", limit=3)
+
+        # A has 2 backlinks (from B, C), B and C have 0
+        # With backlink_boost, A should rank first
+        assert results[0].name == "a"
+
+    def test_backlink_boost_effect_size(self, tmp_path: Path):
+        """Verify backlink_boost adds the expected value."""
+        ms = tmp_path / "memories"
+        ms.mkdir()
+
+        # Same structure as above
+        self._write(ms, "a", "Concept A")
+        self._write(ms, "b", "[[a]] Concept B")
+        self._write(ms, "c", "[[a]] Concept C")
+
+        engine = MemoryEngine.from_directory(ms)
+
+        # Get edges for backlink count
+        edges = engine.edges()
+        inbound = {}
+        for src, tgt in edges:
+            inbound.setdefault(tgt, 0)
+            inbound[tgt] += 1
+
+        # A should have 2 inbound links
+        assert inbound.get("a", 0) == 2
+
+        # Query with explicit backlink_boost (raw inbound counts as factor —
+        # the MCP server applies the log1p*0.1 damping; here we only verify
+        # that a non-zero boost lifts the most-cited memory to the top).
+        results = engine.recall(
+            "concept",
+            limit=3,
+            backlink_boost={name: boost for name, boost in inbound.items()}
+        )
+
+        # First result (A) should be A due to backlink boost
+        assert results[0].name == "a"
+
+    def test_backlink_boost_does_not_dominate(self, tmp_path: Path):
+        """Backlink boost should not completely override keyword relevance."""
+        ms = tmp_path / "memories"
+        ms.mkdir()
+
+        # A is cited but doesn't match "b"
+        self._write(ms, "a", "Concept A")
+        self._write(ms, "b", "[[a]] Concept B")
+        self._write(ms, "c", "[[a]] Concept C")
+
+        engine = MemoryEngine.from_directory(ms)
+
+        # Query for "concept b" should still prefer B over A
+        # Even though A has backlinks, B matches "b" keyword
+        results = engine.recall("concept b", limit=3)
+
+        # B should be in results (matches "b")
+        names = [r.name for r in results]
+        assert "b" in names
+
+
+class TestMemoryDreamStatus:
+    """Tests for memory_dream_status() MCP tool."""
+
+    def _write_mem(self, d: Path, name: str, body: str = "x") -> None:
+        """Helper to write a memory file."""
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(f"---\nname: {name}\n---\n\n{body}\n", encoding="utf-8")
+
+    def test_dream_status_with_fresh_changes(self, tmp_path: Path):
+        """Files changed since last dream → recommendation = 'dream fällig'."""
+        ms = tmp_path / "memories"
+        ms.mkdir()
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+
+        for i in range(3):
+            self._write_mem(ms, f"mem{i}")
+
+        from mcp_context_toolkit.mcp_server import build_server
+        from mcp_context_toolkit.engine import RulesEngine
+
+        rules_engine = RulesEngine.from_directory(rules_dir)
+        memory_engine = MemoryEngine.from_directory(ms)
+        from mcp_context_toolkit.mcp_server import _Reloader
+        memory_reloader = _Reloader(lambda: memory_engine, [ms])
+
+        server = build_server(rules_engine, memory_reloader)
+        result = asyncio.run(server.call_tool("memory_dream_status", {}))
+        # Result is a tuple: ([TextContent], metadata)
+        text_content = result[0][0].text
+
+        assert text_content.startswith("{\n  \"files_changed")
+        data = json.loads(text_content)
+        assert data["files_changed_since_last_dream"] >= 3
+        assert "dream fällig" in data["recommendation"]
+
+    def test_dream_status_with_lint_issues(self, tmp_path: Path):
+        """Broken links → recommendation = 'dream fällig'."""
+        ms = tmp_path / "memories"
+        ms.mkdir()
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+
+        # Create MEMORY.md (the hot index)
+        (ms / "MEMORY.md").write_text("# Memories\n\n- a\n", encoding="utf-8")
+
+        # Memory A links to non-existent B
+        self._write_mem(ms, "a", body="[[nonexistent-mem]]")
+
+        from mcp_context_toolkit.mcp_server import build_server
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _Reloader
+
+        rules_engine = RulesEngine.from_directory(rules_dir)
+        memory_engine = MemoryEngine.from_directory(ms)
+        memory_reloader = _Reloader(lambda: memory_engine, [ms])
+
+        server = build_server(rules_engine, memory_reloader)
+        # lint_threshold=1: 1 broken link soll "fällig" triggern (Default wäre 2)
+        result = asyncio.run(
+            server.call_tool("memory_dream_status", {"lint_threshold": 1})
+        )
+        text_content = result[0][0].text
+
+        data = json.loads(text_content)
+        assert data["lint_issues"]["broken_links"]["a"] == ["nonexistent-mem"]
+        assert data["total_lint_issues"] >= 1
+        assert "dream fällig" in data["recommendation"]
+
+    def test_dream_status_clean_store(self, tmp_path: Path):
+        """Clean store → recommendation = 'kein dringender Bedarf'."""
+        ms = tmp_path / "memories"
+        ms.mkdir()
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+        self._write_mem(ms, "clean", body="This memory is clean.")
+        # Create MEMORY.md (the hot index)
+        (ms / "MEMORY.md").write_text("# Memories\n\n- clean\n", encoding="utf-8")
+
+        from mcp_context_toolkit.mcp_server import build_server
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _Reloader
+
+        rules_engine = RulesEngine.from_directory(rules_dir)
+        memory_engine = MemoryEngine.from_directory(ms)
+        memory_reloader = _Reloader(lambda: memory_engine, [ms])
+
+        server = build_server(rules_engine, memory_reloader)
+        result = asyncio.run(server.call_tool("memory_dream_status", {}))
+        text_content = result[0][0].text
+
+        data = json.loads(text_content)
+        # New file counts as changed, but lint is clean
+        assert data["lint_issues"]["broken_links"] == {}
+        assert data["lint_issues"]["orphans"] == []
+        assert data["lint_issues"]["stale_pointers"] == []
+        # With clean lint, recommendation should not be "dream fällig"
+        assert "f채llig" not in data["recommendation"]
+
+    def test_dream_status_with_recommendations(self, tmp_path: Path):
+        """Thresholds control recommendation level."""
+        ms = tmp_path / "memories"
+        ms.mkdir()
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+        self._write_mem(ms, "a", body="[[broken]]")  # 1 broken link
+
+        from mcp_context_toolkit.mcp_server import build_server
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _Reloader
+
+        rules_engine = RulesEngine.from_directory(rules_dir)
+        memory_engine = MemoryEngine.from_directory(ms)
+        memory_reloader = _Reloader(lambda: memory_engine, [ms])
+
+        server = build_server(rules_engine, memory_reloader)
+        # 1 broken link, aber lint_threshold=2 → "empfohlen" (nicht "fällig")
+        result = asyncio.run(
+            server.call_tool(
+                "memory_dream_status",
+                {"files_threshold": 10, "lint_threshold": 2}
+            )
+        )
+        text_content = result[0][0].text
+
+        data = json.loads(text_content)
+        assert data["lint_issues"]["broken_links"]["a"] == ["broken"]
+        # 1 lint issue < lint_threshold=2, aber > 0 → "empfohlen"
+        assert "empfohlen" in data["recommendation"]

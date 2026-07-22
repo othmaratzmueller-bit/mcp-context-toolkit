@@ -31,8 +31,8 @@ serves it over MCP so the client pulls only what's relevant:
 
 - **Rules** match by file-path glob — open `api/users.py`, get back the security + db
   rules that apply to it, nothing else.
-- **Memory** matches by relevance and **frecency** (frequency + recency) — recall
-  surfaces the most-used, most-recently-used notes first.
+- **Memory** matches by relevance, **frecency** (frequency + recency) and **backlink
+  structure** — recall surfaces the most-used, most-recently-used, most-cited notes first.
 
 Both are just markdown with frontmatter. Git is the storage, history and backup. The
 engine is read-only; you (or a consolidation pass) own the writes.
@@ -56,7 +56,7 @@ Don't load everything upfront. Load the right thing at the right moment:
 | --- | --- | --- |
 | **Rules** | file-path glob → matching rules, by priority | standards, security policies, review gates — anything tied to *which file you touch* |
 | **Decisions** | file-path glob → matching decisions (ADRs) | design decisions, architecture records (ADRs), rationales — *why* something is built the way it is |
-| **Memory** | keyword relevance × frecency (hot/cold) | lessons, user preferences, context — anything worth recalling later |
+| **Memory** | keyword relevance × frecency (hot/cold) + backlink boost | lessons, user preferences, context — anything worth recalling later |
 
 Decisions injection is cut by default (`query_decisions_for_file`): only the newest
 `DECISION_TOP_K` (8) decisions with an allowed `status` (`accepted`) are returned for a
@@ -93,8 +93,12 @@ set across all loaded tiers.
 Every `recall` / `get_memory` hit is counted in a per-machine sidecar (`_usage.json`,
 gitignored). The score is **frequency-dominant and log-damped** — it does *not* decay
 with wall-clock time, so a weekend (or three-week) pause never cools a heavily-used
-memory. `memory_usage` reports the hot→cold ranking; a consolidation step can use it
-to surface hot notes first.
+memory. On top of frecency, recall adds a small **backlink boost** (`log1p(inbound_count)
+* 0.1` per memory) so notes cited by many others rise without explicit usage.
+`memory_usage` reports the hot→cold ranking; a consolidation step can use it
+to surface hot notes first. `memory_dream_status` tells you when such a consolidation
+pass is due (files changed since last dream + lint issues against configurable
+thresholds).
 
 ## Install
 
@@ -130,7 +134,9 @@ clients). Point it at your stores via env:
 
 Any unset dir is auto-discovered by walking up from the working directory, looking for
 `<dir>/.context/rules` (and `…/memory`) first, then `<dir>/.claude/rules` as a fallback
-for existing Claude Code repos. Memory tools register only when a memory store is found —
+for existing Claude Code repos. The convention list itself is configurable via
+`CONTEXT_STORE_CONVENTIONS` (comma-separated, e.g. `.talos,.context,.claude` to prefer a
+`.talos` store first). Memory tools register only when a memory store is found —
 rules-only setups keep working untouched.
 
 ## Freshness / reloading
@@ -159,9 +165,10 @@ from clobbering each other). Nothing is served staler than your last edit.
 
 | Tool | Purpose |
 | --- | --- |
-| `recall(query, limit?)` | top memories across both tiers, frecency-ranked |
+| `recall(query, limit?)` | top memories across both tiers — frecency- and backlink-ranked |
 | `get_memory(name)` | full body + metadata of one memory, plus `cited_by` (inbound `[[links]]`) |
 | `list_memories(type?, tier?)` | enumerate, filterable |
+| `memory_dream_status(files_threshold?, lint_threshold?)` | consolidation trigger: changed files + lint issues → "dream fällig?" |
 | `memory_lint()` | hygiene: broken `[[links]]`, index orphans, stale pointers |
 | `memory_usage(limit?)` | hot→cold usage report (opens, recalls, heat) |
 
@@ -190,6 +197,8 @@ The **Context Studio** viewer (`--export-studio`) has four tabs: *Review* (accep
 consolidation diff), *Browse* (packages by tier + frecency heat), **Graph** (the resolved
 `[[link]]` graph rendered with a vendored [Cytoscape.js](https://js.cytoscape.org/), MIT —
 node colour = tier, size = heat, click a node to open it) and *Pending* (the flag ledger).
+The viewer defaults to a dark theme with a one-click light/dark toggle (persisted in
+`localStorage`); the Graph tab respects the active theme.
 
 ## Wiring auto-injection (hooks)
 
@@ -289,7 +298,7 @@ and the store stays current without a manual chore — all without being asked.
 
 ## Directory structure
 
-Create a `.context` (or `.claude` as fallback) directory in your project root with the following structure:
+Create a `.context` (or `.claude`) directory in your project root — auto-discovered, with the convention list configurable via `CONTEXT_STORE_CONVENTIONS` — with the following structure:
 
 ```
 your-project/
@@ -441,9 +450,9 @@ verified-lossless merge), neither of which the format itself prescribes.
   format (`py:`/`js:` keys, `imports` / `imported_by`).
 
 These are illustrative defaults, not production policy — see each directory's
-`README.md`. They are **inert**: auto-discovery only ever loads `<dir>/.context/rules`
-(or `<dir>/.claude/rules`) and the matching `…/memory`, so nothing under `examples/` is
-ever picked up implicitly. Pointing `CONTEXT_RULES_DIR` straight at the starter pack
+`README.md`. They are **inert**: auto-discovery only ever loads `<dir>/.context/rules`,
+or `<dir>/.claude/rules` (in that order, configurable via `CONTEXT_STORE_CONVENTIONS`) and the matching
+`…/memory`, so nothing under `examples/` is ever picked up implicitly. Pointing `CONTEXT_RULES_DIR` straight at the starter pack
 works (it's opt-in) but prints a loud `NOTE` to stderr so the examples can't silently
 become your real rule set.
 

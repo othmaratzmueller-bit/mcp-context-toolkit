@@ -282,6 +282,7 @@ class MemoryEngine:
     def recall(
         self, query: str, limit: int = 8,
         boost: Optional[dict[str, float]] = None,
+        backlink_boost: Optional[dict[str, float]] = None,
     ) -> list[Memory]:
         """Rank memories by keyword overlap with the query across both tiers.
 
@@ -294,6 +295,13 @@ class MemoryEngine:
         warmth multiplies relevance, it does not replace it. The engine stays
         pure-read; the caller (MCP) owns the usage data. With no ``boost`` the
         ordering is identical to before (name tiebreak preserved).
+
+        ``backlink_boost`` is optional: a {name: factor} map whose values are
+        added to the score (``base * (1 + heat) + factor``), so structurally
+        important knowledge rises in the ranking without needing explicit
+        usage. The caller owns the mapping from inbound-link counts to
+        factors (the MCP server uses log-dampened ``log1p(count) * 0.1``).
+        With no ``backlink_boost`` the ordering is identical to before.
 
         A relevance floor then drops candidates scoring below
         ``_RECALL_FLOOR_RATIO`` of the top hit, so weak single-word near-misses
@@ -312,6 +320,7 @@ class MemoryEngine:
         # used to flood the ranker. Compiled once per query term.
         patterns = [re.compile(r"(?<![a-z0-9])" + re.escape(t)) for t in terms]
         boost = boost or {}
+        backlink_boost = backlink_boost or {}
         scored: list[tuple[float, float, Memory]] = []
         for m in self._memories:
             name_l, desc_l = m.name.lower(), m.description.lower()
@@ -328,7 +337,11 @@ class MemoryEngine:
                     base += _W_BODY
             if base > 0:
                 heat = boost.get(m.name, 0.0)
-                scored.append((base * (1.0 + heat), heat, m))
+                # Backlink boost: additive factor from the caller's {name: factor}
+                # map (MCP passes log1p(inbound) * 0.1) — small enough not to
+                # dominate, enough to lift structurally important memories.
+                bl_boost = backlink_boost.get(m.name, 0.0)
+                scored.append((base * (1.0 + heat) + bl_boost, heat, m))
         # final score desc, then warmer-on-tie, then name for determinism
         scored.sort(key=lambda s: (-s[0], -s[1], s[2].name))
         # Relevance floor: drop the tail that scores below _RECALL_FLOOR_RATIO of
@@ -355,7 +368,7 @@ class MemoryEngine:
         broken = {
             m.name: missing
             for m in self._memories
-            if (missing := [l for l in m.links if _norm_link(l) not in resolvable])
+            if (missing := [link for link in m.links if _norm_link(link) not in resolvable])
         }
 
         orphans: list[str] = []

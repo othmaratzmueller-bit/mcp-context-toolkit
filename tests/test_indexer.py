@@ -21,7 +21,7 @@ class TestBuildDescriptions:
         _write(tmp_path, "a.md", "name: aaa\ntype: feedback\ndescription: A desc", "y")
         r = build_descriptions(tmp_path)
         assert r["count"] == 2
-        entries = [l for l in r["content"].splitlines() if l.startswith("- **")]
+        entries = [line for line in r["content"].splitlines() if line.startswith("- **")]
         # sorted by (type, name): feedback < project
         assert entries[0].startswith("- **aaa** (feedback)")
         assert entries[1].startswith("- **bbb** (project)")

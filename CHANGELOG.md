@@ -4,6 +4,59 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc6] — 2026-07-21
+
+### Added
+- **Backlink-aware recall ranking.** `MemoryEngine.recall()` gains an optional
+  `backlink_boost` parameter ({name: factor} map) that adds a small additive term per
+  inbound `[[link]]`, so structurally important knowledge (memories cited by many
+  others) rises without needing explicit usage. The MCP server computes the map from
+  the resolved edge graph as `log1p(inbound_count) * 0.1` — log-damped so it never
+  dominates the keyword/frecency base score, and ranking is unchanged when the map
+  is empty.
+- **New MCP tool `memory_dream_status(files_threshold=3, lint_threshold=2)`.**
+  Reports whether a `/context-dream` consolidation pass is due: counts memory files
+  changed in the last 7 days (mtime heuristic), sums `memory_lint` issues
+  (broken links + orphans + stale pointers), and returns a three-level recommendation
+  (`🧠 dream fällig` / `💡 dream empfohlen` / `✅ kein dringender Bedarf`) with
+  configurable thresholds.
+
+### Fixed
+- **`memory_dream_status` cleanup.** Moved the inline `import datetime` to the module
+  head, removed a duplicated `MEMORY.md` skip-list entry, replaced the private
+  `memory_reloader._watch` access with a public `watch_dirs` property, and documented
+  that "since last dream" is a stateless 7-day mtime heuristic (not a tracked
+  last-run timestamp) to close the doc-vs-code gap.
+- **Lint regressions.** Resolved 4 ruff findings (duplicate `import datetime`,
+  ambiguous `l` variable names in `memory.py`/`test_indexer.py`, unused
+  `expected_boost` in the backlink test). CI lint step is now binding
+  (`continue-on-error` removed).
+- **CI Python matrix.** Added `3.13` (the actual runtime) alongside `3.11`/`3.12`.
+
+### Changed
+- **README: generic store-convention defaults.** The auto-discovery description now
+  documents `.context`/`.claude` as the generic defaults and names `.talos` only as an
+  example of a `CONTEXT_STORE_CONVENTIONS` override (it is not a code default —
+  `_DEFAULT_STORE_CONVENTIONS = (".context", ".claude")`). Previously the README
+  implied a `.talos`-first default that only holds inside a container with
+  `CONTEXT_STORE_CONVENTIONS=.talos,.context,.claude` set.
+
+### Local store repairs (not in the tracked release)
+The following were fixed in the *maintainer's local workspace* only — `.context/` and
+`.talos/` are git-excluded (local stores, never pushed), so they do not ship with the
+release. They are recorded here for the maintainer's own history and for anyone who
+re-creates a project store from scratch:
+- **Project rules failed schema validation (`rule_count: 0`).** All 10 GR1–GR6 rule
+  files in the local `.context/rules/` were missing the required `created` date field,
+  so `validate_rules` reported `ok: false` and the server loaded *no* rules at runtime.
+  Added `created: 2026-07-11` to each file; `validate` now passes with 10 rules loaded.
+  (The shipped `examples/rules/` were already correct — 8/8 have `created`.)
+- **Memory store root.** The local project memory tier was moved to `.talos/memory/`
+  (set `CONTEXT_MEMORY_DIR=.talos/memory` or `CONTEXT_STORE_CONVENTIONS=.talos,.context,.claude`).
+  The `.context/memory/` index was a stale placeholder pointing at a non-resolving
+  relative path; it is now cleaned and documents the active root. `memory_lint`
+  reports no stale pointers on either root.
+
 ## [1.0.0-rc5] — 2026-07-19
 
 ### Added
