@@ -176,5 +176,9 @@
   },
   "dependencies": {
     "fast-glob": "^3.3.0"
+  },
+  "overrides": {
+    "minimatch": "^9.0.9",
+    "serialize-javascript": "^7.0.7"
   }
 }
