@@ -15,7 +15,6 @@ auto-derivable from frontmatter, so it is NOT regenerated destructively here.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from mcp_context_toolkit.memory import MemoryEngine
 
@@ -32,7 +31,7 @@ DESCRIPTIONS_FILENAME = "_descriptions.md"
 
 
 def build_descriptions(
-    memory_dir: str | Path, engine: Optional[MemoryEngine] = None
+    memory_dir: str | Path, engine: MemoryEngine | None = None
 ) -> dict:
     """Build the flat descriptions catalog.
 
@@ -120,7 +119,7 @@ def build_member_catalog(packages: list[dict], engine: MemoryEngine) -> dict:
 
 
 def write_descriptions(
-    memory_dir: str | Path, engine: Optional[MemoryEngine] = None
+    memory_dir: str | Path, engine: MemoryEngine | None = None
 ) -> dict:
     """Generate + write `_descriptions.md` into the memory dir.
 

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Iterable
 
 import yaml
 from pydantic import ValidationError
 
-from mcp_context_toolkit.models import Rule, RulePriority, RuleScope, RuleTier, RuleType, Decision
-
+from mcp_context_toolkit.models import Decision, Rule, RulePriority, RuleScope, RuleTier, RuleType
 
 _FINGERPRINT_EXCLUDE = {
     "source_path",
@@ -41,7 +41,7 @@ DECISION_INJECT_STATUSES: tuple[str, ...] = ("accepted",)
 DECISION_TOP_K = 8
 
 
-def fingerprint_rules(rules: list["Rule"], decisions: list["Decision"] | None = None) -> str:
+def fingerprint_rules(rules: list[Rule], decisions: list[Decision] | None = None) -> str:
     """Stable 16-char hex hash over the user-visible fields of rules and decisions.
 
     Used for live-reload dedup: if a hook stores this fingerprint per file,
@@ -123,7 +123,7 @@ class RulesEngine:
         self._load_errors: list[str] = []
 
     @classmethod
-    def from_directory(cls, root: Path | str, tier: RuleTier = "project") -> "RulesEngine":
+    def from_directory(cls, root: Path | str, tier: RuleTier = "project") -> RulesEngine:
         engine = cls()
         engine.load_directory(root, tier=tier)
         return engine
@@ -131,7 +131,7 @@ class RulesEngine:
     @classmethod
     def from_roots(
         cls, roots: dict[str, Path | str], *, strict: bool = True
-    ) -> "RulesEngine":
+    ) -> RulesEngine:
         """Build from a {tier: path} mapping. The project tier is loaded BEFORE
         the shared tier, so on a (non-security) key collision the project rule
         wins — specific beats general, exactly like MemoryEngine.from_roots.
@@ -233,10 +233,10 @@ class RulesEngine:
         if not self._graph:
             graph_file = root_path.parent / "graph" / "reference-index.json"
             if graph_file.exists():
-                try:
+                # The graph is an optional convenience index; a missing or
+                # malformed one must not stop the rule set from loading.
+                with contextlib.suppress(Exception):
                     self._graph = json.loads(graph_file.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
 
         all_errors = [str(e) for e in errors] + duplicate_errors
         self._load_errors.extend(f"[{tier}] {msg}" for msg in all_errors)
@@ -510,12 +510,10 @@ class RulesEngine:
             py_suffix = py_suffix[:-3]
 
         for key, val in self._graph.items():
-            if key.startswith("js:"):
-                if normalized.endswith(key[3:]):
-                    return val
-            elif key.startswith("py:"):
-                if py_suffix.endswith(key[3:]):
-                    return val
+            if key.startswith("js:") and normalized.endswith(key[3:]):
+                return val
+            if key.startswith("py:") and py_suffix.endswith(key[3:]):
+                return val
         return {}
 
     @staticmethod
@@ -527,10 +525,7 @@ class RulesEngine:
         for excl in rule.applies_to.excludes:
             if cls._glob_match(file_path, excl):
                 return False
-        for pattern in rule.applies_to.files:
-            if cls._glob_match(file_path, pattern):
-                return True
-        return False
+        return any(cls._glob_match(file_path, p) for p in rule.applies_to.files)
 
     @staticmethod
     def _glob_match(path: str, pattern: str) -> bool:

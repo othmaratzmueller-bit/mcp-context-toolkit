@@ -152,8 +152,8 @@ class _Reloader:
 
 
 def build_server(
-    rules_reloader: "_Reloader",
-    memory_reloader: "_Reloader | None" = None,
+    rules_reloader: _Reloader,
+    memory_reloader: _Reloader | None = None,
     usage: UsageStore | None = None,
 ):
     from mcp.server.fastmcp import FastMCP

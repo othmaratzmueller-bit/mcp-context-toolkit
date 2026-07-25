@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 from mcp_context_toolkit.memory import Memory, MemoryEngine
 
@@ -89,7 +88,7 @@ def write_bundle(
     packages: list[dict],
     memory_dir: str | Path,
     out_dir: str | Path,
-    engine: Optional[MemoryEngine] = None,
+    engine: MemoryEngine | None = None,
 ) -> dict:
     """Render all package files into ``out_dir`` (staging — NOT the live store)
     and verify losslessness. Returns {written, out_dir, lost_bodies}.
