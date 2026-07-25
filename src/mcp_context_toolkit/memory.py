@@ -18,7 +18,7 @@ import datetime as _dt
 import math
 import re
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -113,9 +113,9 @@ class Memory(BaseModel):
     links: list[str] = []           # [[name]] references found in the body
     members: list[str] = []         # for bundled packages: the slugs merged in
     tags: list[str] = []
-    resource: Optional[str] = None  # OKF: URI/path of the asset this concept describes
-    timestamp: Optional[str] = None  # OKF: ISO 8601 last meaningful change (display/tiebreak only)
-    source_path: Optional[str] = None
+    resource: str | None = None  # OKF: URI/path of the asset this concept describes
+    timestamp: str | None = None  # OKF: ISO 8601 last meaningful change (display/tiebreak only)
+    source_path: str | None = None
 
 
 def _coerce_type(raw) -> MemoryType:
@@ -138,7 +138,7 @@ def _meta_get(meta: dict, key: str):
     return None
 
 
-def _coerce_scalar(v) -> Optional[str]:
+def _coerce_scalar(v) -> str | None:
     """Normalize an optional scalar frontmatter value to a string. YAML
     auto-parses an unquoted ISO date/datetime into a date/datetime object, so
     coerce those back to ISO 8601 (`.isoformat()`) rather than Python's
@@ -195,7 +195,7 @@ class MemoryEngine:
         self._bm25_cache: dict | None = None
 
     @classmethod
-    def from_roots(cls, roots: dict[str, str | Path]) -> "MemoryEngine":
+    def from_roots(cls, roots: dict[str, str | Path]) -> MemoryEngine:
         """Build from a {tier: path} mapping. Project tier is loaded before
         user tier so project wins on name collision."""
         engine = cls()
@@ -209,7 +209,7 @@ class MemoryEngine:
         return engine
 
     @classmethod
-    def from_directory(cls, root: str | Path, tier: MemoryTier = "project") -> "MemoryEngine":
+    def from_directory(cls, root: str | Path, tier: MemoryTier = "project") -> MemoryEngine:
         engine = cls()
         engine.load_directory(root, tier=tier)
         return engine
@@ -309,7 +309,7 @@ class MemoryEngine:
         edges), sorted. Empty list when nothing cites it (an orphan-in / leaf)."""
         return self._backlinks().get(name, [])
 
-    def get(self, name: str) -> Optional[Memory]:
+    def get(self, name: str) -> Memory | None:
         exact = next((m for m in self._memories if m.name == name), None)
         if exact is not None:
             return exact
@@ -318,8 +318,8 @@ class MemoryEngine:
         owner = self._member_owners().get(_norm_link(name))
         return next((m for m in self._memories if m.name == owner), None) if owner else None
 
-    def list(self, type: Optional[MemoryType] = None,
-             tier: Optional[MemoryTier] = None) -> list[Memory]:
+    def list(self, type: MemoryType | None = None,
+             tier: MemoryTier | None = None) -> list[Memory]:
         result = self._memories
         if type is not None:
             result = [m for m in result if m.type == type]
@@ -329,8 +329,8 @@ class MemoryEngine:
 
     def recall(
         self, query: str, limit: int = 8,
-        boost: Optional[dict[str, float]] = None,
-        backlink_boost: Optional[dict[str, float]] = None,
+        boost: dict[str, float] | None = None,
+        backlink_boost: dict[str, float] | None = None,
     ) -> list[Memory]:
         """Rank memories by keyword overlap with the query across both tiers.
 
@@ -498,7 +498,7 @@ class MemoryEngine:
         hi = bisect.bisect_right(tokens, term + "￿")
         return tokens[lo:hi]
 
-    def _owning_root(self, memory: Memory) -> Optional[Path]:
+    def _owning_root(self, memory: Memory) -> Path | None:
         """The root a memory belongs to for index purposes: the DEEPEST loaded
         root it lives under.
 
@@ -516,7 +516,7 @@ class MemoryEngine:
         if not memory.source_path:
             return None
         path = Path(memory.source_path)
-        owner: Optional[Path] = None
+        owner: Path | None = None
         for root, _ in self._roots:
             if path.is_relative_to(root) and (
                 owner is None or len(root.parts) > len(owner.parts)

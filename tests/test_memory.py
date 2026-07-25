@@ -558,7 +558,7 @@ class TestBacklinkBoostInRecall:
         # Get edges for backlink count
         edges = engine.edges()
         inbound = {}
-        for src, tgt in edges:
+        for _src, tgt in edges:
             inbound.setdefault(tgt, 0)
             inbound[tgt] += 1
 
@@ -571,7 +571,7 @@ class TestBacklinkBoostInRecall:
         results = engine.recall(
             "concept",
             limit=3,
-            backlink_boost={name: boost for name, boost in inbound.items()}
+            backlink_boost=dict(inbound)
         )
 
         # First result (A) should be A due to backlink boost
@@ -616,8 +616,8 @@ class TestMemoryDreamStatus:
         for i in range(3):
             self._write_mem(ms, f"mem{i}")
 
-        from mcp_context_toolkit.mcp_server import build_server
         from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import build_server
 
         rules_engine = RulesEngine.from_directory(rules_dir)
         memory_engine = MemoryEngine.from_directory(ms)
@@ -647,9 +647,8 @@ class TestMemoryDreamStatus:
         # Memory A links to non-existent B
         self._write_mem(ms, "a", body="[[nonexistent-mem]]")
 
-        from mcp_context_toolkit.mcp_server import build_server
         from mcp_context_toolkit.engine import RulesEngine
-        from mcp_context_toolkit.mcp_server import _Reloader
+        from mcp_context_toolkit.mcp_server import _Reloader, build_server
 
         rules_engine = RulesEngine.from_directory(rules_dir)
         memory_engine = MemoryEngine.from_directory(ms)
@@ -677,9 +676,8 @@ class TestMemoryDreamStatus:
         # Create MEMORY.md (the hot index)
         (ms / "MEMORY.md").write_text("# Memories\n\n- clean\n", encoding="utf-8")
 
-        from mcp_context_toolkit.mcp_server import build_server
         from mcp_context_toolkit.engine import RulesEngine
-        from mcp_context_toolkit.mcp_server import _Reloader
+        from mcp_context_toolkit.mcp_server import _Reloader, build_server
 
         rules_engine = RulesEngine.from_directory(rules_dir)
         memory_engine = MemoryEngine.from_directory(ms)
@@ -705,9 +703,8 @@ class TestMemoryDreamStatus:
         rules_dir.mkdir()
         self._write_mem(ms, "a", body="[[broken]]")  # 1 broken link
 
-        from mcp_context_toolkit.mcp_server import build_server
         from mcp_context_toolkit.engine import RulesEngine
-        from mcp_context_toolkit.mcp_server import _Reloader
+        from mcp_context_toolkit.mcp_server import _Reloader, build_server
 
         rules_engine = RulesEngine.from_directory(rules_dir)
         memory_engine = MemoryEngine.from_directory(ms)

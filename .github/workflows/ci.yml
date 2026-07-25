@@ -23,7 +23,12 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]" ruff build
+          # ruff is PINNED on purpose. A linter defines by version what counts
+          # as an error, so an unpinned one makes the build depend on someone
+          # else's release schedule: 0.16.0 turned on additional default rules
+          # and broke CI for a commit tree that had not changed. Bump this
+          # deliberately, with the cleanup in the same commit.
+          pip install -e ".[dev]" "ruff==0.16.0" build
 
       - name: Lint (ruff)
         run: ruff check src tests

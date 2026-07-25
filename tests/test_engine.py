@@ -4,35 +4,35 @@ from pathlib import Path
 import pytest
 
 from mcp_context_toolkit.engine import RulesEngine, _compile_glob, fingerprint_rules
-from mcp_context_toolkit.models import Rule, RuleApplyTo, Decision, DecisionAppliesTo
+from mcp_context_toolkit.models import Decision, DecisionAppliesTo, Rule, RuleApplyTo
 
 
 def _make_rule(key: str, files: list[str], **overrides) -> Rule:
-    defaults = dict(
-        key=key,
-        title=f"Test {key}",
-        type="security",
-        scope="backend",
-        priority="mandatory",
-        modules=["all"],
-        summary="Test rule — minimum ten chars",
-        content="body",
-        applies_to=RuleApplyTo(files=files),
-        created=date(2026, 1, 1),
-    )
+    defaults = {
+        "key": key,
+        "title": f"Test {key}",
+        "type": "security",
+        "scope": "backend",
+        "priority": "mandatory",
+        "modules": ["all"],
+        "summary": "Test rule — minimum ten chars",
+        "content": "body",
+        "applies_to": RuleApplyTo(files=files),
+        "created": date(2026, 1, 1),
+    }
     defaults.update(overrides)
     return Rule(**defaults)  # type: ignore[arg-type]
 
 
 def _make_decision(key: str, files: list[str], **overrides) -> Decision:
-    defaults = dict(
-        key=key,
-        title=f"Decision {key}",
-        date=date(2026, 1, 1),
-        status="accepted",
-        applies_to=DecisionAppliesTo(files=files),
-        reason="Test decision — at least ten chars long.",
-    )
+    defaults = {
+        "key": key,
+        "title": f"Decision {key}",
+        "date": date(2026, 1, 1),
+        "status": "accepted",
+        "applies_to": DecisionAppliesTo(files=files),
+        "reason": "Test decision — at least ten chars long.",
+    }
     defaults.update(overrides)
     return Decision(**defaults)  # type: ignore[arg-type]
 

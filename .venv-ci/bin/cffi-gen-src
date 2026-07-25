@@ -1,0 +1,10 @@
+#!/bin/sh
+'''exec' /tmp/claude-1000/-home-othmar-atzmueller-talos/75fb0ce1-77a4-4fc0-8588-607fdff772d1/scratchpad/mct/mcp-context-toolkit/.venv-ci/bin/python3 "$0" "$@"
+' '''
+# -*- coding: utf-8 -*-
+import re
+import sys
+from cffi._cffi_gen_src import run
+if __name__ == '__main__':
+    sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
+    sys.exit(run())

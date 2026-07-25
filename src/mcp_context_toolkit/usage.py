@@ -20,7 +20,7 @@ import json
 import math
 import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -35,7 +35,7 @@ _W_RECALL = 1
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _heat(opens: int, recalls: int) -> float:
@@ -66,7 +66,7 @@ class UsageStore:
         self._data: dict[str, dict] = self._load()
 
     @classmethod
-    def for_memory_dir(cls, memory_dir: str | Path) -> "UsageStore":
+    def for_memory_dir(cls, memory_dir: str | Path) -> UsageStore:
         return cls(Path(memory_dir) / cls.FILENAME)
 
     def _load(self) -> dict[str, dict]:
@@ -102,7 +102,10 @@ class UsageStore:
         lock_path = self.path.parent / (self.path.name + ".lock")
         handle = None
         try:
-            handle = open(lock_path, "w")
+            # noqa SIM115: the handle must OUTLIVE this block — it carries the
+            # flock across the `yield` below and is released in the finally.
+            # A `with` would close it immediately and drop the lock.
+            handle = open(lock_path, "w")  # noqa: SIM115
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         except OSError:
             if handle is not None:

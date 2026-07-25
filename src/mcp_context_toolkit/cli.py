@@ -119,10 +119,7 @@ def _rule_to_summary_dict(r) -> dict:
 
 
 def _resolve_rules_dir(arg: str | None) -> Path:
-    if arg:
-        resolved = Path(arg).expanduser().resolve()
-    else:
-        resolved = _discover_rules_dir()
+    resolved = Path(arg).expanduser().resolve() if arg else _discover_rules_dir()
     warn_if_example_rules(resolved)
     return resolved
 

@@ -44,3 +44,40 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 mcp_context_toolkit = ["viewer/*.html", "viewer/*.js", "method/*.md"]
+
+# ---------------------------------------------------------------------------
+# Lint configuration — deliberately EXPLICIT.
+#
+# This package previously shipped no ruff config at all, which meant CI linted
+# it against whatever ruff's DEFAULT rule set happened to be. That default is
+# not stable across releases: 0.16.0 switched on whole additional families
+# (bandit, bugbear, async, pyupgrade …) and turned a green tree red without a
+# line of code changing. Pinning the version in CI limits the blast radius;
+# stating the rules here is what actually makes the check reproducible.
+#
+# Rules are chosen for a published library rather than for an application:
+# correctness and API hygiene matter, stylistic opinions are kept out.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+# Not enforced as a lint error (see E501 below); this value is what isort wraps
+# import blocks against. At the default 88 the long model import would be split.
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes — undefined names, unused imports
+    "I",      # import sorting (a library should not force a diff on consumers)
+    "UP",     # pyupgrade — the package requires 3.11+, so use its syntax
+    "B",      # bugbear — real bug patterns, not style
+    "SIM",    # simplifications that genuinely read better
+    "C4",     # comprehension clarity
+]
+ignore = [
+    # Long lines are tolerated in prose (docstrings explain WHY, and wrapping
+    # them mid-sentence hurts more than it helps). No formatter runs here, so
+    # nothing rewrites them either — this is a deliberate non-rule, not a
+    # deferral to some other tool.
+    "E501",
+]
