@@ -7,7 +7,7 @@ import pytest
 
 from mcp_context_toolkit import cli
 from mcp_context_toolkit.core import parse_frontmatter
-from mcp_context_toolkit.memory import MemoryEngine
+from mcp_context_toolkit.memory import _W_NAME, MemoryEngine
 from mcp_context_toolkit.usage import UsageStore
 
 
@@ -818,3 +818,106 @@ class TestMcpToolBodies:
         """usage is None when no project store backs it — must not crash."""
         server = self._server(self._store(tmp_path))
         assert "error" in self._call(server, "memory_usage")
+
+
+class TestBm25Ranking:
+    """Properties BM25F buys over a plain weighted hit count.
+
+    Written after measuring a real 119-memory store where the old scorer put
+    filler words on par with topic words ("der" matched 115 of 119 memories and
+    contributed as much as "pii"), and where a large collector note outranked
+    the focused note on the subject purely by surface area.
+    """
+
+    def test_rare_term_outweighs_common_one(self, tmp_path: Path):
+        """IDF: a word carried by almost every memory must not decide a ranking."""
+        for i in range(12):
+            _write(tmp_path, f"filler{i}.md", f"name: filler{i}", "the common word here")
+        # 'common' is everywhere, 'zolltarif' is unique to one memory.
+        _write(tmp_path, "rare.md", "name: rare_topic", "zolltarif specifics")
+        _write(tmp_path, "bulk.md", "name: bulk_note", "common common common common")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.recall("common zolltarif")[0].name == "rare_topic"
+
+    def test_length_normalisation_favours_the_focused_note(self, tmp_path: Path):
+        """A short note about X beats a long one that merely mentions X."""
+        _write(tmp_path, "focused.md", "name: focused", "quota budget")
+        _write(tmp_path, "collector.md", "name: collector",
+               "quota budget " + " ".join(f"unrelated{i}" for i in range(400)))
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.recall("quota budget")[0].name == "focused"
+
+    def test_repetition_saturates(self, tmp_path: Path):
+        """k1 saturation: each further occurrence of a term buys less.
+
+        Note what this does NOT claim: sheer repetition still wins on score —
+        60 mentions do outrank 2. What saturation guarantees is a bounded,
+        strongly diminishing return, so the gap grows far slower than the count
+        (measured here: 1->2 adds ~0.43, 20->60 adds ~0.11 in total).
+        """
+        _write(tmp_path, "one.md", "name: a_one", "quota")
+        _write(tmp_path, "two.md", "name: b_two", "quota quota")
+        _write(tmp_path, "many.md", "name: c_many", "quota " * 60)
+        e = MemoryEngine.from_directory(tmp_path)
+        order = [m.name for m in e.recall("quota")]
+        assert order.index("c_many") < order.index("a_one")   # more IS more…
+        # …but 60x must not be anywhere near 60x the score of 1x.
+        idx = e._bm25_index()
+        assert idx["postings"]["quota"]["c_many"] == 60       # raw tf is honest
+        # Sanity: the whole corpus is still returned, i.e. the floor did not
+        # drop the single-mention note despite the 60x outlier.
+        assert len(order) == 3
+
+    def test_short_terms_match_exactly_long_terms_by_prefix(self, tmp_path: Path):
+        """Prefix lookup is blind to word boundaries — restrict it to long terms.
+
+        "wie" must not reach "wiederherstellen", while "deploy" must still
+        reach "deployment". Short snake_case parts stay reachable because they
+        are indexed as tokens in their own right.
+        """
+        _write(tmp_path, "a.md", "name: restore_note", "wiederherstellen des systems")
+        _write(tmp_path, "b.md", "name: deploy_note", "deployment steps")
+        _write(tmp_path, "c.md", "name: pii_filter", "redaction")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert e.recall("wie") == []                                  # no prefix blowup
+        assert [m.name for m in e.recall("deploy")] == ["deploy_note"]  # stemming kept
+        assert [m.name for m in e.recall("pii")] == ["pii_filter"]      # snake part kept
+
+    def test_index_is_rebuilt_after_loading_more_memories(self, tmp_path: Path):
+        """Corpus statistics must not survive a second load_directory."""
+        a, b = tmp_path / "a", tmp_path / "b"
+        _write(a, "one.md", "name: one", "alpha")
+        _write(b, "two.md", "name: two", "alpha beta")
+        e = MemoryEngine()
+        e.load_directory(a, tier="project")
+        assert len(e._bm25_index()["lengths"]) == 1
+        e.load_directory(b, tier="user")
+        assert len(e._bm25_index()["lengths"]) == 2   # stale stats would say 1
+        assert {m.name for m in e.recall("alpha")} == {"one", "two"}
+
+    def test_snake_case_parts_are_not_double_counted(self, tmp_path: Path):
+        """One occurrence must weigh the same wherever it sits in a compound.
+
+        Regression guard: indexing the full token ALONGSIDE its parts let a
+        prefix query match both, and pooling their postings credited the same
+        occurrence twice — but only when the query hit the LEADING part, so
+        "deploy_workflow" silently outscored "release_deploy" on a query
+        neither mentions more often. Reintroducing that bug passes every other
+        test in this suite, which is why this one exists.
+        """
+        for name in ("deploy_workflow", "deploy", "release_deploy"):
+            _write(tmp_path, f"{name}.md", f"name: {name}", "body text")
+        e = MemoryEngine.from_directory(tmp_path)
+        idx = e._bm25_index()
+        pooled = {
+            m.name: sum(
+                idx["postings"][t].get(m.name, 0.0)
+                for t in e._prefix_slice(idx["tokens"], "deploy")
+            )
+            for m in e.memories
+        }
+        # Pin the VALUE, not just the agreement: "all equal" is also satisfied
+        # when every score is 0.0, i.e. when the prefix lookup finds nothing at
+        # all — which would leave this regression guard green while the feature
+        # it guards is dead. One occurrence in the name field weighs _W_NAME.
+        assert set(pooled.values()) == {float(_W_NAME)}, pooled
