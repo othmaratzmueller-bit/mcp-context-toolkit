@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { extractMetadata, MemoryMetadata } from './frontmatter';
 
 export interface MemoryFile {
   name: string;
@@ -133,65 +134,15 @@ export class MemoryProvider {
     return 'project';
   }
 
-  public extractMetadata(content: string): {
-    name: string;
-    description: string;
-    type: 'user' | 'feedback' | 'project' | 'reference' | 'misc';
-    tags?: string[];
-    created?: string;
-  } {
-    const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
-    if (!frontmatterMatch) {
-      return {
-        name: 'unnamed',
-        description: 'No frontmatter found',
-        type: 'misc',
-      };
-    }
-
-    const frontmatter = frontmatterMatch[1];
-    const lines = frontmatter.split('\n');
-    const props: Record<string, string> = {};
-
-    for (const line of lines) {
-      const match = line.match(/^(\w+):\s*(.*)$/);
-      if (match) {
-        const key = match[1];
-        const value = match[2].trim();
-        props[key] = value;
-      }
-    }
-
-    // Parse tags: support both YAML flow syntax [tag1, tag2] and JSON arrays
-    let tags: string[] | undefined;
-    if (props.tags) {
-      tags = this.parseTagList(props.tags);
-    }
-
-    return {
-      name: props.name || 'unnamed',
-      description: props.description || 'No description',
-      type: (props.type as any) || 'misc',
-      tags,
-      created: props.created,
-    };
-  }
-
-  private parseTagList(raw: string): string[] {
-    // Try JSON parse first: `["tag1", "tag2"]`
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.map(String);
-      }
-    } catch {
-      // Not JSON — try YAML flow syntax: `[tag1, tag2]`
-    }
-
-    // Strip brackets, split by comma
-    const cleaned = raw.replace(/^\[|\]$/g, '').trim();
-    if (!cleaned) return [];
-    return cleaned.split(',').map(t => t.trim().replace(/^["']|["']$/g, ''));
+  /**
+   * Extract memory metadata from frontmatter.
+   *
+   * Delegates to the vscode-free `frontmatter` module so the parsing rules
+   * (top-level key first, then the nested `metadata:` block — matching the
+   * Python engine's `_meta_get`) are unit-testable without an Electron host.
+   */
+  public extractMetadata(content: string): MemoryMetadata {
+    return extractMetadata(content);
   }
 
   private sortByFrecency(): void {

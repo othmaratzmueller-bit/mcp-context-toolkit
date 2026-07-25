@@ -225,6 +225,48 @@ class TestMemoryEngine:
         assert "a" in lint["orphans"]            # a.md not in index
         assert "gone.md" in lint["stale_pointers"]  # index points at missing file
 
+    def test_lint_finds_orphans_in_subdirectories(self, tmp_path: Path):
+        """A store organised in topic folders must still report orphans.
+
+        Regression: the root-membership test was `parent == root`, which skipped
+        every nested memory. A store that keeps ALL its files in subfolders
+        (core/, feedback/, project/) then reported a constant 0 orphans while
+        real ones accumulated — and memory_dream_status, which counts them,
+        under-reported the need to consolidate.
+        """
+        _write(tmp_path / "core", "indexed.md", "name: indexed", "x")
+        _write(tmp_path / "core", "nested_orphan.md", "name: nested_orphan", "x")
+        _write(tmp_path, "flat_orphan.md", "name: flat_orphan", "x")
+        # The index references nested files WITH their relative path.
+        (tmp_path / "MEMORY.md").write_text(
+            "- [Indexed](core/indexed.md)\n", encoding="utf-8"
+        )
+        lint = MemoryEngine.from_directory(tmp_path).lint()
+        assert "nested_orphan" in lint["orphans"]  # was silently skipped before
+        assert "flat_orphan" in lint["orphans"]    # flat case kept working
+        assert "indexed" not in lint["orphans"]    # nested + indexed = not an orphan
+        assert lint["stale_pointers"] == []        # nested path resolves on disk
+
+    def test_nested_roots_each_own_their_memories(self, tmp_path: Path):
+        """With one store inside another, the DEEPEST root owns a memory.
+
+        Membership must span subdirectories, but "lives under" alone would make
+        a file belong to both roots — the outer index would then flag it as an
+        orphan even though the inner one lists it correctly.
+        """
+        outer, inner = tmp_path / "outer", tmp_path / "outer" / "inner"
+        _write(outer, "o.md", "name: o", "x")
+        _write(inner, "i.md", "name: i", "x")
+        _write(inner, "stray.md", "name: stray", "x")
+        (outer / "MEMORY.md").write_text("- [o](o.md)\n", encoding="utf-8")
+        (inner / "MEMORY.md").write_text("- [i](i.md)\n", encoding="utf-8")
+
+        e = MemoryEngine()
+        e.load_directory(outer, tier="project")
+        e.load_directory(inner, tier="user")
+        # Only the genuinely unindexed file — 'i' is listed in ITS own index.
+        assert e.lint()["orphans"] == ["stray"]
+
 
 class TestBacklinks:
     """Inbound edges — the reverse of the forward-only Memory.links."""
@@ -685,3 +727,94 @@ class TestMemoryDreamStatus:
         assert data["lint_issues"]["broken_links"]["a"] == ["broken"]
         # 1 lint issue < lint_threshold=2, aber > 0 → "empfohlen"
         assert "empfohlen" in data["recommendation"]
+
+
+class TestMcpToolBodies:
+    """End-to-end coverage of the MCP tool bodies — the toolkit's public surface.
+
+    These bodies were the least-covered part of the package, which is how a
+    lint() defect (orphans in subdirectories reported as none) could ship
+    unnoticed: the engine had tests, the tool a host actually calls did not.
+    Each test drives the real tool through call_tool, like a client would.
+    """
+
+    @staticmethod
+    def _store(tmp_path: Path) -> Path:
+        ms = tmp_path / "memories"
+        (ms / "topic").mkdir(parents=True)
+        _write(ms / "topic", "alpha.md", "name: alpha\ndescription: about widgets",
+               "widgets are [[beta]]")
+        _write(ms / "topic", "beta.md", "name: beta\ndescription: about gadgets", "gadgets")
+        (ms / "MEMORY.md").write_text("- [Alpha](topic/alpha.md)\n", encoding="utf-8")
+        return ms
+
+    def _server(self, ms: Path):
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _Reloader, build_server
+
+        rules = _Reloader(RulesEngine, [])
+        memory = _Reloader(lambda: MemoryEngine.from_directory(ms), [ms])
+        return build_server(rules, memory)
+
+    def _call(self, server, name: str, args: dict | None = None):
+        result = asyncio.run(server.call_tool(name, args or {}))
+        return json.loads(result[0][0].text)
+
+    def test_memory_lint_tool_sees_nested_orphans(self, tmp_path: Path):
+        """The end-to-end guard for the subdirectory-orphan regression."""
+        server = self._server(self._store(tmp_path))
+        data = self._call(server, "memory_lint")
+        assert data["orphans"] == ["beta"]   # nested + not in index
+        assert data["total"] == 2
+
+    def test_memory_dream_status_counts_those_orphans(self, tmp_path: Path):
+        """dream_status derives from lint — a blind lint made it under-report."""
+        server = self._server(self._store(tmp_path))
+        data = self._call(server, "memory_dream_status")
+        assert data["orphans"] == 1
+        assert data["total_lint_issues"] >= 1
+
+    def test_recall_ranks_and_returns_summaries(self, tmp_path: Path):
+        server = self._server(self._store(tmp_path))
+        hits = self._call(server, "recall", {"query": "widgets"})
+        assert [h["name"] for h in hits] == ["alpha"]
+        assert hits[0]["tier"] == "project"
+
+    def test_recall_empty_query_returns_nothing(self, tmp_path: Path):
+        server = self._server(self._store(tmp_path))
+        assert self._call(server, "recall", {"query": "   "}) == []
+
+    def test_get_memory_includes_backlinks(self, tmp_path: Path):
+        server = self._server(self._store(tmp_path))
+        data = self._call(server, "get_memory", {"name": "beta"})
+        assert data["cited_by"] == ["alpha"]     # inbound edge resolved
+        assert "gadgets" in data["body"]
+
+    def test_get_memory_unknown_name_is_a_clean_error(self, tmp_path: Path):
+        server = self._server(self._store(tmp_path))
+        assert "error" in self._call(server, "get_memory", {"name": "nope"})
+
+    def test_list_memories_filters_by_tier(self, tmp_path: Path):
+        server = self._server(self._store(tmp_path))
+        assert len(self._call(server, "list_memories", {"tier": "project"})) == 2
+        assert self._call(server, "list_memories", {"tier": "user"}) == []
+
+    def test_get_rule_unknown_key_is_a_clean_error(self, tmp_path: Path):
+        server = self._server(self._store(tmp_path))
+        assert "error" in self._call(server, "get_rule", {"key": "does_not_exist"})
+
+    def test_query_rules_for_file_shape_without_rules(self, tmp_path: Path):
+        """No rules loaded → empty sections, never a crash."""
+        server = self._server(self._store(tmp_path))
+        out = self._call(server, "query_rules_for_file", {"file_path": "src/x.py"})
+        assert out == {"rules": [], "decisions": [], "dependencies": {}}
+
+    def test_validate_rules_reports_when_nothing_is_loaded(self, tmp_path: Path):
+        server = self._server(self._store(tmp_path))
+        out = self._call(server, "validate_rules")
+        assert out["ok"] is False and "no rules loaded" in out["error"]
+
+    def test_memory_usage_without_tracking_is_a_clean_error(self, tmp_path: Path):
+        """usage is None when no project store backs it — must not crash."""
+        server = self._server(self._store(tmp_path))
+        assert "error" in self._call(server, "memory_usage")

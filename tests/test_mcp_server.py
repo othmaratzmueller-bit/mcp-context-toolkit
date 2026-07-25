@@ -65,3 +65,66 @@ class TestReloader:
         r = _Reloader(lambda: MemoryEngine.from_directory(tmp_path), [tmp_path, None])
         assert r.current().get("a") is not None
 
+
+
+class TestToolInventory:
+    """The banner's tool count must be MEASURED, not a maintained literal.
+
+    Regression guard: the count used to be hardcoded ("Tools", 11, ...) and had
+    to be bumped by hand whenever a tool was added — it silently drifted from
+    what was actually served. These tests fail if the recorded inventory and
+    the tools FastMCP really registered ever diverge.
+    """
+
+    @staticmethod
+    def _server(with_memory: bool, tmp_path: Path):
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import build_server
+
+        rules = _Reloader(RulesEngine, [])
+        if not with_memory:
+            return build_server(rules, None)
+        _write_mem(tmp_path, "m")
+        memory = _Reloader(lambda: MemoryEngine.from_directory(tmp_path), [tmp_path])
+        return build_server(rules, memory)
+
+    def _registered(self, server) -> set:
+        import asyncio
+
+        return {t.name for t in asyncio.run(server.list_tools())}
+
+    def test_inventory_matches_registered_tools(self, tmp_path: Path):
+        server = self._server(True, tmp_path)
+        inv = server.context_toolkit_inventory
+        recorded = set(inv["rules"]) | set(inv["memory"])
+        assert recorded == self._registered(server)
+
+    def test_memory_tools_absent_without_a_store(self, tmp_path: Path):
+        server = self._server(False, tmp_path)
+        inv = server.context_toolkit_inventory
+        assert inv["memory"] == []                       # none registered
+        assert set(inv["rules"]) == self._registered(server)
+
+    def test_banner_reports_the_measured_count(self, tmp_path: Path, capsys):
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _print_banner
+
+        server = self._server(True, tmp_path)
+        inv = server.context_toolkit_inventory
+        _print_banner(RulesEngine(), MemoryEngine.from_directory(tmp_path), inv)
+        banner = capsys.readouterr().err
+        total = len(inv["rules"]) + len(inv["memory"])
+        tools_line = next(line for line in banner.splitlines() if "Tools" in line)
+        # Read the count back out of the rendered line — asserts the printed
+        # figure, independent of column padding.
+        assert int(tools_line.split()[1]) == total
+        assert f"{len(inv['rules'])} rules" in tools_line
+        assert f"{len(inv['memory'])} memory" in tools_line
+
+    def test_banner_omits_tools_line_when_uncounted(self, tmp_path: Path, capsys):
+        """No inventory → no claim. The line is dropped, never guessed."""
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _print_banner
+
+        _print_banner(RulesEngine(), None, None)
+        assert "Tools" not in capsys.readouterr().err

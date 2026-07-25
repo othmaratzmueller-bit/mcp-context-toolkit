@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { MemoryProvider, MemoryFile } from './memoryProvider';
+import { MemoryProvider } from './memoryProvider';
 import { MemoryTreeItem } from './treeItem';
 
 export class MemoryTreeView implements vscode.TreeDataProvider<MemoryTreeItem> {

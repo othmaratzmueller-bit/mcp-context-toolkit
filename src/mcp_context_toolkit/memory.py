@@ -353,6 +353,32 @@ class MemoryEngine:
             scored = [s for s in scored if s[0] >= floor]
         return [m for _, _, m in scored[:limit]]
 
+    def _owning_root(self, memory: Memory) -> Optional[Path]:
+        """The root a memory belongs to for index purposes: the DEEPEST loaded
+        root it lives under.
+
+        Membership has to span subdirectories — a store organised in topic
+        folders (core/, feedback/, project/) keeps every file in one, and a
+        flat ``parent == root`` test reported a constant 0 orphans while real
+        ones piled up. But "lives under" alone is not enough either: with
+        nested roots (an outer project store, an inner user store) a file would
+        belong to BOTH and be flagged as an orphan by the outer index even
+        though the inner one lists it correctly. Deepest-match gives each
+        memory exactly one owner. Returns None when it lives under no root at
+        all (or carries no source path) — such a memory is never an orphan
+        candidate, since no index is responsible for it.
+        """
+        if not memory.source_path:
+            return None
+        path = Path(memory.source_path)
+        owner: Optional[Path] = None
+        for root, _ in self._roots:
+            if path.is_relative_to(root) and (
+                owner is None or len(root.parts) > len(owner.parts)
+            ):
+                owner = root
+        return owner
+
     def lint(self) -> dict:
         """Read-only hygiene report — the raw material a consolidation pass acts on.
 
@@ -379,9 +405,11 @@ class MemoryEngine:
                 continue
             index_text = index.read_text(encoding="utf-8")
             for m in self._memories:
-                if m.source_path and Path(m.source_path).parent != root:
+                if self._owning_root(m) != root:
                     continue
-                fname = Path(m.source_path).name if m.source_path else f"{m.name}.md"
+                # source_path is guaranteed here: _owning_root() returns None
+                # without one, and None never equals a root.
+                fname = Path(str(m.source_path)).name
                 if fname not in index_text and m.name not in index_text:
                     orphans.append(m.name)
             for ref in _INDEX_REF_RE.findall(index_text):
