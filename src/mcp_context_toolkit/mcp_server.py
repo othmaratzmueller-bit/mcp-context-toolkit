@@ -160,7 +160,22 @@ def build_server(
 
     mcp = FastMCP("context")
 
-    @mcp.tool()
+    # Tool inventory, recorded AS the tools register — so the startup banner can
+    # state a measured count instead of a hand-maintained literal. A number that
+    # has to be edited by hand drifts silently the moment a tool is added; this
+    # toolkit's own line is that a system must measure its state, not claim it.
+    inventory: dict[str, list[str]] = {"rules": [], "memory": []}
+
+    def _tool(group: str):
+        """Register an MCP tool and record its name under `group`."""
+        def decorator(fn):
+            inventory[group].append(fn.__name__)
+            return mcp.tool()(fn)
+        return decorator
+
+    mcp.context_toolkit_inventory = inventory  # type: ignore[attr-defined]
+
+    @_tool("rules")
     def query_rules_for_file(file_path: str) -> str:
         """Return codebase intelligence context (Rules, Decisions, Dependencies) for the given file path.
 
@@ -183,7 +198,7 @@ def build_server(
         }
         return json.dumps(out, indent=2)
 
-    @mcp.tool()
+    @_tool("rules")
     def get_rule(key: str) -> str:
         """Fetch the full content of a single rule by key."""
         rule = rules_reloader.current().get_rule(key)
@@ -191,13 +206,13 @@ def build_server(
             return json.dumps({"error": f"rule not found: {key}"})
         return json.dumps(_rule_full(rule), indent=2, default=str)
 
-    @mcp.tool()
+    @_tool("rules")
     def list_rule_keys(type: str | None = None, scope: str | None = None) -> str:
         """List all loaded rule keys, optionally filtered by type and/or scope."""
         keys = rules_reloader.current().list_keys(type=type, scope=scope)  # type: ignore[arg-type]
         return json.dumps(keys, indent=2)
 
-    @mcp.tool()
+    @_tool("rules")
     def validate_rules() -> str:
         """Re-validate all rules from disk, across EVERY loaded tier. Returns
         {ok, rule_count, errors, warnings, roots}.
@@ -242,7 +257,7 @@ def build_server(
 
         return _json.dumps(agg, indent=2)
 
-    @mcp.tool()
+    @_tool("rules")
     def query_rules(
         type: str | None = None,
         scope: str | None = None,
@@ -283,7 +298,7 @@ def build_server(
     # ---- memory tools (registered only when a memory store was found) ----
     if memory_reloader is not None:
 
-        @mcp.tool()
+        @_tool("memory")
         def recall(query: str, limit: int = 8) -> str:
             """Recall the most relevant memories for a query, ranked across BOTH
             tiers (project + user). Keyword-based, deterministic, hot/cold-aware.
@@ -302,19 +317,22 @@ def build_server(
             while the boost never dominates the base relevance.
             """
             boosts = usage.boosts() if usage is not None else {}
-            # Backlink boost from graph: {name: log(1 + backlink_count) * 0.1}
-            # log(1+x) dampens the effect for highly-cited memories, keeps it
+            # ONE engine snapshot for both the graph and the ranking: calling
+            # current() twice could straddle a reload, scoring hits from one
+            # store against link counts from another.
+            engine = memory_reloader.current()
+            # Backlink boost from graph: {name: log1p(inbound_count) * 0.1}
+            # log1p dampens the effect for highly-cited memories, keeps it
             # proportional but bounded.
             backlink_boosts = {}
-            edges = memory_reloader.current().edges()
             inbound: dict[str, int] = {}
-            for src, tgt in edges:
-                inbound.setdefault(tgt, 0)
-                inbound[tgt] += 1
+            for _src, tgt in engine.edges():
+                inbound[tgt] = inbound.get(tgt, 0) + 1
             for name, count in inbound.items():
-                # log(1+x) * 0.1: 1→0, 10→0.3, 100→0.43, never dominates base score
+                # log1p(x) * 0.1 → 1 link ≈ +0.07, 10 ≈ +0.24, 100 ≈ +0.46:
+                # grows sub-linearly, never dominates the base relevance score.
                 backlink_boosts[name] = math.log1p(count) * 0.1
-            hits = memory_reloader.current().recall(
+            hits = engine.recall(
                 query, limit=limit, boost=boosts, backlink_boost=backlink_boosts
             )
             if usage is not None:
@@ -323,7 +341,7 @@ def build_server(
                 [_memory_summary(m) for m in hits], indent=2, ensure_ascii=False
             )
 
-        @mcp.tool()
+        @_tool("memory")
         def get_memory(name: str) -> str:
             """Fetch the full body + metadata of a single memory by its name.
 
@@ -345,7 +363,7 @@ def build_server(
             payload["cited_by"] = engine.backlinks(m.name)
             return json.dumps(payload, indent=2, ensure_ascii=False)
 
-        @mcp.tool()
+        @_tool("memory")
         def list_memories(type: str | None = None, tier: str | None = None) -> str:
             """List memory names + descriptions, optionally filtered by type
             (user/feedback/project/reference) and/or tier (user/project)."""
@@ -354,7 +372,7 @@ def build_server(
                 [_memory_summary(m) for m in ms], indent=2, ensure_ascii=False
             )
 
-        @mcp.tool()
+        @_tool("memory")
         def memory_dream_status(
             files_threshold: int = 3,
             lint_threshold: int = 2,
@@ -436,7 +454,7 @@ def build_server(
             }
             return json.dumps(status, indent=2, ensure_ascii=False)
 
-        @mcp.tool()
+        @_tool("memory")
         def memory_lint() -> str:
             """Hygiene report over the memory store — broken [[links]], index
             orphans, stale index pointers. The raw material a consolidation
@@ -445,7 +463,7 @@ def build_server(
                 memory_reloader.current().lint(), indent=2, ensure_ascii=False
             )
 
-        @mcp.tool()
+        @_tool("memory")
         def memory_usage(limit: int = 50) -> str:
             """Hot -> cold usage report (frecency): opens, recalls, last-access
             timestamps and a heat score per memory, hottest first.
@@ -470,10 +488,19 @@ AUTHOR = "Othmar Atzmüller"
 AUTHOR_URL = "github.com/othmaratzmueller-bit"
 
 
-def _print_banner(engine: RulesEngine, memory_engine: MemoryEngine | None) -> None:
+def _print_banner(
+    engine: RulesEngine,
+    memory_engine: MemoryEngine | None,
+    inventory: dict[str, list[str]] | None = None,
+) -> None:
     """Print the startup banner to stderr — every MCP client that launches the
     server sees it (generic, not tied to any one client). Lists what is loaded
-    and credits the author."""
+    and credits the author.
+
+    ``inventory`` is the {group: [tool names]} map recorded while the tools
+    registered (see build_server). Passing it makes the Tools line a MEASURED
+    figure; without it the line is omitted rather than guessed — this toolkit
+    does not claim a state it has not counted."""
     from collections import Counter
 
     rule_types = Counter(r.type for r in engine.rules)
@@ -502,10 +529,15 @@ def _print_banner(engine: RulesEngine, memory_engine: MemoryEngine | None) -> No
             "Memory", len(memory_engine.memories),
             f"{tier_breakdown} · frecency-ranked" if tier_breakdown else "—",
         ))
-        data.append(("Tools", 11, "5 rules · 6 memory"))
     else:
         data.append(("Memory", 0, "(no store found)"))
-        data.append(("Tools", 5, "5 rules"))
+    if inventory is not None:
+        groups = [(g, len(names)) for g, names in inventory.items() if names]
+        data.append((
+            "Tools",
+            sum(n for _, n in groups),
+            " · ".join(f"{n} {g}" for g, n in groups) or "—",
+        ))
 
     bar = "─" * 64
     out = [
@@ -628,8 +660,12 @@ def main() -> None:
             usage = UsageStore.for_memory_dir(mem_dir)
 
     memory_engine = memory_reloader.current() if memory_reloader is not None else None
-    _print_banner(engine, memory_engine)
+    # Build BEFORE printing: the banner reports the tool count recorded during
+    # registration, so the figure can never drift from what is actually served.
     server = build_server(rules_reloader, memory_reloader, usage)
+    _print_banner(
+        engine, memory_engine, getattr(server, "context_toolkit_inventory", None)
+    )
     server.run()
 
 

@@ -5,7 +5,8 @@
   "version": "0.0.1",
   "publisher": "mcp-context-toolkit",
   "engines": {
-    "vscode": "^1.84.0"
+    "vscode": "^1.84.0",
+    "node": ">=20"
   },
   "categories": [
     "Other",
@@ -159,9 +160,12 @@
     "compile": "webpack --mode production --devtool source-map",
     "watch": "webpack --mode development --watch --devtool inline-source-map",
     "lint": "eslint src --ext .ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "compile-tests": "tsc -p tsconfig.test.json",
+    "test:unit": "npm run compile-tests && mocha out-test/test/unit/**/*.test.js"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.6",
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.84.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
@@ -179,6 +183,7 @@
   },
   "overrides": {
     "minimatch": "^9.0.9",
-    "serialize-javascript": "^7.0.7"
+    "serialize-javascript": "^7.0.7",
+    "brace-expansion": "^5.0.8"
   }
 }

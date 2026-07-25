@@ -5,3 +5,13 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+.coverage
+htmlcov/
+
+# Frecency sidecars written next to a memory store. Per-machine signals (see
+# usage.py): each checkout keeps its own hot set, so they must never be
+# committed. Matched at any depth — a store may live in .context/memory/,
+# .claude/memory/ or wherever CONTEXT_MEMORY_DIR points.
+_usage.json
+_usage.json.lock
+_usage.json.tmp
