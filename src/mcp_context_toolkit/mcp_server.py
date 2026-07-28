@@ -16,6 +16,7 @@ from mcp_context_toolkit.core import (
 from mcp_context_toolkit.engine import RulesEngine
 from mcp_context_toolkit.memory import MemoryEngine
 from mcp_context_toolkit.usage import UsageStore
+from mcp_context_toolkit.work import WorkEngine
 
 
 def _discover_rules_dir() -> Path | None:
@@ -51,6 +52,25 @@ def _discover_memory_dir() -> Path | None:
             mem = candidate / conv / "memory"
             if mem.is_dir():
                 return mem
+    return None
+
+
+def _discover_work_dir() -> Path | None:
+    """Locate the PROJECT work-item directory (plans/roadmaps as records).
+    Env CONTEXT_WORK_DIR wins, else walk up for <conv>/work. Returns None if
+    none found — work tools are then simply not registered, same gating
+    rationale as the optional memory tiers. Deliberately no user/core tier
+    (unlike memory): work items are project-scoped by nature, a cross-project
+    tier was not asked for (W20 — ask before inventing)."""
+    env = os.environ.get("CONTEXT_WORK_DIR")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_dir() else None
+    for candidate in [Path.cwd(), *Path.cwd().parents]:
+        for conv in store_conventions():
+            work = candidate / conv / "work"
+            if work.is_dir():
+                return work
     return None
 
 
@@ -155,6 +175,7 @@ def build_server(
     rules_reloader: _Reloader,
     memory_reloader: _Reloader | None = None,
     usage: UsageStore | None = None,
+    work_reloader: _Reloader | None = None,
 ):
     from mcp.server.fastmcp import FastMCP
 
@@ -164,7 +185,7 @@ def build_server(
     # state a measured count instead of a hand-maintained literal. A number that
     # has to be edited by hand drifts silently the moment a tool is added; this
     # toolkit's own line is that a system must measure its state, not claim it.
-    inventory: dict[str, list[str]] = {"rules": [], "memory": []}
+    inventory: dict[str, list[str]] = {"rules": [], "memory": [], "work": []}
 
     def _tool(group: str):
         """Register an MCP tool and record its name under `group`."""
@@ -478,6 +499,126 @@ def build_server(
                 return json.dumps({"error": "usage tracking unavailable"})
             return json.dumps(usage.report()[:limit], indent=2, ensure_ascii=False)
 
+    # ---- work-item tools (registered only when a work store was found) ----
+    if work_reloader is not None:
+
+        def _work_summary(w: Any) -> dict:
+            return {"key": w.key, "title": w.title, "kind": w.kind,
+                    "status": w.status, "theme": w.theme, "part_of": w.part_of}
+
+        @_tool("work")
+        def work_recall(query: str, limit: int = 8) -> str:
+            """Find work items (plans/roadmaps as records) by keyword, ranked
+            BM25F over title + body — same ranking algorithm as memory's
+            recall(), via the shared core.bm25_scores. No frecency/backlink
+            boost (unlike memory): nothing in this store's design asked for a
+            'hot work item' concept (W20 — ask before inventing).
+
+            Use this to find an existing item before creating a new one — the
+            store's whole purpose is one record per idea, not a duplicate
+            because the existing one wasn't found."""
+            engine = work_reloader.current()
+            hits = engine.recall(query, limit=limit)
+            return json.dumps(
+                [_work_summary(w) for w in hits], indent=2, ensure_ascii=False
+            )
+
+        @_tool("work")
+        def get_work(key: str) -> str:
+            """Fetch a single work item (plan/roadmap record) by key, with its
+            x/y rollup if it has children. Counts are COMPUTED from the
+            children's status, never stored — a goal cannot silently claim a
+            progress its children no longer show."""
+            engine = work_reloader.current()
+            item = engine.get(key)
+            if item is None:
+                return json.dumps({"error": f"work item not found: {key}"})
+            payload = item.model_dump(mode="json")
+            payload["rollup"] = engine.rollup(key)
+            return json.dumps(payload, indent=2, ensure_ascii=False)
+
+        @_tool("work")
+        def list_work(
+            theme: str | None = None,
+            status: str | None = None,
+            kind: str | None = None,
+        ) -> str:
+            """List work items, optionally filtered by theme/status/kind.
+            Each row includes an x/y rollup when the item has children —
+            computed on the fly, never a maintained field."""
+            engine = work_reloader.current()
+            items = engine.list(theme=theme, status=status, kind=kind)
+            out = []
+            for w in items:
+                row = _work_summary(w)
+                roll = engine.rollup(w.key)
+                if roll["total"]:
+                    row["rollup"] = roll
+                out.append(row)
+            return json.dumps(out, indent=2, ensure_ascii=False)
+
+        @_tool("work")
+        def work_children(key: str) -> str:
+            """Direct children of a goal via `part_of` — the hierarchy IS this
+            relation, not a fixed level. A leaf work item (the median case on
+            a real backlog) simply has none."""
+            engine = work_reloader.current()
+            return json.dumps(
+                [_work_summary(w) for w in engine.children(key)],
+                indent=2, ensure_ascii=False,
+            )
+
+        @_tool("work")
+        def work_lint() -> str:
+            """Hygiene report over the work store: dangling part_of/amends/
+            supersedes/blocked_by references, goals whose children are ALL
+            closed but the goal itself is not (the exact "recommended closing
+            it, nobody did" failure mode this store was built to catch),
+            done items with no evidence, and half-closed status/date pairs."""
+            return json.dumps(
+                work_reloader.current().lint(), indent=2, ensure_ascii=False
+            )
+
+        @_tool("work")
+        def work_status() -> str:
+            """Check whether the work store needs attention — the work
+            counterpart to memory_dream_status. Reports how many goals are
+            closeable right now, how many references are dangling, how many
+            done items lack evidence, and how many files were DROPPED at load
+            (invalid schema, duplicate key), with a plain recommendation.
+
+            load_errors gets top billing in the recommendation, not just a
+            tally: a dropped record can make an UNRELATED goal look falsely
+            closeable (its only still-open child never made it into the
+            tree), so "records were dropped" is at least as urgent as
+            "goals are closeable" — arguably more, since it can be the CAUSE
+            of a wrong closeable_goals reading.
+            """
+            lint = work_reloader.current().lint()
+            closeable = len(lint["closeable_goals"])
+            dangling = len(lint["dangling_refs"])
+            no_evidence = len(lint["missing_evidence"])
+            half_closed = len(lint["unclosed_pairs"])
+            dropped = len(lint["load_errors"])
+            total_issues = closeable + dangling + no_evidence + half_closed + dropped
+            if dropped:
+                recommendation = "🚨 Records wurden beim Laden verworfen — Zahlen oben ggf. unvollstaendig"
+            elif closeable or dangling:
+                recommendation = "🧹 Aufraeumen faellig"
+            elif total_issues:
+                recommendation = "💡 kleine Reste"
+            else:
+                recommendation = "✅ kein dringender Bedarf"
+            return json.dumps({
+                "total_items": lint["total"],
+                "closeable_goals": closeable,
+                "dangling_refs": dangling,
+                "missing_evidence": no_evidence,
+                "unclosed_pairs": half_closed,
+                "load_errors": dropped,
+                "recommendation": recommendation,
+            }, indent=2, ensure_ascii=False)
+
     return mcp
 
 
@@ -492,6 +633,7 @@ def _print_banner(
     engine: RulesEngine,
     memory_engine: MemoryEngine | None,
     inventory: dict[str, list[str]] | None = None,
+    work_engine: WorkEngine | None = None,
 ) -> None:
     """Print the startup banner to stderr — every MCP client that launches the
     server sees it (generic, not tied to any one client). Lists what is loaded
@@ -531,6 +673,17 @@ def _print_banner(
         ))
     else:
         data.append(("Memory", 0, "(no store found)"))
+    if work_engine is not None:
+        statuses = Counter(w.status for w in work_engine.items)
+        status_breakdown = " · ".join(
+            f"{n} {s}" for s, n in sorted(statuses.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        work_detail = status_breakdown or "—"
+        if work_engine.errors:
+            work_detail = f"{work_detail} · {len(work_engine.errors)} skipped (invalid)"
+        data.append(("Work", len(work_engine.items), work_detail))
+    else:
+        data.append(("Work", 0, "(no store found)"))
     if inventory is not None:
         groups = [(g, len(names)) for g, names in inventory.items() if names]
         data.append((
@@ -660,11 +813,39 @@ def main() -> None:
             usage = UsageStore.for_memory_dir(mem_dir)
 
     memory_engine = memory_reloader.current() if memory_reloader is not None else None
+
+    # Work-item store is optional, same gating shape as memory: if the dir is
+    # not there, work tools are simply not registered and everything else
+    # keeps working untouched.
+    work_reloader = None
+    work_dir = _discover_work_dir()
+    if work_dir is not None:
+        def _load_work() -> WorkEngine:
+            return WorkEngine.from_directory(work_dir, strict=False)
+
+        work_reloader = _Reloader(_load_work, [work_dir])
+
+    work_engine = work_reloader.current() if work_reloader is not None else None
+    # Degrade loud (W4), same as the rules-loading path above: a dropped work
+    # record is not cosmetic — lint()'s closeable_goals counts a goal's
+    # CURRENT children, so a goal whose only still-open child failed to load
+    # looks fully closeable. Naming each skipped file on stderr makes the gap
+    # diagnosable at start, on top of work_lint/work_status surfacing it live.
+    if work_engine is not None and work_engine.errors:
+        print(
+            f"[context-toolkit] WARNING: {len(work_engine.errors)} work item file(s) "
+            f"skipped (invalid) — the rest loaded normally:",
+            file=sys.stderr,
+        )
+        for err in work_engine.errors:
+            print(f"[context-toolkit]   - {err}", file=sys.stderr)
+
     # Build BEFORE printing: the banner reports the tool count recorded during
     # registration, so the figure can never drift from what is actually served.
-    server = build_server(rules_reloader, memory_reloader, usage)
+    server = build_server(rules_reloader, memory_reloader, usage, work_reloader)
     _print_banner(
-        engine, memory_engine, getattr(server, "context_toolkit_inventory", None)
+        engine, memory_engine,
+        getattr(server, "context_toolkit_inventory", None), work_engine,
     )
     server.run()
 

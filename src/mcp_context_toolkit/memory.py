@@ -13,50 +13,44 @@ precedence — load the project tier first so it wins on name collision
 
 from __future__ import annotations
 
-import bisect
 import datetime as _dt
-import math
 import re
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel
 
-from mcp_context_toolkit.core import KnowledgeLoadError, iter_files, parse_frontmatter
+from mcp_context_toolkit.core import (
+    KnowledgeLoadError,
+    bm25_scores,
+    build_bm25_index,
+    iter_files,
+    parse_frontmatter,
+    prefix_slice,
+)
 
 MemoryType = Literal["user", "feedback", "project", "reference", "misc"]
 MemoryTier = Literal["core", "user", "project", "unknown"]
 
 _LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
-_WORD_RE = re.compile(r"[a-z0-9_]+")
 _INDEX_REF_RE = re.compile(r"\(([A-Za-z0-9_./-]+\.md)\)")
 
 # Files that live in a memory dir but are not memory records themselves.
 _NON_MEMORY = {"MEMORY.md"}
 
 # Recall field weights — name hit counts most, body least. Used as BM25F field
-# multipliers on the term frequency (a hit in the name counts triple).
-_W_NAME, _W_DESC, _W_TAGS, _W_BODY = 3, 2, 2, 1
+# multipliers on the term frequency (a hit in the name counts triple). Floats,
+# not ints: build_bm25_index's fields_by_key is typed as list[tuple[str,
+# float]] (shared across content types, some of which may want fractional
+# weights), and a dict value type is invariant in Pyright — ints wouldn't
+# widen at the call site even though the runtime arithmetic doesn't care.
+_W_NAME, _W_DESC, _W_TAGS, _W_BODY = 3.0, 2.0, 2.0, 1.0
 
-# BM25 parameters (Robertson/Sparck-Jones defaults).
-#   k1 — term-frequency saturation: the 10th occurrence of a word adds far less
-#        than the 2nd, so a long note that merely repeats a term cannot outrank
-#        a short one that is actually about it.
-#   b  — length normalisation strength (1.0 = full, 0 = off). Needed because a
-#        grown store is wildly uneven: here the largest note is ~7x the median,
-#        and without normalisation such collector notes match almost any query
-#        by sheer surface area.
-_BM25_K1 = 1.5
-_BM25_B = 0.75
-# Shortest query term still resolved by PREFIX (forward-stemming "deploy" ->
-# "deployment"). Below it a term must match a vocabulary entry exactly.
-# Prefix matching is blind to word boundaries, and on short terms that is
-# mostly noise: "wie" reaches "wieder"/"wiederherstellen" (38 entries in a real
-# German store), "der" reaches "deren"/"derivable". The useful short matches —
-# "pii" -> pii_anonymization, "set" -> set_budget — are snake_case parts, and
-# those are indexed as their own tokens anyway, so an exact match still finds
-# them. Long terms keep prefix behaviour, where stemming actually pays.
-_PREFIX_MIN_LEN = 4
+# BM25 parameters, prefix-matching cutoff and the snake_case tokenizer live in
+# core.py now — they are content-type-agnostic and work.py needs the exact
+# same ranking (see core.py's module docstring for why this was extracted
+# rather than left duplicated across two files).
+
 # Relative relevance floor for recall(): a candidate must score at least this
 # fraction of the top hit's score to be returned. Drops the long tail of weak
 # single-incidental-word matches that would otherwise surface once the strong
@@ -68,29 +62,6 @@ _PREFIX_MIN_LEN = 4
 # match is weak (top itself is low) the relative floor keeps them all: the bar
 # is "comparatively a near-miss", not an absolute quality gate.
 _RECALL_FLOOR_RATIO = 0.25
-
-
-def _split_token(token: str) -> list[str]:
-    """Split a token into its snake_case parts (or return it unchanged).
-
-    Indexing and querying both go through this, which is what keeps the two
-    sides symmetric. Indexing the FULL token alongside its parts would look
-    harmless but double-counts: a prefix query for "deploy" matches both the
-    part ``deploy`` and the whole ``deploy_workflow``, and pooling their
-    postings credits one occurrence twice — and only for tokens whose LEADING
-    part matches, so "deploy_workflow" would outscore "release_deploy" on a
-    query neither of them mentions more often. Parts only, on both sides.
-
-    The trade-off, deliberately accepted: identifier-exact lookup gets weaker.
-    A query for ``deploy_workflow`` now becomes {deploy, workflow} and also
-    reaches notes that only mention ``workflow``. The compound is no longer an
-    anchor of its own — bag-of-words behaviour, in exchange for a term
-    frequency that means what it says.
-    """
-    if "_" not in token:
-        return [token]
-    parts = [p for p in token.split("_") if p]
-    return parts or [token]
 
 
 def _norm_link(target: str) -> str:
@@ -366,50 +337,18 @@ class MemoryEngine:
         do not surface behind the strong matches (relevant for the per-prompt
         hook's exclude-backfill across a same-topic thread).
         """
-        # Query terms go through the same snake_case split as the index, so a
-        # query for "deploy_workflow" resolves against the parts that were
-        # actually indexed rather than against a compound that is not there.
-        terms = {
-            part
-            for raw in _WORD_RE.findall(query.lower())
-            for part in _split_token(raw)
-        }
-        if not terms:
-            return []
         boost = boost or {}
         backlink_boost = backlink_boost or {}
 
-        index = self._bm25_index()
-        postings, vocab = index["postings"], index["tokens"]
-        lengths, avg_len = index["lengths"], index["avg_len"]
-        total_docs = len(lengths)
-
-        # BM25F: sum over query terms of IDF(term) * saturated, length-normalised
-        # term frequency. Each term is resolved to every vocabulary entry it
-        # prefixes, and their weighted frequencies are pooled — so "deploy"
-        # scores "deployment" and "deploy_workflow" as the same concept.
-        bases: dict[str, float] = {}
-        for term in terms:
-            matches = self._prefix_slice(vocab, term)
-            if not matches:
-                continue
-            # Document frequency of the CONCEPT, not of one spelling: a doc that
-            # holds several matching tokens must still be counted once.
-            hits: dict[str, float] = {}
-            for token in matches:
-                for name, tf in postings[token].items():
-                    hits[name] = hits.get(name, 0.0) + tf
-            # Robertson/Sparck-Jones IDF. A term carried by nearly every memory
-            # ("der", "wie") lands near zero, so filler words in a natural-language
-            # question stop competing with the words that carry the topic.
-            idf = math.log(
-                1 + (total_docs - len(hits) + 0.5) / (len(hits) + 0.5)
-            )
-            for name, tf in hits.items():
-                norm = 1 - _BM25_B + _BM25_B * (lengths[name] / avg_len)
-                bases[name] = bases.get(name, 0.0) + idf * (
-                    tf * (_BM25_K1 + 1) / (tf + _BM25_K1 * norm)
-                )
+        # Ranking itself (IDF, saturation, length normalisation, snake_case
+        # query/index symmetry) lives in core.bm25_scores — shared with
+        # work.py so the same reviewed algorithm cannot drift into two
+        # independently-buggy copies. What stays here is memory-specific:
+        # which fields feed the index, and how frecency/backlink boosts and
+        # the relevance floor layer on top of the base score.
+        bases = bm25_scores(self._bm25_index(), query)
+        if not bases:
+            return []
 
         by_name = {m.name: m for m in self._memories}
         scored: list[tuple[float, float, Memory]] = []
@@ -448,55 +387,27 @@ class MemoryEngine:
         BM25 — the field emphasis the ranker had before is preserved, it just
         moves into the term frequency instead of being the whole score.
 
-        The vocabulary is kept sorted so a query term can be resolved to all
-        tokens it PREFIXES via binary search. Prefix semantics are deliberate
-        and predate BM25 here: "deploy" must reach "deployment" and the
-        snake_case part of "deploy_workflow", while "set" must NOT reach
-        "asset". Exact-token BM25 would silently drop the first half of that.
+        Index construction itself is core.build_bm25_index — this method's job
+        is only to say WHICH fields feed it and at what weight.
         """
         if self._bm25_cache is None:
-            postings: dict[str, dict[str, float]] = {}
-            lengths: dict[str, float] = {}
-            for m in self._memories:
-                fields = (
+            fields_by_key: dict[str, list[tuple[str, float]]] = {
+                m.name: [
                     (m.name, _W_NAME),
                     (m.description, _W_DESC),
                     (" ".join(m.tags), _W_TAGS),
                     (m.body, _W_BODY),
-                )
-                total = 0.0
-                for text, weight in fields:
-                    for token in _WORD_RE.findall(text.lower()):
-                        for part in _split_token(token):
-                            postings.setdefault(part, {})
-                            postings[part][m.name] = (
-                                postings[part].get(m.name, 0.0) + weight
-                            )
-                            total += weight
-                lengths[m.name] = total
-            n = len(lengths)
-            self._bm25_cache = {
-                "postings": postings,
-                "tokens": sorted(postings),
-                "lengths": lengths,
-                "avg_len": (sum(lengths.values()) / n) if n else 0.0,
+                ]
+                for m in self._memories
             }
+            self._bm25_cache = build_bm25_index(fields_by_key)
         return self._bm25_cache
 
     @staticmethod
     def _prefix_slice(tokens: list[str], term: str) -> list[str]:
-        """Vocabulary entries matching ``term``, via binary search.
-
-        Terms shorter than ``_PREFIX_MIN_LEN`` match exactly; longer ones match
-        by prefix (forward-stemming). See _PREFIX_MIN_LEN for why.
-        """
-        lo = bisect.bisect_left(tokens, term)
-        if len(term) < _PREFIX_MIN_LEN:
-            return [term] if lo < len(tokens) and tokens[lo] == term else []
-        # Bound the slice by binary search too, so the work is proportional to
-        # the number of MATCHES, not to the vocabulary tail behind them.
-        hi = bisect.bisect_right(tokens, term + "￿")
-        return tokens[lo:hi]
+        """Kept as a thin wrapper around core.prefix_slice — a test pins this
+        exact call shape, and it is harmless surface to keep stable."""
+        return prefix_slice(tokens, term)
 
     def _owning_root(self, memory: Memory) -> Path | None:
         """The root a memory belongs to for index purposes: the DEEPEST loaded

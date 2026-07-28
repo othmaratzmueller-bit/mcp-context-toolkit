@@ -4,6 +4,27 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc7] — 2026-07-28
+
+### Added
+- **Work-item content store.** A third content store alongside rules and memory:
+  `WorkItem`/`WorkKind` (`goal`/`step`/`note`)/`WorkStatus`
+  (`open`/`active`/`done`/`dropped`/`superseded`)/`WorkTheme`/`WorkEvidence` models
+  (`models.py`) and a new `WorkEngine` (`work.py`, read-only: `get`/`list`/`children`/
+  `rollup`/`lint`/`recall`). `rollup()` computes a goal's x/y child-status summary live
+  from the records themselves (never stored, so it cannot drift) and reports `active`
+  as its own count rather than folding it into `open`. `lint()` mirrors `memory.py`'s
+  shape (`dangling_refs`, `closeable_goals`, `missing_evidence`, `unclosed_pairs`,
+  `load_errors`) so both stores are consumed the same way. Six new MCP tools:
+  `work_recall`, `get_work`, `list_work`, `work_children`, `work_lint`, `work_status`.
+- **BM25F ranking extracted to `core.py`.** `build_bm25_index`/`bm25_scores`/
+  `prefix_slice`/`split_token` moved out of `memory.py` (pure relocation, no behaviour
+  change) so `WorkEngine.recall()` reuses the exact same, already-reviewed algorithm
+  instead of duplicating it. `memory.py`'s field-weight constants changed from `int` to
+  `float` to match the now-shared `fields_by_key: dict[str, list[tuple[str, float]]]`
+  signature (a dict value type is invariant in Pyright, so ints would not have widened
+  at the call site).
+
 ## [1.0.0-rc6] — 2026-07-21
 
 ### Added
