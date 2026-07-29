@@ -131,7 +131,7 @@ WorkStatus = Literal["open", "active", "done", "dropped", "superseded"]
 # value pass through un-flagged.
 WorkTheme = Literal[
     "engine", "prometheus", "chat", "kb-ingest", "coder", "themis",
-    "infra", "workflow", "abas", "mail", "daidalos", "misc",
+    "infra", "workflow", "abas", "mail", "daidalos", "security", "misc",
 ]
 
 
