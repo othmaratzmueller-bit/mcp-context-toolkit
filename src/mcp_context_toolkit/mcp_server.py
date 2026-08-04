@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import importlib.util
 import json
 import math
 import os
@@ -8,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from mcp_context_toolkit import capability
 from mcp_context_toolkit.core import (
     discover_shared_rules_dir,
     store_conventions,
@@ -52,6 +54,37 @@ def _discover_memory_dir() -> Path | None:
             mem = candidate / conv / "memory"
             if mem.is_dir():
                 return mem
+    return None
+
+
+def _discover_wissen() -> "capability.CapabilityQuelle | None":
+    """Wire the capability index: project root, index file, builder, tokenizer.
+
+    Returns None — and the tool is simply not registered — when any piece is
+    missing. Deliberately fail-closed on the TOKENIZER in particular: index and
+    query must split words identically, and a fallback tokenizer would answer
+    plausibly while silently missing every term the index actually holds. A
+    missing tool is diagnosable; a subtly wrong one is not.
+    """
+    env = os.environ.get("CONTEXT_INDEX_FILE")
+    for candidate in [Path.cwd(), *Path.cwd().parents]:
+        for conv in store_conventions():
+            if not (candidate / conv).is_dir():
+                continue
+            index = Path(env) if env else candidate / conv / ".index" / "wissen.json"
+            bauer = candidate / "scripts" / "wissens_index.py"
+            if not bauer.is_file():
+                continue
+            spec = importlib.util.spec_from_file_location("wissens_index", bauer)
+            if spec is None or spec.loader is None:
+                continue
+            try:
+                modul = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(modul)
+                zerlege = modul.zerlege
+            except Exception:
+                return None
+            return capability.CapabilityQuelle(candidate, index, zerlege, bauer)
     return None
 
 
@@ -176,6 +209,7 @@ def build_server(
     memory_reloader: _Reloader | None = None,
     usage: UsageStore | None = None,
     work_reloader: _Reloader | None = None,
+    wissen: capability.CapabilityQuelle | None = None,
 ):
     from mcp.server.fastmcp import FastMCP
 
@@ -185,7 +219,8 @@ def build_server(
     # state a measured count instead of a hand-maintained literal. A number that
     # has to be edited by hand drifts silently the moment a tool is added; this
     # toolkit's own line is that a system must measure its state, not claim it.
-    inventory: dict[str, list[str]] = {"rules": [], "memory": [], "work": []}
+    inventory: dict[str, list[str]] = {"rules": [], "memory": [], "work": [],
+                                   "capability": []}
 
     def _tool(group: str):
         """Register an MCP tool and record its name under `group`."""
@@ -619,6 +654,60 @@ def build_server(
                 "recommendation": recommendation,
             }, indent=2, ensure_ascii=False)
 
+    # ---- capability search (registered only when an index source was wired) ----
+    if wissen is not None:
+
+        @_tool("capability")
+        def find_capability(frage: str, limit: int = 5,
+                            art: str | None = None) -> str:
+            """Search what this codebase ALREADY does, before writing anything new.
+
+            Call this in the PLAN moment — before the first line of a new
+            function, class or module. It answers one question: does this
+            capability already exist here?
+
+            **Use the technical terms — the query language does not matter.**
+            The index holds identifiers and docstrings. What decides a hit is
+            whether the query carries the domain vocabulary (`WORM`, `audit`,
+            `PII`, `upload`, `chunk`, `embed`), not whether the sentence around
+            them is German or English. Measured 2026-08-04, same target
+            `audit_manager.log_action`:
+
+                "jede aendernde Operation revisionssicher protokollieren"   miss
+                "WORM-Audit-Log fuer eine aendernde Operation schreiben"    rank 3
+                "log action to WORM audit trail"                           rank 1
+
+            German prose with English technical terms is how this project
+            actually speaks, and it works. What fails is paraphrasing the
+            vocabulary away. If a query comes back weak, do not translate it —
+            put the domain words back in.
+
+            Args:
+                frage: what the new code is supposed to DO, in code vocabulary.
+                limit: how many candidates to return (default 5; three to five
+                    are a decision, thirty are a wall of text).
+                art: restrict to one kind — "funktion", "baustein" or "plan".
+                    A "plan" hit means another plan already intends to build
+                    this; talk to it instead of building beside it.
+
+            Returns a ranked list. Each candidate names WHY it surfaced (a term
+            match, or proximity to one along the call/import graph) and carries
+            one sentence of description with its source, so the decision needs
+            no file to be opened. The result is a SUGGESTION — whether a
+            candidate fits is a judgement about meaning, and that judgement is
+            yours.
+            """
+            index = wissen.current()
+            if index is None:
+                return json.dumps({
+                    "fehler": "kein Wissens-Index vorhanden",
+                    "hinweis": ("erzeugen mit: python3 scripts/wissens_index.py "
+                                "(er entsteht sonst automatisch nach jedem Commit)"),
+                })
+            ergebnis = index.suche(frage, limit=limit, art=art)
+            return capability.formatiere(
+                ergebnis, capability.drift(index.stand, wissen.projekt))
+
     return mcp
 
 
@@ -842,7 +931,9 @@ def main() -> None:
 
     # Build BEFORE printing: the banner reports the tool count recorded during
     # registration, so the figure can never drift from what is actually served.
-    server = build_server(rules_reloader, memory_reloader, usage, work_reloader)
+    wissen = _discover_wissen()
+    server = build_server(rules_reloader, memory_reloader, usage,
+                          work_reloader, wissen)
     _print_banner(
         engine, memory_engine,
         getattr(server, "context_toolkit_inventory", None), work_engine,
