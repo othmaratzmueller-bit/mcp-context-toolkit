@@ -538,8 +538,13 @@ def build_server(
     if work_reloader is not None:
 
         def _work_summary(w: Any) -> dict:
+            # `kanten` als bool, nicht als Inhalt: der plan-keeper muss vor jedem
+            # Scharfschalten wissen OB eine Reuse-Suche aufgezeichnet ist. Ohne
+            # dieses Feld musste er jeden Record einzeln per get_work holen —
+            # eine Pruefung, die teuer ist, wird uebersprungen.
             return {"key": w.key, "title": w.title, "kind": w.kind,
-                    "status": w.status, "theme": w.theme, "part_of": w.part_of}
+                    "status": w.status, "theme": w.theme, "part_of": w.part_of,
+                    "kanten": w.kanten is not None}
 
         @_tool("work")
         def work_recall(query: str, limit: int = 8) -> str:
@@ -635,11 +640,21 @@ def build_server(
             no_evidence = len(lint["missing_evidence"])
             half_closed = len(lint["unclosed_pairs"])
             dropped = len(lint["load_errors"])
-            total_issues = closeable + dangling + no_evidence + half_closed + dropped
+            # Die zwei juengeren Pruefungen MUSSEN mitzaehlen. Sonst stand
+            # `reuse_ungeprueft: 130` neben der Empfehlung "kleine Reste" —
+            # genau die Zahl, fuer die der Store umgebaut wurde, fehlte in
+            # seinem eigenen Statusbericht (Reviewer-Fund 2026-08-04).
+            plan_tot = len(lint.get("plan_path_broken", {}))
+            ungeprueft = len(lint.get("reuse_ungeprueft", []))
+            total_issues = (closeable + dangling + no_evidence + half_closed
+                            + dropped + plan_tot + ungeprueft)
             if dropped:
                 recommendation = "🚨 Records wurden beim Laden verworfen — Zahlen oben ggf. unvollstaendig"
-            elif closeable or dangling:
+            elif closeable or dangling or plan_tot:
                 recommendation = "🧹 Aufraeumen faellig"
+            elif ungeprueft:
+                recommendation = (f"🔎 {ungeprueft} Records arbeiten ohne aufgezeichnete "
+                                  f"Reuse-Suche (`kanten:` fehlt)")
             elif total_issues:
                 recommendation = "💡 kleine Reste"
             else:
@@ -650,6 +665,8 @@ def build_server(
                 "dangling_refs": dangling,
                 "missing_evidence": no_evidence,
                 "unclosed_pairs": half_closed,
+                "plan_path_broken": plan_tot,
+                "reuse_ungeprueft": ungeprueft,
                 "load_errors": dropped,
                 "recommendation": recommendation,
             }, indent=2, ensure_ascii=False)

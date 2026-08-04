@@ -142,6 +142,41 @@ class WorkEvidence(BaseModel):
     files: list[str] = []
 
 
+class WorkEdges(BaseModel):
+    """What ALREADY EXISTS that this item uses, extends or will build.
+
+    Deliberately NOT the same thing as `WorkEvidence`, and the difference is
+    the whole point:
+
+        evidence  BACKWARD — what this work touched, filled when closing
+        kanten    FORWARD  — what was found BEFORE building, filled when planning
+
+    Without the forward half, the reuse question lands at the end again, where
+    it can only produce regret. Anchors are ``pfad/zur/datei.py::Symbol`` —
+    never line numbers, those are wrong two edits later.
+
+    `gesucht` is the load-bearing field, not the edge lists. It records WHAT was
+    searched for, and it is what separates the two states that look identical
+    from the outside:
+
+        no `kanten` block at all        -> never searched
+        `gesucht` set, all lists empty  -> searched, found nothing (honest)
+
+    Without that distinction a mandatory `kanten` field would simply be filled
+    with invented edges — the field is cheap to fake, the search is not.
+    """
+    gesucht: list[str] = []      # the queries/terms actually searched for
+    nutzt: list[str] = []        # exists, will be called
+    erweitert: list[str] = []    # exists, will be changed
+    baut: list[str] = []         # does not exist yet, this item creates it
+    modul: list[str] = []        # module/directory names, placeholders allowed
+
+    def gesucht_worden(self) -> bool:
+        """Was a search recorded at all? An empty `kanten:` block is not one."""
+        return bool(self.gesucht or self.nutzt or self.erweitert
+                    or self.baut or self.modul)
+
+
 class WorkItem(BaseModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     title: str
@@ -160,6 +195,8 @@ class WorkItem(BaseModel):
     blocked_by: list[str] = []
 
     evidence: WorkEvidence = WorkEvidence()
+    # Reuse-Suche VOR dem Bauen. None = nie gesucht (siehe WorkEdges).
+    kanten: WorkEdges | None = None
     plan_path: str | None = None    # the pre-existing plan file this was cut from, if any
 
     body: str = ""

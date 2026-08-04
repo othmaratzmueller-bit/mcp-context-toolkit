@@ -42,7 +42,9 @@ from mcp_context_toolkit.core import (
     iter_files,
     parse_frontmatter,
 )
-from mcp_context_toolkit.models import WorkEvidence, WorkItem, WorkStatus
+from mcp_context_toolkit.models import (
+    WorkEdges, WorkEvidence, WorkItem, WorkStatus,
+)
 
 # Statuses that count as "resolved" for an x/y summary — done AND dropped both
 # leave the open count, but are reported separately (see WorkEngine.rollup):
@@ -76,6 +78,31 @@ def _meta_get(meta: dict, key: str):
     return None
 
 
+def _als_liste(wert, feld: str, path: Path) -> list:
+    """YAML-Wert -> Liste, aber ein String ist ein FEHLER, keine Zeichenliste.
+
+    `list("anonymize PII")` ergibt 13 Einzelbuchstaben. Bei `evidence`/`blocked_by`
+    ist das haesslich; bei `kanten.gesucht` ist es fail-OPEN: der vergessene
+    Bindestrich (`gesucht: anonymize PII` statt `gesucht:\n  - anonymize PII`)
+    fuellt das Feld mit 13 Tokens, das Reuse-Gate gilt als erfuellt, und weder
+    Loader noch Lint sagen etwas. Genau der Zustand, den der Entwurf ausschliesst:
+    Feld gefuellt, Suche nie passiert. (Reviewer-Fund 2026-08-04.)
+
+    Deshalb hier LAUT statt tolerant — ein Tippfehler soll den Record in
+    `load_errors` schieben, nicht stillschweigend ein Gate oeffnen.
+    """
+    if wert is None:
+        return []
+    if isinstance(wert, str):
+        raise KnowledgeLoadError(
+            path, f"`{feld}` ist ein String ({wert!r}) statt einer Liste — "
+                  f"fehlt ein `- ` vor dem Wert?")
+    if not isinstance(wert, (list, tuple)):
+        raise KnowledgeLoadError(
+            path, f"`{feld}` ist {type(wert).__name__} statt einer Liste")
+    return list(wert)
+
+
 def _parse_work_item(path: Path) -> WorkItem:
     try:
         text = path.read_text(encoding="utf-8")
@@ -86,6 +113,22 @@ def _parse_work_item(path: Path) -> WorkItem:
     evidence_raw = _meta_get(meta, "evidence") or {}
     if not isinstance(evidence_raw, dict):
         evidence_raw = {}
+
+    # `kanten` bleibt None, wenn der Block fehlt ODER leer ist — beides heisst
+    # "nie gesucht". Ein leerer Block darf NICHT als gesuchte-und-nichts-
+    # gefunden durchgehen, sonst genuegt ein `kanten: {}` um das Gate zu
+    # umgehen, und der Unterschied, um den es geht, waere wieder weg.
+    kanten_raw = _meta_get(meta, "kanten")
+    kanten = None
+    if isinstance(kanten_raw, dict):
+        kandidat = WorkEdges(
+            gesucht=_als_liste(kanten_raw.get("gesucht"), "kanten.gesucht", path),
+            nutzt=_als_liste(kanten_raw.get("nutzt"), "kanten.nutzt", path),
+            erweitert=_als_liste(kanten_raw.get("erweitert"), "kanten.erweitert", path),
+            baut=_als_liste(kanten_raw.get("baut"), "kanten.baut", path),
+            modul=_als_liste(kanten_raw.get("modul"), "kanten.modul", path),
+        )
+        kanten = kandidat if kandidat.gesucht_worden() else None
 
     try:
         return WorkItem(
@@ -99,11 +142,18 @@ def _parse_work_item(path: Path) -> WorkItem:
             part_of=_meta_get(meta, "part_of"),
             amends=_meta_get(meta, "amends"),
             supersedes=_meta_get(meta, "supersedes"),
-            blocked_by=list(_meta_get(meta, "blocked_by") or []),
+            # Auch hier `_als_liste`: `evidence: commits: abc123` (ohne `- `)
+            # wuerde sonst zu sechs Buchstaben und `missing_evidence`
+            # faelschlich befriedigen — dieselbe Klasse wie bei `kanten`, nur
+            # mit leiserer Folge. Der Helfer war ohnehin da (Reviewer-Rest,
+            # Runde 2).
+            blocked_by=_als_liste(_meta_get(meta, "blocked_by"), "blocked_by", path),
             evidence=WorkEvidence(
-                commits=list(evidence_raw.get("commits") or []),
-                files=list(evidence_raw.get("files") or []),
+                commits=_als_liste(evidence_raw.get("commits"),
+                                   "evidence.commits", path),
+                files=_als_liste(evidence_raw.get("files"), "evidence.files", path),
             ),
+            kanten=kanten,
             plan_path=_meta_get(meta, "plan_path"),
             body=body,
             source_path=str(path),
@@ -326,6 +376,18 @@ class WorkEngine:
           evidence — a closed item that asserts rather than shows.
         - unclosed_pairs: keys where `closed` is set but status is not a
           closed one, or vice versa — a half-closed record.
+        - plan_path_broken: {key: plan_path} where the referenced plan file
+          does not exist. This is the ONLY link between the two stores, and
+          nothing checked it — measured 2026-08-04: 8 records pointed at
+          `plans/todo/...` files that the plan-keeper had moved to
+          `plans/begonnen/`, while this very lint reported `dangling_refs: 0`.
+          `dangling_refs` above deliberately only covers WORK KEYS; a filesystem
+          path is a different kind of reference and simply had no checker.
+        - reuse_ungeprueft: keys with status=active that carry no `kanten`
+          block — work that is being done RIGHT NOW without a recorded
+          reuse search. Only `active`, not `open`: an open item has not
+          reached the moment where the question changes anything, and listing
+          all 878 open items would drown the ones that matter.
         - load_errors: files skipped at the last load (invalid schema,
           duplicate key) — surfaced here, not just at startup, because a
           dropped record silently corrupts closeable_goals/rollup above: a
@@ -361,11 +423,34 @@ class WorkEngine:
             if (i.closed is not None) != (i.status in _CLOSED_STATUSES)
         ]
 
+        # Gegen den Dateibaum, nicht gegen die Key-Tabelle: `plan_path` ist ein
+        # Pfad. Relativ zur Wurzel des Work-Stores hoch (…/.claude/work -> …/),
+        # weil die Pfade so im Frontmatter stehen (`.claude/plans/...`).
+        plan_path_broken: dict[str, str] = {}
+        if self._root is not None:
+            # `.resolve()`: `load_directory` macht nur `expanduser()`. Gemessen
+            # 2026-08-04 mit vier Aufrufformen — bei einem RELATIVEN Store-Pfad
+            # aus einem Unterverzeichnis (`../work` aus `.claude/engine`) meldete
+            # diese Pruefung 1563 Falschtreffer statt 0, lautlos. Heute
+            # unerreichbar (`_discover_work_dir` baut absolut), ueber
+            # `CONTEXT_WORK_DIR` aber jederzeit erreichbar.
+            projekt = Path(self._root).resolve().parent.parent
+            for i in self._items:
+                if i.plan_path and not (projekt / i.plan_path).is_file():
+                    plan_path_broken[i.key] = i.plan_path
+
+        reuse_ungeprueft = [
+            i.key for i in self._items
+            if i.status == "active" and i.kanten is None
+        ]
+
         return {
             "total": len(self._items),
             "dangling_refs": dangling,
             "closeable_goals": sorted(closeable),
             "missing_evidence": sorted(missing_evidence),
             "unclosed_pairs": sorted(unclosed_pairs),
+            "plan_path_broken": plan_path_broken,
+            "reuse_ungeprueft": sorted(reuse_ungeprueft),
             "load_errors": list(self._errors),
         }

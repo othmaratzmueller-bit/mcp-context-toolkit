@@ -195,6 +195,133 @@ class TestLint:
         assert set(e.lint()["unclosed_pairs"]) == {"a", "b"}
 
 
+class TestKantenUndPlanPath:
+    """Die zwei Pruefungen, die 2026-08-04 dazukamen — beide aus einem echten Fund.
+
+    `plan_path` ist die EINZIGE Verbindung zwischen Plan-Dateien und Work-Store,
+    und nichts prueft sie: gemessen zeigten 8 Records auf `plans/todo/...`-Dateien,
+    die der plan-keeper nach `plans/begonnen/` verschoben hatte — waehrend
+    derselbe Lint-Lauf `dangling_refs: 0` meldete. `dangling_refs` deckt bewusst
+    nur WORK-KEYS ab; ein Dateipfad hatte schlicht keinen Pruefer.
+
+    `kanten` trennt "gesucht und nichts gefunden" von "nie gesucht". Ohne diese
+    Trennung waere ein Pflichtfeld wertlos — man fuellte es mit erfundenen
+    Kanten, weil das Feld billig zu faelschen ist und die Suche nicht.
+    """
+
+    def test_plan_path_auf_existierende_datei_ist_ok(self, tmp_path: Path):
+        plan = tmp_path / ".claude" / "plans" / "x.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Plan\n", encoding="utf-8")
+        work = tmp_path / ".claude" / "work"
+        _write(work, "a.md",
+               "key: a\ntitle: A\nkind: goal\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nplan_path: .claude/plans/x.md")
+        assert WorkEngine.from_directory(work).lint()["plan_path_broken"] == {}
+
+    def test_plan_path_ins_leere_wird_gemeldet(self, tmp_path: Path):
+        work = tmp_path / ".claude" / "work"
+        _write(work, "a.md",
+               "key: a\ntitle: A\nkind: goal\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nplan_path: .claude/plans/weg.md")
+        kaputt = WorkEngine.from_directory(work).lint()["plan_path_broken"]
+        assert kaputt == {"a": ".claude/plans/weg.md"}
+
+    def test_ohne_plan_path_kein_falscher_alarm(self, tmp_path: Path):
+        work = tmp_path / ".claude" / "work"
+        _write(work, "a.md",
+               "key: a\ntitle: A\nkind: goal\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        assert WorkEngine.from_directory(work).lint()["plan_path_broken"] == {}
+
+    def test_kanten_werden_gelesen(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - 'anonymize PII'\n"
+               "  nutzt:\n    - services/privacy_filter.py::anonymize")
+        item = WorkEngine.from_directory(tmp_path).get("a")
+        assert item is not None and item.kanten is not None
+        assert item.kanten.nutzt == ["services/privacy_filter.py::anonymize"]
+        assert item.kanten.gesucht == ["anonymize PII"]
+
+    def test_gesucht_ohne_treffer_zaehlt_als_geprueft(self, tmp_path: Path):
+        """Der Kern: leere Listen sind ein ERGEBNIS, kein fehlender Eintrag."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - 'nichts dergleichen'")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.get("a").kanten is not None
+        assert e.lint()["reuse_ungeprueft"] == []
+
+    def test_leerer_kanten_block_gilt_NICHT_als_geprueft(self, tmp_path: Path):
+        """Sonst genuegte `kanten: {}` um das Gate zu umgehen."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht: []\n  nutzt: []")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.get("a").kanten is None
+        assert e.lint()["reuse_ungeprueft"] == ["a"]
+
+    def test_string_statt_liste_ist_ein_FEHLER_kein_gate_oeffner(self, tmp_path: Path):
+        """Der teuerste Tippfehler: `gesucht: text` statt `gesucht:\n  - text`.
+
+        `list("anonymize PII")` ergibt 13 Einzelbuchstaben — das Gate waere
+        erfuellt, ohne dass je gesucht wurde. Fail-OPEN auf genau dem Feld, das
+        nicht billig faelschbar sein soll (Reviewer-Fund 2026-08-04).
+        """
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht: anonymize PII")
+        engine = WorkEngine()
+        engine.load_directory(tmp_path, strict=False)
+        # Der Record faellt raus UND der Grund steht in load_errors — nicht still.
+        assert engine.get("a") is None
+        assert any("kanten.gesucht" in e for e in engine.errors), engine.errors
+
+    def test_string_in_anderen_kanten_feldern_ebenso(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  nutzt: services/x.py::y")
+        engine = WorkEngine()
+        engine.load_directory(tmp_path, strict=False)
+        assert engine.get("a") is None
+        assert any("kanten.nutzt" in e for e in engine.errors), engine.errors
+
+    def test_korrekte_liste_bleibt_unberuehrt(self, tmp_path: Path):
+        """Gegenprobe: der Guard darf den Normalfall nicht mitreissen."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - anonymize PII")
+        item = WorkEngine.from_directory(tmp_path).get("a")
+        assert item is not None and item.kanten is not None
+        assert item.kanten.gesucht == ["anonymize PII"]
+
+    def test_plan_path_auch_bei_relativem_store_pfad(self, tmp_path: Path,
+                                                     monkeypatch):
+        """`parent.parent` ohne `resolve()` meldete bei relativem Aufrufpfad
+        JEDEN plan_path als kaputt (gemessen: 1563 Falschtreffer)."""
+        plan = tmp_path / ".claude" / "plans" / "x.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Plan\n", encoding="utf-8")
+        work = tmp_path / ".claude" / "work"
+        _write(work, "a.md",
+               "key: a\ntitle: A\nkind: goal\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nplan_path: .claude/plans/x.md")
+        monkeypatch.chdir(tmp_path / ".claude")
+        assert WorkEngine.from_directory("work").lint()["plan_path_broken"] == {}
+
+    def test_nur_active_wird_gemeldet_nicht_open(self, tmp_path: Path):
+        """`open` hat den Moment noch nicht erreicht, an dem die Frage etwas
+        aendert — alle 878 offenen zu listen ersaeufte die, auf die es ankommt."""
+        _write(tmp_path, "offen.md",
+               "key: offen\ntitle: O\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        _write(tmp_path, "aktiv.md",
+               "key: aktiv\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01")
+        assert WorkEngine.from_directory(tmp_path).lint()["reuse_ungeprueft"] == ["aktiv"]
+
+
 class TestSupersedesChain:
     def test_superseded_idea_stays_readable_alongside_its_replacement(self, tmp_path: Path):
         # The owner's core ask: a dropped idea is never overwritten — its
