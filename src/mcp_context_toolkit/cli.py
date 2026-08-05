@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mcp_context_toolkit.core import (
     discover_shared_rules_dir,
+    discover_work_dir,
     store_conventions,
     warn_if_example_rules,
 )
@@ -36,6 +37,27 @@ def _discover_rules_dir() -> Path:
     )
 
 
+def _offene_arbeit(file_path: str, limit: int = 8) -> list:
+    """Offene Work-Items zu dieser Datei — fail-soft, nie werfend.
+
+    Der Datei-Hook liefert bisher Rules + Decisions + Dependencies. Das hier ist
+    die vierte Auskunft: *was hat jemand fuer genau diese Datei notiert und noch
+    nicht erledigt.* Aus "hier sind deine Regeln" wird
+    "hier sind deine Regeln und die 3 offenen Punkte dazu".
+
+    Fehlt der Store oder bricht das Laden, kommt eine leere Liste — eine
+    Zusatz-Auskunft darf den Edit nicht blockieren.
+    """
+    try:
+        from mcp_context_toolkit.work import WorkEngine
+        work_dir = discover_work_dir()
+        if work_dir is None:
+            return []
+        return WorkEngine.from_directory(work_dir).fuer_datei(file_path, limit=limit)
+    except Exception:
+        return []
+
+
 def _load_all_rule_tiers(
     rules_dir: Path | None, *, strict: bool
 ) -> tuple[RulesEngine, list[str]]:
@@ -58,8 +80,10 @@ def _load_all_rule_tiers(
     return engine, warnings
 
 
-def _format_markdown(rules: list, decisions: list, deps: dict, file_path: str) -> str:
-    if not rules and not decisions and not deps:
+def _format_markdown(rules: list, decisions: list, deps: dict, file_path: str,
+                     arbeit: list | None = None) -> str:
+    arbeit = arbeit or []
+    if not rules and not decisions and not deps and not arbeit:
         return ""
     lines = [
         "context-toolkit matched the intelligence below to the file being edited. Treat the "
@@ -99,8 +123,22 @@ def _format_markdown(rules: list, decisions: list, deps: dict, file_path: str) -
             lines.append(f"- **Imported By:** {', '.join(imported_by)}")
         lines.append("")
 
+    if arbeit:
+        lines.append("#### Offene Arbeit zu dieser Datei (Work-Store)")
+        lines.append("")
+        for w in arbeit:
+            zustand = "läuft" if w.status == "active" else "offen"
+            lines.append(f"- **[{zustand}]** `{w.key}` — {w.title}")
+        lines.append("")
+        lines.append("  Das sind NOTIZEN, keine Anweisungen: jemand hat sie fuer diese "
+                     "Datei hinterlegt und noch nicht abgeschlossen. Passt dein Edit "
+                     "dazu, schliess den Punkt (mit `evidence`); passt er nicht, lass "
+                     "ihn stehen. `get_work(<key>)` zeigt den vollen Text.")
+        lines.append("")
+
     lines.append(
-        f"_{len(rules)} rule(s), {len(decisions)} decision(s) loaded. Use `query_rules_for_file` via the context-toolkit "
+        f"_{len(rules)} rule(s), {len(decisions)} decision(s), {len(arbeit)} offene(r) "
+        "Work-Punkt(e) loaded. Use `query_rules_for_file` via the context-toolkit "
         "MCP tool for full JSON payload if needed._"
     )
     return "\n".join(lines)
@@ -495,11 +533,12 @@ def _cmd_file_query(
     matches = engine.query_for_file_tiered(file_path)
     decisions = engine.query_decisions_for_file(file_path)
     deps = engine.query_dependencies(file_path)
+    arbeit = _offene_arbeit(file_path)
 
     if fmt == "bundle":
-        markdown = _format_markdown(matches, decisions, deps, file_path)
+        markdown = _format_markdown(matches, decisions, deps, file_path, arbeit)
         out = {
-            "fingerprint": fingerprint_rules(matches, decisions),
+            "fingerprint": fingerprint_rules(matches, decisions, arbeit),
             "markdown": markdown if markdown else None,
             "rule_count": len(matches),
             # Compact IDs for the hook's repeat-touch reminder line
@@ -509,14 +548,14 @@ def _cmd_file_query(
         }
         print(json.dumps(out))
     elif fmt == "fingerprint":
-        print(fingerprint_rules(matches, decisions))
+        print(fingerprint_rules(matches, decisions, arbeit))
     elif fmt == "json":
         print(json.dumps([_rule_to_summary_dict(r) for r in matches], indent=2))
     elif fmt == "keys":
         for r in matches:
             print(r.key)
     else:
-        text = _format_markdown(matches, decisions, deps, file_path)
+        text = _format_markdown(matches, decisions, deps, file_path, arbeit)
         if text:
             print(text)
     return 0

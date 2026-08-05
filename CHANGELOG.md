@@ -4,6 +4,27 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc8] — 2026-08-05
+
+### Added
+- **Per-file work-item delivery.** `WorkEngine.fuer_datei(file_path, limit=8)`
+  (`work.py`) surfaces the open/active work items recorded for a given file —
+  matched via `kanten.nutzt/erweitert/baut` (forward, symbol-level) first, then
+  `evidence.files` of still-open records, capped at 8. The CLI's `_offene_arbeit()`
+  and the MCP server's `query_rules_for_file` tool both expose it as a fourth
+  section alongside rules/decisions/dependencies (`offene_arbeit`), fail-soft when
+  the work store is absent or fails to load. `fingerprint_rules()` gains an
+  optional third `arbeit` parameter and folds each item's key/status/title into
+  the dedup hash — otherwise the live-reload dedup would silently suppress a new
+  open item whenever only the work store changed and the rule set did not.
+
+### Changed
+- **`discover_work_dir()` unified.** Moved from a private duplicate in
+  `mcp_server.py` to a single public function in `core.py` (`.resolve()`d, since
+  callers derive sibling paths from it). The CLI had grown its own second copy
+  that differed only in the missing `.resolve()`; both call sites now share one
+  implementation.
+
 ## [1.0.0-rc7] — 2026-07-28
 
 ### Added

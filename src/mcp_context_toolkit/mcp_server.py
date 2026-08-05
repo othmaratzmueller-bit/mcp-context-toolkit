@@ -11,6 +11,7 @@ from typing import Any
 
 from mcp_context_toolkit import capability
 from mcp_context_toolkit.core import (
+    discover_work_dir,
     discover_shared_rules_dir,
     store_conventions,
     warn_if_example_rules,
@@ -85,25 +86,6 @@ def _discover_wissen() -> "capability.CapabilityQuelle | None":
             except Exception:
                 return None
             return capability.CapabilityQuelle(candidate, index, zerlege, bauer)
-    return None
-
-
-def _discover_work_dir() -> Path | None:
-    """Locate the PROJECT work-item directory (plans/roadmaps as records).
-    Env CONTEXT_WORK_DIR wins, else walk up for <conv>/work. Returns None if
-    none found — work tools are then simply not registered, same gating
-    rationale as the optional memory tiers. Deliberately no user/core tier
-    (unlike memory): work items are project-scoped by nature, a cross-project
-    tier was not asked for (W20 — ask before inventing)."""
-    env = os.environ.get("CONTEXT_WORK_DIR")
-    if env:
-        p = Path(env).expanduser()
-        return p if p.is_dir() else None
-    for candidate in [Path.cwd(), *Path.cwd().parents]:
-        for conv in store_conventions():
-            work = candidate / conv / "work"
-            if work.is_dir():
-                return work
     return None
 
 
@@ -233,10 +215,18 @@ def build_server(
 
     @_tool("rules")
     def query_rules_for_file(file_path: str) -> str:
-        """Return codebase intelligence context (Rules, Decisions, Dependencies) for the given file path.
+        """Return codebase intelligence for a file: Rules, Decisions, Dependencies
+        AND the open work items someone recorded for exactly this file.
 
-        Use this as the first action when opening a file in a session —
-        it filters the repo knowledge down to the relevant context for this file.
+        Use this as the first action when opening a file in a session — it filters
+        the repo knowledge down to what matters here.
+
+        `offene_arbeit` are NOTES, not instructions: someone wrote them for this
+        file and has not closed them. If your edit covers one, close it (with
+        `evidence`); if not, leave it. `get_work(<key>)` shows the full text.
+        Matched via `kanten` (forward, recorded before building) and
+        `evidence.files` of still-open records; capped at 8, because a wall of
+        items is skimmed and a handful is read.
         """
         engine = rules_reloader.current()
         matches = engine.query_for_file_tiered(file_path)
@@ -247,10 +237,28 @@ def build_server(
 
         deps = engine.query_dependencies(file_path)
 
+        # Vierte Auskunft: was hat jemand fuer GENAU diese Datei notiert und noch
+        # nicht erledigt. Aus "hier sind deine Regeln" wird "hier sind deine
+        # Regeln und die N offenen Punkte dazu". Fail-soft: fehlt der Work-Store
+        # oder bricht das Laden, entfaellt der Abschnitt still — eine Zugabe
+        # darf einen Edit nie aufhalten.
+        arbeit_out: list[dict] = []
+        if work_reloader is not None:
+            try:
+                for w in work_reloader.current().fuer_datei(file_path):
+                    arbeit_out.append({
+                        "key": w.key, "title": w.title, "status": w.status,
+                        "theme": w.theme, "kind": w.kind,
+                        "kanten": w.kanten is not None,
+                    })
+            except Exception:
+                arbeit_out = []
+
         out = {
             "rules": rules_out,
             "decisions": decisions_out,
-            "dependencies": deps
+            "dependencies": deps,
+            "offene_arbeit": arbeit_out,
         }
         return json.dumps(out, indent=2)
 
@@ -924,7 +932,7 @@ def main() -> None:
     # not there, work tools are simply not registered and everything else
     # keeps working untouched.
     work_reloader = None
-    work_dir = _discover_work_dir()
+    work_dir = discover_work_dir()
     if work_dir is not None:
         def _load_work() -> WorkEngine:
             return WorkEngine.from_directory(work_dir, strict=False)

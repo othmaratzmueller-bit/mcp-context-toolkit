@@ -801,10 +801,16 @@ class TestMcpToolBodies:
         assert "error" in self._call(server, "get_rule", {"key": "does_not_exist"})
 
     def test_query_rules_for_file_shape_without_rules(self, tmp_path: Path):
-        """No rules loaded → empty sections, never a crash."""
+        """No rules loaded → empty sections, never a crash.
+
+        `offene_arbeit` (2026-08-05) is part of the shape even with no work store
+        wired — an ABSENT key and an EMPTY list say different things to a reader,
+        and the caller should not have to guess which one it got.
+        """
         server = self._server(self._store(tmp_path))
         out = self._call(server, "query_rules_for_file", {"file_path": "src/x.py"})
-        assert out == {"rules": [], "decisions": [], "dependencies": {}}
+        assert out == {"rules": [], "decisions": [], "dependencies": {},
+                       "offene_arbeit": []}
 
     def test_validate_rules_reports_when_nothing_is_loaded(self, tmp_path: Path):
         server = self._server(self._store(tmp_path))

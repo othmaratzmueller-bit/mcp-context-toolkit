@@ -322,6 +322,92 @@ class TestKantenUndPlanPath:
         assert WorkEngine.from_directory(tmp_path).lint()["reuse_ungeprueft"] == ["aktiv"]
 
 
+class TestZustellungFuerDatei:
+    """`fuer_datei` — offene Punkte zur angefassten Datei (2026-08-05).
+
+    Aus "hier sind deine Regeln" wird "hier sind deine Regeln und die N offenen
+    Punkte, die jemand fuer diese Datei notiert hat".
+    """
+
+    def test_kanten_treffer(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - x\n"
+               "  nutzt:\n    - backend/app/services/x.py::foo")
+        t = WorkEngine.from_directory(tmp_path).fuer_datei("backend/app/services/x.py")
+        assert [i.key for i in t] == ["a"]
+
+    def test_evidence_files_treffer(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nevidence:\n  commits: []\n"
+               "  files:\n    - backend/app/services/x.py")
+        t = WorkEngine.from_directory(tmp_path).fuer_datei("backend/app/services/x.py")
+        assert [i.key for i in t] == ["a"]
+
+    def test_geschlossene_records_bleiben_draussen(self, tmp_path: Path):
+        """Ein erledigter Punkt ist keine Arbeit mehr."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: done\nclosed: 2026-01-02\n"
+               "theme: engine\nopened: 2026-01-01\nevidence:\n  commits: [abc]\n"
+               "  files:\n    - backend/app/services/x.py")
+        assert WorkEngine.from_directory(tmp_path).fuer_datei(
+            "backend/app/services/x.py") == []
+
+    def test_kanten_vor_evidence(self, tmp_path: Path):
+        """Kanten sind praeziser (Symbol-Ebene) und ausdruecklich vorwaerts."""
+        _write(tmp_path, "ev.md",
+               "key: ev\ntitle: Ev\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nevidence:\n  commits: []\n"
+               "  files:\n    - backend/app/services/x.py")
+        _write(tmp_path, "ka.md",
+               "key: ka\ntitle: Ka\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - x\n"
+               "  nutzt:\n    - backend/app/services/x.py::foo")
+        t = WorkEngine.from_directory(tmp_path).fuer_datei("backend/app/services/x.py")
+        assert [i.key for i in t] == ["ka", "ev"]
+
+    def test_deckel_haelt(self, tmp_path: Path):
+        """Eine Wand wird ueberblaettert, eine Handvoll gelesen."""
+        for n in range(12):
+            _write(tmp_path, f"r{n}.md",
+                   f"key: r{n}\ntitle: R{n}\nkind: step\nstatus: open\n"
+                   "theme: engine\nopened: 2026-01-01\nevidence:\n  commits: []\n"
+                   "  files:\n    - backend/app/services/x.py")
+        t = WorkEngine.from_directory(tmp_path).fuer_datei(
+            "backend/app/services/x.py", limit=8)
+        assert len(t) == 8
+
+    def test_fremde_datei_liefert_nichts(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nevidence:\n  commits: []\n"
+               "  files:\n    - backend/app/services/x.py")
+        assert WorkEngine.from_directory(tmp_path).fuer_datei("ganz/woanders.py") == []
+
+    def test_fingerprint_aendert_sich_mit_der_arbeit(self, tmp_path: Path):
+        """OHNE das waere die Zustellung ein stiller Veraltungs-Filter.
+
+        Der Hook dedupliziert ueber den Fingerprint. Zaehlten die Work-Items
+        nicht mit, wuerde ein NEUER offener Punkt nie zugestellt, solange sich
+        die Regeln nicht aendern — die Dedup unterdrueckte genau die Auskunft,
+        die neu ist.
+        """
+        from mcp_context_toolkit.engine import fingerprint_rules
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nevidence:\n  commits: []\n"
+               "  files:\n    - backend/app/services/x.py")
+        e = WorkEngine.from_directory(tmp_path)
+        arbeit = e.fuer_datei("backend/app/services/x.py")
+        ohne = fingerprint_rules([], None, None)
+        mit = fingerprint_rules([], None, arbeit)
+        assert ohne != mit, "Work-Items schlagen nicht auf den Fingerprint durch"
+        # Statuswechsel muss ebenfalls durchschlagen
+        arbeit[0].status = "active"
+        assert fingerprint_rules([], None, arbeit) != mit
+
+
 class TestSupersedesChain:
     def test_superseded_idea_stays_readable_alongside_its_replacement(self, tmp_path: Path):
         # The owner's core ask: a dropped idea is never overwritten — its

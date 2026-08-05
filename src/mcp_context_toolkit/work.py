@@ -360,6 +360,55 @@ class WorkEngine:
                 counts[k.status] += 1
         return counts
 
+    def fuer_datei(self, file_path: str, limit: int = 8) -> list[WorkItem]:
+        """Offene Work-Items, die diese Datei nennen — fuer die Zustellung beim Edit.
+
+        Aus "hier sind deine Regeln" wird damit "hier sind deine Regeln, die
+        Entscheidungen dazu, und die N offenen Punkte, die jemand fuer diese Datei
+        notiert hat".
+
+        ZWEI QUELLEN, bewusst kein drittes Feld
+        ---------------------------------------
+        ``kanten.nutzt/erweitert/baut``  VORWAERTS — vor dem Bauen gesucht, `datei::Symbol`
+        ``evidence.files``               eigentlich rueckwaerts, aber an einem OFFENEN
+                                         Record faktisch eine Vorwaerts-Aussage: es ist,
+                                         was der Autor anzufassen erwartete
+
+        Gemessen 2026-08-04 ueber 1114 offene/aktive Records: 21 mit `kanten`
+        (51 Anker), 374 mit `evidence.files` (496 aufloesbare Pfade, 214 tote).
+        Ein eigenes ``applies_to.files`` waere am ersten Tag genauso leer wie
+        `kanten` — und eine vierte Pflegestelle fuer dieselbe Auskunft.
+
+        Nur `open`/`active`: ein geschlossener Punkt ist keine Arbeit mehr.
+        Deckel bei `limit`, weil eine einzelne Datei sonst zweistellig viele Items
+        zieht und die Zustellung zur Wand wird, die man ueberblaettert.
+        """
+        ziel = file_path.strip().lstrip("./")
+        if not ziel:
+            return []
+        treffer: list[tuple[int, WorkItem]] = []
+        for i in self._items:
+            if i.status not in ("open", "active"):
+                continue
+            # Kanten zuerst: praeziser (Symbol-Ebene) und ausdruecklich vorwaerts.
+            rang = None
+            if i.kanten is not None:
+                for anker in (i.kanten.nutzt + i.kanten.erweitert + i.kanten.baut):
+                    if anker.split("::", 1)[0].strip().lstrip("./") == ziel:
+                        rang = 0
+                        break
+            if rang is None:
+                for f in i.evidence.files:
+                    if f.strip().rstrip("/").lstrip("./") == ziel:
+                        rang = 1
+                        break
+            if rang is not None:
+                treffer.append((rang, i))
+        # Kanten vor Evidence, danach aktive vor offenen, dann juengste zuerst.
+        treffer.sort(key=lambda t: (t[0], 0 if t[1].status == "active" else 1,
+                                    -t[1].opened.toordinal()))
+        return [i for _r, i in treffer[:limit]]
+
     def lint(self) -> dict:
         """Read-only hygiene report — mirrors memory.py's ``lint()`` shape so
         both stores are consumed the same way, but every rule here maps to a

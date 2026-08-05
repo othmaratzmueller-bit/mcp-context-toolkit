@@ -100,6 +100,37 @@ def discover_shared_rules_dir() -> Path | None:
     return p if p.is_dir() else None
 
 
+def discover_work_dir() -> Path | None:
+    """Locate the PROJECT work-item store. Env ``CONTEXT_WORK_DIR`` wins, else
+    walk up for ``<convention>/work``. Returns ``None`` when absent — the work
+    tools and the per-file delivery are then simply not offered.
+
+    Lives HERE and not in a caller because both the MCP server and the CLI need
+    it, and they needed it in slightly different words: the server had one copy,
+    the CLI grew a second on 2026-08-05 that differed only in a `.resolve()`.
+    Found by the W8 reviewer — in the very sprint that removed the duplicate
+    detector, and missed by the write-time scanner because it listens to
+    Edit/Write while the file was written through a shell heredoc. The third
+    member of a family (`_discover_rules_dir`, `_discover_memory_dir` are still
+    doubled) is where a pattern stops being a coincidence.
+
+    `.resolve()` is deliberate: callers derive sibling paths from this
+    (``lint()`` walks two levels up to find the repo root), and a relative store
+    path made that computation report every `plan_path` as broken.
+    """
+    env = os.environ.get("CONTEXT_WORK_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        return p if p.is_dir() else None
+    cwd = Path.cwd()
+    for candidate in [cwd, *cwd.parents]:
+        for conv in store_conventions():
+            work = candidate / conv / "work"
+            if work.is_dir():
+                return work.resolve()
+    return None
+
+
 def warn_if_example_rules(rules_dir: Path) -> None:
     """The shipped starter pack (``examples/rules``) is INERT — copy-to-activate,
     never a production default. Auto-discovery (``<dir>/.context/rules`` or

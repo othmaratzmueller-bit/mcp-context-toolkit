@@ -41,15 +41,23 @@ DECISION_INJECT_STATUSES: tuple[str, ...] = ("accepted",)
 DECISION_TOP_K = 8
 
 
-def fingerprint_rules(rules: list[Rule], decisions: list[Decision] | None = None) -> str:
-    """Stable 16-char hex hash over the user-visible fields of rules and decisions.
+def fingerprint_rules(rules: list[Rule], decisions: list[Decision] | None = None,
+                     arbeit: list | None = None) -> str:
+    """Stable 16-char hex hash over the user-visible fields of the injected context.
 
     Used for live-reload dedup: if a hook stores this fingerprint per file,
     a subsequent hook invocation can detect whether the rule set or decision set
     matching the file has changed since last time. Catches add/delete, content edits,
     summary/reason edits, priority/status changes.
+
+    `arbeit` (open work items for the file, 2026-08-05) MUST be part of it. The
+    delivery shows them alongside the rules — but if only the work store changes
+    and the rules do not, the dedup would suppress the very update that carries
+    new information. A hash that ignores part of what it fingerprints turns the
+    dedup into a silent staleness filter. Only key+status+title go in: a body
+    edit is not worth re-injecting, a status flip is.
     """
-    if not rules and not decisions:
+    if not rules and not decisions and not arbeit:
         return "0"
     h = hashlib.sha256()
     for r in sorted(rules, key=lambda x: x.key):
@@ -60,6 +68,12 @@ def fingerprint_rules(rules: list[Rule], decisions: list[Decision] | None = None
         for d in sorted(decisions, key=lambda x: x.key):
             dump = d.model_dump(mode="json", exclude={"source_path"})
             h.update(json.dumps(dump, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+            h.update(b"|")
+    if arbeit:
+        # Nur key/status/title — eine Body-Aenderung ist keine neue Auskunft,
+        # ein Status-Wechsel oder ein neuer Punkt schon.
+        for w in sorted(arbeit, key=lambda x: x.key):
+            h.update(f"{w.key}\x1f{w.status}\x1f{w.title}".encode("utf-8"))
             h.update(b"|")
     return h.hexdigest()[:16]
 
