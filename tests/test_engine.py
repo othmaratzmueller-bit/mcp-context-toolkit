@@ -715,3 +715,32 @@ class TestTierLayering:
         r_proj = _make_rule("x", ["**/*"], tier="project")
         r_shared = _make_rule("x", ["**/*"], tier="shared")
         assert fingerprint_rules([r_proj]) == fingerprint_rules([r_shared])
+
+
+class TestVersion:
+    """Die Paket-Version hat GENAU EINE Wahrheit — und das muss geprueft werden.
+
+    `__version__` kommt seit rc9 aus den Installationsmetadaten statt aus einem
+    zweiten String im Code. Das schliesst die Drift aber nur halb: die Metadaten
+    entstehen beim `pip install` und liegen NICHT im Repo. Wer `pyproject.toml`
+    bumpt und nicht neu installiert, bekommt still die alte Zahl gemeldet — und
+    anders als frueher findet das kein `grep` mehr, weil die falsche Haelfte
+    untracked ist.
+
+    Genau das war der Zustand, in dem dieser Sprint das Paket vorfand: rc6 in
+    den Metadaten, rc8 in `pyproject.toml`, monatelang unbemerkt.
+    """
+
+    def test_version_stimmt_mit_pyproject_ueberein(self):
+        import tomllib
+        from pathlib import Path
+
+        import mcp_context_toolkit
+
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        deklariert = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+        assert mcp_context_toolkit.__version__ == deklariert, (
+            f"__version__ ({mcp_context_toolkit.__version__}) weicht von "
+            f"pyproject.toml ({deklariert}) ab — nach einem Versions-Bump fehlt "
+            f"ein `pip install -e .`, sonst meldet das Paket die alte Zahl."
+        )

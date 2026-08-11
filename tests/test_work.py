@@ -296,6 +296,92 @@ class TestKantenUndPlanPath:
         assert item is not None and item.kanten is not None
         assert item.kanten.gesucht == ["anonymize PII"]
 
+    def test_gefunden_und_entscheidung_werden_geladen(self, tmp_path: Path):
+        """Der Dreisatz aus CLAUDE.md muss vollstaendig ankommen.
+
+        Vor v1.4.474 kannte `WorkEdges` nur fuenf Felder; `gefunden`/
+        `entscheidung` wurden vom Loader kommentarlos uebergangen. Sechs
+        Records im Bestand hatten sie befuellt — der Nachweis stand in der
+        Datei und fehlte im Index.
+        """
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n"
+               "  gesucht:\n    - 'gibt es schon einen Splitter?'\n"
+               "  gefunden:\n    - 'services/x.py::split — Mixin, verworfen'\n"
+               "  entscheidung: 'Neubau, weil hier keine Klasse vorliegt'")
+        item = WorkEngine.from_directory(tmp_path).get("a")
+        assert item is not None and item.kanten is not None
+        assert item.kanten.gefunden == ["services/x.py::split — Mixin, verworfen"]
+        assert item.kanten.entscheidung == "Neubau, weil hier keine Klasse vorliegt"
+
+    def test_unbekannter_kanten_schluessel_ist_ein_fehler(self, tmp_path: Path):
+        """Ein vertippter Schluessel darf nicht spurlos verschwinden.
+
+        Der Loader liest die Felder NAMENTLICH auf — ohne diese Pruefung
+        erreicht Unbekanntes das Model nie, und `extra="forbid"` dort waere
+        wirkungslos. Genau so gingen `gefunden`/`entscheidung` verloren.
+        """
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n"
+               "  gesucht:\n    - x\n  gefunded:\n    - y")
+        engine = WorkEngine()
+        engine.load_directory(tmp_path, strict=False)
+        assert engine.get("a") is None
+        assert any("gefunded" in e for e in engine.errors), engine.errors
+
+    def test_entscheidung_allein_oeffnet_das_gate_NICHT(self, tmp_path: Path):
+        """Ein Satz ist das billigste Feld hier — er darf nicht als Suche zaehlen.
+
+        Sonst waere `kanten: {entscheidung: 'passt schon'}` der neue
+        Schleichweg, den `kanten: {}` bereits einmal war.
+
+        EHRLICH DAZU: dieser Test ist KEIN Regressionstest fuer v1.4.474 — er
+        war auch vorher gruen, allerdings aus dem falschen Grund (das Feld
+        existierte nicht, der Block blieb leer). Er schuetzt nach vorne: gegen
+        eine kuenftige Aenderung, die `entscheidung` in `gesucht_worden()`
+        aufnimmt, weil es "ja auch zum Dreisatz gehoert".
+        """
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  entscheidung: 'passt schon'")
+        assert WorkEngine.from_directory(tmp_path).get("a").kanten is None
+
+    def test_entscheidung_als_liste_ist_ein_fehler(self, tmp_path: Path):
+        """Eine Liste darf nicht still zur Python-repr werden.
+
+        `str(["Neubau", "X erweitern"])` ergibt `"['Neubau', 'X erweitern']"` —
+        eine Zeichenkette, die als Nachweis ausgeliefert wird und wie ein Satz
+        aussieht, ohne einer zu sein. Genau die stille Toleranz, gegen die
+        `_als_liste` ein Feld weiter gebaut wurde. (Reviewer-Fund 2026-08-11.)
+        """
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - x\n"
+               "  entscheidung:\n    - Neubau\n    - X erweitern")
+        engine = WorkEngine()
+        engine.load_directory(tmp_path, strict=False)
+        assert engine.get("a") is None
+        assert any("kanten.entscheidung" in e for e in engine.errors), engine.errors
+
+    def test_entscheidung_als_text_bleibt_unberuehrt(self, tmp_path: Path):
+        """Gegenprobe: der Guard darf den Normalfall nicht mitreissen."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - x\n"
+               "  entscheidung: '  Neubau, weil keine Klasse vorliegt  '")
+        item = WorkEngine.from_directory(tmp_path).get("a")
+        assert item is not None and item.kanten is not None
+        assert item.kanten.entscheidung == "Neubau, weil keine Klasse vorliegt"
+
+    def test_gefunden_allein_zaehlt_als_gesucht(self, tmp_path: Path):
+        """Eine Trefferliste IST das Ergebnis einer Suche — anders als ein Satz."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01\nkanten:\n  gefunden:\n    - 'services/x.py::y'")
+        assert WorkEngine.from_directory(tmp_path).get("a").kanten is not None
+
     def test_plan_path_auch_bei_relativem_store_pfad(self, tmp_path: Path,
                                                      monkeypatch):
         """`parent.parent` ohne `resolve()` meldete bei relativem Aufrufpfad

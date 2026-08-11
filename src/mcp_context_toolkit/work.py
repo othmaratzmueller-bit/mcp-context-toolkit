@@ -103,6 +103,28 @@ def _als_liste(wert, feld: str, path: Path) -> list:
     return list(wert)
 
 
+def _als_text(wert, feld: str, path: Path) -> str:
+    """YAML-Wert -> String, aber eine Liste/Map ist ein FEHLER, kein `str()`.
+
+    Gegenstueck zu `_als_liste` fuer die Textfelder, und aus demselben Grund:
+    `str(["Neubau", "Modul X erweitern"])` ergibt die Zeichenkette
+    `"['Neubau', 'Modul X erweitern']"` — eine Python-repr, die als Nachweis
+    ausgeliefert wird und wie ein Satz aussieht, ohne einer zu sein. Kein
+    Ladefehler, kein Lint-Treffer, nur eine kleine Unwahrheit ueber die Form.
+
+    Das ist genau die stille Toleranz, gegen die `_als_liste` daneben gebaut
+    wurde. Sie war in `kanten.entscheidung` wieder eingezogen, weil ein
+    `str(...)` beim Schreiben harmlos aussieht. (Reviewer-Fund 2026-08-11.)
+    """
+    if wert is None:
+        return ""
+    if not isinstance(wert, str):
+        raise KnowledgeLoadError(
+            path, f"`{feld}` ist {type(wert).__name__} statt eines Textes — "
+                  f"mehrere Punkte gehoeren in EINEN Satz, nicht in eine Liste")
+    return wert.strip()
+
+
 def _parse_work_item(path: Path) -> WorkItem:
     try:
         text = path.read_text(encoding="utf-8")
@@ -121,8 +143,30 @@ def _parse_work_item(path: Path) -> WorkItem:
     kanten_raw = _meta_get(meta, "kanten")
     kanten = None
     if isinstance(kanten_raw, dict):
+        # Unbekannte Schluessel LAUT machen. Dieser Loader liest die Felder
+        # namentlich auf — ein `extra="forbid"` am Model greift hier gar nicht,
+        # weil Unbekanntes es nie erreicht. Ohne diese Pruefung verschwindet ein
+        # vertippter oder erfundener Schluessel spurlos: kein Fehler, kein
+        # Lint-Treffer, nur ein Nachweis, den niemand mehr findet. Genau so
+        # gingen `gefunden`/`entscheidung` in sechs Records verloren, bevor sie
+        # (v1.4.474) ins Schema kamen — die Autoren hatten den Dreisatz aus
+        # CLAUDE.md woertlich uebernommen, und das Frontmatter schwieg dazu.
+        # Erlaubte Namen aus dem Model ableiten, nicht danebenschreiben — eine
+        # handgepflegte Zweitliste waere beim naechsten Feld sofort veraltet.
+        erlaubt = set(WorkEdges.model_fields)
+        unbekannt = sorted(set(kanten_raw) - erlaubt)
+        if unbekannt:
+            raise KnowledgeLoadError(
+                path,
+                f"unbekannte Schluessel unter `kanten:`: {', '.join(unbekannt)} — "
+                f"erlaubt sind {', '.join(sorted(erlaubt))}. "
+                f"Ein unbekannter Schluessel wird sonst still verworfen."
+            )
         kandidat = WorkEdges(
             gesucht=_als_liste(kanten_raw.get("gesucht"), "kanten.gesucht", path),
+            gefunden=_als_liste(kanten_raw.get("gefunden"), "kanten.gefunden", path),
+            entscheidung=_als_text(kanten_raw.get("entscheidung"),
+                                   "kanten.entscheidung", path),
             nutzt=_als_liste(kanten_raw.get("nutzt"), "kanten.nutzt", path),
             erweitert=_als_liste(kanten_raw.get("erweitert"), "kanten.erweitert", path),
             baut=_als_liste(kanten_raw.get("baut"), "kanten.baut", path),

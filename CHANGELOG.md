@@ -4,6 +4,61 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc9] — 2026-08-11
+
+### Added
+- **`kanten.gefunden` and `kanten.entscheidung`** (`models.py::WorkEdges`,
+  `work.py`). The reuse record is a three-step proof — what was searched for,
+  what turned up, what was concluded — but only the first step had a field.
+  `gefunden` is deliberately separate from `nutzt`/`erweitert`/`baut` because of
+  the **rejected** hit: "found the mixin pattern, discarded it — no class here"
+  fits none of the three, and it is the most valuable part of the record, since
+  it proves the search was not only run but weighed. Without a home for it the
+  honest answer has to be dropped or dressed up as something it isn't.
+  `gefunden` counts towards `gesucht_worden()` (a hit list is the result of a
+  search); `entscheidung` deliberately does **not** — it is free text and thus
+  the cheapest field here to fill without doing anything, and letting it open
+  the gate would hand back the loophole `kanten: {}` was closed for.
+
+### Changed
+- **Unknown keys under `kanten:` are now a load error.** Previously the loader
+  read the five known fields by name and everything else vanished without a
+  trace: no error, no lint hit, no warning. An `extra="forbid"` on the model
+  would not have helped — unknown keys never reached it. Found in a live store
+  where six records had spelled out the three-step proof verbatim and silently
+  lost two thirds of it. The allowed names are derived from the model, not kept
+  in a second hand-maintained list that would go stale at the next field.
+
+  **Upgrade note:** a store containing typo'd or invented `kanten` keys will now
+  surface those records in `load_errors` instead of loading them half-empty.
+  That is the point — but it is a behaviour change for anyone relying on the
+  silent tolerance.
+
+- **`kanten.entscheidung` must be a string.** A list or mapping there is a load
+  error, not a silent `str()`. Previously `entscheidung: [a, b]` became the
+  character sequence `"['a', 'b']"` — a Python repr that gets served as evidence
+  and reads like a sentence without being one. New `_als_text` is the counterpart
+  to `_als_liste` and refuses non-strings for the same reason that one refuses
+  non-lists.
+
+  **Upgrade note:** this is stricter than rc9's first cut, which also accepted a
+  number (`entscheidung: 42` became `"42"`). Any record whose `entscheidung` is
+  not a string now lands in `load_errors`. Multiple points belong in one
+  sentence — that is what the field is for.
+
+- **`__version__` now comes from the installation metadata** (`importlib.
+  metadata`) instead of a second hard-coded string. There is one source of truth
+  again: `pyproject.toml`. The two had drifted apart unnoticed (`rc6` in the code
+  against `rc8` in the project file).
+
+  **Upgrade note:** the version is now read from the INSTALLED distribution. Bump
+  `pyproject.toml` without re-running `pip install -e .` and the package keeps
+  reporting the old number — the failure mode moved from a visible second string
+  to invisible metadata. `TestVersion` in `tests/test_engine.py` couples the two
+  and fails loudly in exactly that case; it is the reason this trade is
+  acceptable. Importing from a source tree without any installation yields
+  `0.0.0+unbekannt` rather than an invented number.
+
 ## [1.0.0-rc8] — 2026-08-05
 
 ### Added

@@ -164,17 +164,39 @@ class WorkEdges(BaseModel):
 
     Without that distinction a mandatory `kanten` field would simply be filled
     with invented edges — the field is cheap to fake, the search is not.
+
+    Three of these fields spell out the search itself — what was looked for,
+    what turned up, what was concluded:
+
+        gesucht      WHAT was searched for
+        gefunden     WHAT turned up, INCLUDING hits that were rejected
+        entscheidung WHAT followed from it
+
+    `gefunden` is deliberately separate from `nutzt`/`erweitert`/`baut`, and the
+    reason is the rejected hit. "Mixin pattern found, discarded — no class here"
+    belongs in none of the three: it is not used, not extended, not built. Yet
+    that is the most valuable part of a reuse record, because it proves the
+    search was not only run but weighed. Without a home for it, the honest
+    answer has to be dropped or dressed up as something it isn't.
     """
     gesucht: list[str] = []      # the queries/terms actually searched for
+    gefunden: list[str] = []     # what the search turned up, rejects included
+    entscheidung: str = ""       # what followed from it, in one sentence
     nutzt: list[str] = []        # exists, will be called
     erweitert: list[str] = []    # exists, will be changed
     baut: list[str] = []         # does not exist yet, this item creates it
     modul: list[str] = []        # module/directory names, placeholders allowed
 
     def gesucht_worden(self) -> bool:
-        """Was a search recorded at all? An empty `kanten:` block is not one."""
-        return bool(self.gesucht or self.nutzt or self.erweitert
-                    or self.baut or self.modul)
+        """Was a search recorded at all? An empty `kanten:` block is not one.
+
+        `entscheidung` alone does NOT count. It is a free-text sentence and thus
+        the cheapest field here to fill without doing anything — letting it open
+        the gate would hand back exactly the loophole `kanten: {}` was closed
+        for. `gefunden` does count: a hit list is the result of a search.
+        """
+        return bool(self.gesucht or self.gefunden or self.nutzt
+                    or self.erweitert or self.baut or self.modul)
 
 
 class WorkItem(BaseModel):
