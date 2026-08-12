@@ -1,7 +1,40 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+# `Decision` hat ein FELD namens `date`, das den Typ gleichen Namens im
+# Klassenkoerper ueberschattet — jede weitere Datums-Annotation dort braucht
+# deshalb diesen Alias. Zur Laufzeit ginge auch `date` (Pydantic loest im
+# Modul-Scope auf), aber ein Type-Checker liest den Klassen-Scope und meldet
+# es zu Recht.
+Datum = date
+
+
+class _StrengesModell(BaseModel):
+    """Basis fuer alles, was aus YAML geladen wird: unbekannte Schluessel WERFEN.
+
+    Pydantic verwirft Unbekanntes standardmaessig still (`extra='ignore'`). Fuer
+    ein Modell, dessen Instanzen von Hand in YAML geschrieben werden, ist das
+    die falsche Voreinstellung — ein Tippfehler im Schluesselnamen sieht dann
+    exakt so aus wie ein weggelassenes Feld.
+
+    Gemessen 2026-08-12 an einer Probe-Regel mit zwei Tippfehlern
+    (`exclude` statt `excludes`, dazu ein erfundenes Top-Feld): sie lud ohne
+    Fehler, und der Ausschluss war weg. Bei W9 haette das geheissen, dass eine
+    `non_negotiable`-Regel ueber Lizenzen still auf ingestierte Fremd-Repos
+    angewendet wird — und niemand haette es gemerkt.
+
+    Der Work-Store hat denselben Verlust schon einmal bezahlt: `gefunden` und
+    `entscheidung` verschwanden aus sechs Records, weil das Schema sie nicht
+    kannte und schwieg (v1.4.474, siehe `work.py::_lade_kanten`). Dort liegt
+    die Pruefung im Loader, weil er die Felder namentlich aufliest und
+    Unbekanntes das Modell nie erreicht. Hier baut der Loader mit
+    `Rule(**data)` bzw. `Decision(**data)` — deshalb greift `extra='forbid'`
+    am Modell, und zwar an genau der Stelle, an der die Datei gelesen wird.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
 RuleType = Literal[
     "security",
@@ -21,14 +54,14 @@ RuleLanguage = Literal["python", "javascript", "css", "html", "yaml", "sql"]
 RuleTier = Literal["shared", "project", "unknown"]
 
 
-class RuleApplyTo(BaseModel):
+class RuleApplyTo(_StrengesModell):
     files: list[str] = Field(min_length=1)
     language: RuleLanguage | None = None
     excludes: list[str] = []
     triggers: list[str] = []
 
 
-class RuleComplianceRef(BaseModel):
+class RuleComplianceRef(_StrengesModell):
     standard: str
     clause: str | None = None
     article: str | None = None
@@ -36,32 +69,32 @@ class RuleComplianceRef(BaseModel):
     description: str
 
 
-class RuleConflict(BaseModel):
+class RuleConflict(_StrengesModell):
     rule: str
     resolution: str = Field(min_length=10)
 
 
-class RuleExample(BaseModel):
+class RuleExample(_StrengesModell):
     code: str
     why: str
 
 
-class RuleExamples(BaseModel):
+class RuleExamples(_StrengesModell):
     forbidden: RuleExample | None = None
     required: RuleExample | None = None
 
 
-class RuleReferenceFile(BaseModel):
+class RuleReferenceFile(_StrengesModell):
     path: str
     why: str
 
 
-class RuleReferences(BaseModel):
+class RuleReferences(_StrengesModell):
     files: list[RuleReferenceFile] = []
     related_rules: list[str] = []
 
 
-class Rule(BaseModel):
+class Rule(_StrengesModell):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     title: str
     short_id: str | None = None
@@ -93,12 +126,12 @@ class Rule(BaseModel):
 DecisionStatus = Literal["draft", "accepted", "rejected", "superseded", "deprecated"]
 
 
-class DecisionAppliesTo(BaseModel):
+class DecisionAppliesTo(_StrengesModell):
     modules: list[str] = []
     files: list[str] = []
 
 
-class Decision(BaseModel):
+class Decision(_StrengesModell):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     title: str
     date: date
@@ -108,6 +141,18 @@ class Decision(BaseModel):
     reason: str = Field(min_length=10)
 
     supersedes: str | None = None
+
+    # Wann dieser Record AN ORT UND STELLE praezisiert wurde — im Unterschied
+    # zu `supersedes`, das auf einen anderen Record zeigt, der ihn ersetzt.
+    #
+    # Das Feld stand seit 2026-07-22 in
+    # `2026-06-21_prometheus_a4_completeness_gate__a3_entwurf_marker.yaml` und
+    # wurde bis 2026-08-12 STILL verworfen (`extra='ignore'`), obwohl es
+    # gebraucht wurde: derselbe Record traegt zwei Zeilen tiefer den Kommentar
+    # „2026-07-22 ergaenzt". Aufgenommen statt geloescht — der Autor hat es
+    # bewusst geschrieben, der Fehler lag im Schema, das schwieg.
+    amended: Datum | None = None
+
     source_path: str | None = None
 
 

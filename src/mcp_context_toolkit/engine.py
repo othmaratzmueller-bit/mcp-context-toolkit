@@ -78,6 +78,21 @@ def fingerprint_rules(rules: list[Rule], decisions: list[Decision] | None = None
     return h.hexdigest()[:16]
 
 
+def _erste_zeile(exc: BaseException) -> str:
+    """First line of an exception's message — even when there is none.
+
+    ``str(ValueError())`` is ``''``, and ``''.splitlines()`` is ``[]`` — so the
+    obvious ``str(exc).splitlines()[0]`` raises ``IndexError`` from inside the
+    very handler that exists to keep a broken file from taking the store down
+    (Reviewer finding, v1.4.492). Measured as reachable only through an
+    injected raiser, not through any YAML tried: recursive anchors,
+    ``!!python/object`` and a NUL byte all produce non-empty messages. Latent,
+    then — but the handler's whole promise is that it does not raise, and that
+    promise must not hang on every exception having something to say.
+    """
+    return (str(exc) or "-").splitlines()[0]
+
+
 @lru_cache(maxsize=512)
 def _compile_glob(pattern: str) -> re.Pattern[str]:
     """Compile a glob pattern with '**' support to a regex.
@@ -129,11 +144,22 @@ class RulesEngine:
         self._decisions: list[Decision] = decisions or []
         self._graph: dict = graph or {}
         self._roots: list[tuple[Path, RuleTier]] = []
-        # Files skipped during a lenient (strict=False) load — parse/validation
-        # failures and same-tier duplicate keys. Empty after a strict load (it
-        # would have raised). Surfaced by the runtime callers (server banner,
-        # coder onboarding) so a single broken project YAML degrades LOUDLY
-        # ("6 loaded, 10 skipped") instead of silently blanking the rule set.
+        # Files skipped while loading — surfaced by the runtime callers (server
+        # banner, coder onboarding) so a single broken YAML degrades LOUDLY
+        # ("6 loaded, 10 skipped") instead of silently blanking the store.
+        #
+        # TWO sources, and they behave differently:
+        #
+        #   [<tier>] …      RULES. Parse/validation failures and same-tier
+        #                   duplicate keys. Only ever populated by a lenient
+        #                   (strict=False) load — a strict one raises instead.
+        #   [decision] …    DECISIONS. Always lenient: the decision store is a
+        #                   companion index, and one broken file there must not
+        #                   take the rule set down with it.
+        #
+        # The "empty after a strict load" half of the old comment was true when
+        # only rules wrote here. Since the decision loader stopped swallowing
+        # its errors it no longer is — and the prefix is what tells them apart.
         self._load_errors: list[str] = []
 
     @classmethod
@@ -264,6 +290,24 @@ class RulesEngine:
         }
 
     def _load_decisions(self, decisions_dir: Path):
+        """Load the decision store, and REPORT what could not be loaded.
+
+        The previous body ended in ``except Exception: pass`` — a broken
+        decision vanished without a trace. Measured 2026-08-12 over 397 files:
+        two carry unparseable YAML (an unterminated quoted scalar in
+        ``reason:``) and had been invisible for weeks; nobody could have known,
+        because nothing said so.
+
+        This matters more since ``Rule``/``Decision`` gained
+        ``extra='forbid'``: a typo'd key now raises where it used to be
+        dropped silently. With a swallowing loader that turns a lost FIELD into
+        a lost RECORD — the fix would have made the diagnosis worse, not
+        better. Errors go into the same ``load_errors`` channel the rule loader
+        already uses, so the runtime callers surface them the same way.
+
+        Still lenient by design: one broken file must not take the store down.
+        The difference is that it is now lenient *and* loud.
+        """
         self._decisions = []
         for yaml_file in sorted(decisions_dir.rglob("*.yaml")):
             if any(part.startswith("_") for part in yaml_file.relative_to(decisions_dir).parts):
@@ -271,11 +315,58 @@ class RulesEngine:
             try:
                 raw = yaml_file.read_text(encoding="utf-8")
                 data = yaml.safe_load(raw)
-                if isinstance(data, dict):
-                    data["source_path"] = str(yaml_file)
-                    self._decisions.append(Decision(**data))
-            except Exception:
-                pass
+            except Exception as exc:
+                self._load_errors.append(
+                    f"[decision] {yaml_file.name}: nicht lesbar — {exc.__class__.__name__}: "
+                    f"{_erste_zeile(exc)}"
+                )
+                continue
+
+            if not isinstance(data, dict):
+                self._load_errors.append(
+                    f"[decision] {yaml_file.name}: YAML-Wurzel ist kein Mapping"
+                )
+                continue
+
+            # YAML typisiert Schluessel: `2026-08-03:` wird zu `datetime.date`,
+            # `on:`/`yes:`/`no:` zu `bool`, `123:` zu `int`. `Decision(**data)`
+            # wirft darauf `TypeError: keywords must be strings` — und zwar
+            # BEVOR Pydantic etwas sieht, also an einem `except ValidationError`
+            # vorbei. Gemessen mit einer Datei, die nur `2026-08-03: irgendwas`
+            # enthaelt: der Fehler lief durch `load_directory` und
+            # `_Reloader.__init__` hinaus und riss den gesamten Rule-Load um —
+            # kein einziges Rule wurde mehr injiziert, wegen EINER kaputten
+            # Decision (Reviewer-Fund, erste Fassung dieses Sprints).
+            nicht_string = [k for k in data if not isinstance(k, str)]
+            if nicht_string:
+                self._load_errors.append(
+                    f"[decision] {yaml_file.name}: Schluessel muessen Strings sein — "
+                    f"{', '.join(f'{k!r} ({type(k).__name__})' for k in nicht_string)}. "
+                    f"In YAML brauchen Datums-, Zahl- und Ja/Nein-Schluessel "
+                    f"Anfuehrungszeichen."
+                )
+                continue
+
+            data["source_path"] = str(yaml_file)
+            try:
+                self._decisions.append(Decision(**data))
+            except ValidationError as exc:
+                felder = sorted({".".join(str(p) for p in e["loc"]) for e in exc.errors()})
+                self._load_errors.append(
+                    f"[decision] {yaml_file.name}: Schema verletzt — {', '.join(felder)}"
+                )
+            except Exception as exc:
+                # Breit gefangen, und das ist hier kein Schluder: die Zusage
+                # dieses Loaders ist „eine kaputte Datei wirft den Store nicht
+                # um". Eine Aufzaehlung erwarteter Fehlertypen kann diese Zusage
+                # nicht halten — sie haelt sie nur fuer die Typen, an die der
+                # Autor gedacht hat, und genau daran ist die erste Fassung
+                # gescheitert. Der Unterschied zum alten `except Exception:
+                # pass` ist nicht die Breite, sondern dass hier etwas STEHT.
+                self._load_errors.append(
+                    f"[decision] {yaml_file.name}: nicht ladbar — "
+                    f"{exc.__class__.__name__}: {_erste_zeile(exc)}"
+                )
 
     @staticmethod
     def _iter_rule_files(root: Path) -> Iterable[Path]:

@@ -744,3 +744,151 @@ class TestVersion:
             f"pyproject.toml ({deklariert}) ab — nach einem Versions-Bump fehlt "
             f"ein `pip install -e .`, sonst meldet das Paket die alte Zahl."
         )
+
+
+class TestUnbekannteSchluesselWerfen:
+    """Ein vertippter YAML-Schluessel muss LAUT sein, nicht still verschwinden.
+
+    Pydantic verwirft Unbekanntes per Voreinstellung (`extra='ignore'`). Fuer
+    ein Modell, dessen Instanzen von Hand in YAML geschrieben werden, ist das
+    die falsche Wahl: ein Tippfehler im Schluesselnamen sieht dann exakt so aus
+    wie ein weggelassenes Feld.
+
+    Gemessen 2026-08-12, bevor `extra='forbid'` gesetzt war: eine Regel mit
+    `exclude` statt `excludes` lud fehlerfrei — und ihr Ausschluss war weg. Bei
+    W9 haette das bedeutet, dass eine `non_negotiable`-Regel ueber Lizenzen
+    still auf ingestierte Fremd-Repos angewendet wird.
+
+    Derselbe Verlust ist im Work-Store schon einmal eingetreten (`gefunden`/
+    `entscheidung` in sechs Records, v1.4.474). Diese Tests halten die
+    Korrektur fest, damit sie nicht beim naechsten Modell-Umbau mit
+    herausfaellt.
+    """
+
+    def test_unbekannter_top_level_schluessel_wirft(self):
+        with pytest.raises(Exception) as exc:
+            _make_rule("probe", ["**/*.py"], villeicht_ein_tippfehler="x")
+        assert "villeicht_ein_tippfehler" in str(exc.value)
+
+    def test_vertippter_schluessel_in_applies_to_wirft(self):
+        """`exclude` statt `excludes` — der Fall, der W9 fast erwischt haette."""
+        with pytest.raises(Exception) as exc:
+            Rule(
+                key="probe", title="Probe", type="workflow", scope="all",
+                priority="mandatory", modules=["all"],
+                summary="Summary mit mehr als zehn Zeichen",
+                content="body", created=date(2026, 1, 1),
+                applies_to={"files": ["**/*.py"], "exclude": ["data/**"]},  # type: ignore[arg-type]
+            )
+        assert "exclude" in str(exc.value)
+
+    def test_korrekter_schluessel_laedt_weiterhin(self):
+        r = _make_rule("probe", ["**/*.py"],
+                       applies_to=RuleApplyTo(files=["**/*.py"], excludes=["data/**"]))
+        assert r.applies_to.excludes == ["data/**"]
+
+    def test_decision_mit_unbekanntem_schluessel_wirft(self):
+        with pytest.raises(Exception) as exc:
+            _make_decision("probe", [], erfundenes_feld="x")
+        assert "erfundenes_feld" in str(exc.value)
+
+
+class TestDecisionLoaderMeldetFehler:
+    """Der Decision-Loader endete auf `except Exception: pass`.
+
+    Eine kaputte Decision verschwand damit spurlos. Gemessen 2026-08-12 ueber
+    397 Dateien: drei waren betroffen (zwei mit unterminiertem YAML-Scalar,
+    eine mit einem Feld, das das Schema nicht kannte) — seit Wochen unsichtbar,
+    weil nichts es sagte.
+
+    Mit `extra='forbid'` waere das SCHLIMMER geworden: ein vertippter Schluessel
+    haette dann nicht mehr nur das Feld gekostet, sondern den ganzen Record —
+    und weiterhin lautlos. Deshalb gehoeren beide Aenderungen zusammen.
+
+    Nachsichtig bleibt der Loader: eine kaputte Datei darf den Store nicht
+    umwerfen. Neu ist, dass sie GEMELDET wird.
+    """
+
+    def _engine_mit(self, tmp_path: Path, inhalt: str) -> RulesEngine:
+        rules_dir = tmp_path / "rules"
+        _write_rule_yaml(rules_dir, "r1")
+        dec_dir = tmp_path / "decisions"
+        dec_dir.mkdir()
+        (dec_dir / "kaputt.yaml").write_text(inhalt, encoding="utf-8")
+        e = RulesEngine()
+        # `load_directory` laedt die Decisions SELBST aus `root.parent/decisions`
+        # (engine.py, "Decisions + graph"). Ein zusaetzlicher `_load_decisions`
+        # haette sie ein zweites Mal gelesen und jeden Fehler doppelt gemeldet —
+        # der erste Anlauf dieses Tests tat genau das und mass seine eigene
+        # Doppelung statt des Loaders.
+        e.load_directory(rules_dir)
+        return e
+
+    def test_unlesbares_yaml_wird_gemeldet(self, tmp_path: Path):
+        e = self._engine_mit(tmp_path, "key: k\nreason: 'nie geschlossen\n")
+        assert any("kaputt.yaml" in f and "nicht lesbar" in f for f in e.load_errors), \
+            f"kein Ladefehler gemeldet: {e.load_errors}"
+
+    def test_schemaverletzung_wird_gemeldet(self, tmp_path: Path):
+        e = self._engine_mit(tmp_path, (
+            "key: probe\ntitle: T\ndate: '2026-01-01'\nstatus: accepted\n"
+            "applies_to:\n  files: []\nreason: 'Ein Grund mit genug Zeichen.'\n"
+            "erfundenes_feld: x\n"
+        ))
+        assert any("kaputt.yaml" in f and "erfundenes_feld" in f for f in e.load_errors), \
+            f"Schemaverletzung nicht gemeldet: {e.load_errors}"
+
+    def test_eine_kaputte_datei_wirft_den_store_nicht_um(self, tmp_path: Path):
+        dec_dir = tmp_path / "decisions"
+        dec_dir.mkdir()
+        (dec_dir / "kaputt.yaml").write_text("reason: 'offen\n", encoding="utf-8")
+        (dec_dir / "heil.yaml").write_text(
+            "key: heil\ntitle: T\ndate: '2026-01-01'\nstatus: accepted\n"
+            "applies_to:\n  files: []\nreason: 'Ein Grund mit genug Zeichen.'\n",
+            encoding="utf-8")
+        rules_dir = tmp_path / "rules"
+        _write_rule_yaml(rules_dir, "r1")
+        e = RulesEngine()
+        e.load_directory(rules_dir)
+        assert [d.key for d in e._decisions] == ["heil"]
+        assert len(e.load_errors) == 1
+
+    def test_nicht_string_schluessel_wirft_den_store_nicht_um(self, tmp_path: Path):
+        """Der Pfad, den die erste Fassung dieses Tests NICHT abgedeckt hat.
+
+        YAML typisiert Schluessel: `2026-08-03:` wird `datetime.date`, `on:`
+        wird `bool`. `Decision(**data)` wirft darauf `TypeError: keywords must
+        be strings` — BEVOR Pydantic etwas sieht, also an einem
+        `except ValidationError` vorbei. Gemessen (Reviewer): der Fehler lief
+        durch `load_directory` und `_Reloader.__init__` hinaus und riss den
+        gesamten Rule-Load um.
+
+        Der Vorgaenger-Test fuetterte einen PARSE-Fehler und war deshalb gruen,
+        waehrend genau diese Bruchstelle offen stand — ein Testname, der mehr
+        behauptet als seine Zusicherung.
+        """
+        dec_dir = tmp_path / "decisions"
+        dec_dir.mkdir()
+        (dec_dir / "datum_als_schluessel.yaml").write_text(
+            "2026-08-03: irgendwas\n", encoding="utf-8")
+        (dec_dir / "ja_als_schluessel.yaml").write_text(
+            "on: irgendwas\n", encoding="utf-8")
+        (dec_dir / "heil.yaml").write_text(
+            "key: heil\ntitle: T\ndate: '2026-01-01'\nstatus: accepted\n"
+            "applies_to:\n  files: []\nreason: 'Ein Grund mit genug Zeichen.'\n",
+            encoding="utf-8")
+        rules_dir = tmp_path / "rules"
+        _write_rule_yaml(rules_dir, "r1")
+
+        e = RulesEngine()
+        e.load_directory(rules_dir)          # darf NICHT werfen
+
+        assert [r.key for r in e.rules] == ["r1"], "die Regeln muessen trotzdem stehen"
+        assert [d.key for d in e._decisions] == ["heil"]
+        assert len(e.load_errors) == 2, e.load_errors
+        assert all("Schluessel muessen Strings sein" in f for f in e.load_errors)
+
+    def test_amended_wird_nicht_mehr_verschluckt(self):
+        """Das Feld stand seit 2026-07-22 in einem echten Record und war weg."""
+        d = _make_decision("probe", [], amended=date(2026, 7, 22))
+        assert d.amended == date(2026, 7, 22)

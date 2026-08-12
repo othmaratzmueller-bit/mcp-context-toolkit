@@ -870,8 +870,12 @@ def main() -> None:
     # Degrade loud (W4): if the lenient load skipped any file, name each one on
     # stderr so a broken project YAML is diagnosable, not a silent gap.
     if engine.load_errors:
+        # "file(s)", not "rule file(s)": since v1.4.492 this channel also carries
+        # decision-store failures (prefix `[decision]`). Saying "rule" made the
+        # banner report three broken decisions as "3 rule file(s) skipped" while
+        # all 59 rules had loaded — a count pointing at the wrong category.
         print(
-            f"[context-toolkit] WARNING: {len(engine.load_errors)} rule file(s) "
+            f"[context-toolkit] WARNING: {len(engine.load_errors)} file(s) "
             f"skipped (invalid) — the rest loaded normally:",
             file=sys.stderr,
         )

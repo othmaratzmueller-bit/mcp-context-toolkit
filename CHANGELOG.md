@@ -4,6 +4,63 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed — BREAKING for rule and decision authors
+
+- **Unknown keys in a rule or decision YAML are now a load error**
+  (`models.py::_StrengesModell`, `extra="forbid"` on all `Rule*`/`Decision*`
+  models). A file that loaded yesterday can raise today.
+
+  This is the same lesson as rc9's `kanten:` fix, one layer over: there, the
+  loader read fields by name and unknown ones never reached the model, so the
+  check had to live in the loader. Here the loader builds with `Rule(**data)`,
+  so `extra="forbid"` catches it at the point where the file is read.
+
+  Measured on a probe rule carrying two typos (`exclude` instead of `excludes`,
+  plus an invented top-level key): it loaded without complaint, and the
+  exclusion was gone. In the host project that would have meant a
+  `non_negotiable` licence rule silently applying to ingested third-party
+  repositories.
+
+  **Migration:** a rule that needs to carry extra metadata has `tags:
+  list[str]` for it — that is the intended overflow. Everything else is a typo
+  by definition now. Run the loader once over your store; the errors name the
+  offending key.
+
+- **The decision loader no longer swallows failures.** Its body ended in
+  `except Exception: pass`, so a broken decision file vanished without a trace.
+  Measured over a 397-file store: three were affected and had been invisible
+  for weeks — two with an unterminated quoted scalar, one carrying a field the
+  schema did not know.
+
+  This had to change *together* with `extra="forbid"`: with a swallowing
+  loader, a typo'd key would no longer have cost a FIELD but the whole RECORD,
+  and still silently. The fix would have made the diagnosis worse.
+
+  Failures now go into the existing `load_errors` channel with a `[decision]`
+  prefix. The loader stays lenient by design — one broken file must not take
+  the store down — it is now lenient *and* loud. Callers that render
+  `load_errors` should no longer label the count "rule file(s)".
+
+### Added
+
+- **`Decision.amended`** (`date | None`) — when a decision was refined IN
+  PLACE, as opposed to `supersedes`, which points at a different record that
+  replaces it. The field had been written in a real store since 2026-07-22 and
+  discarded silently ever since; it was adopted rather than deleted, because
+  the author meant it and the schema was the part that was wrong.
+
+### Fixed
+
+- **YAML mappings with non-string keys no longer crash the load.** `2026-08-03:`
+  parses as `datetime.date`, `on:`/`yes:` as `bool` — and `Decision(**data)`
+  raises `TypeError: keywords must be strings` *before* pydantic sees anything,
+  slipping past `except ValidationError`. Measured: the error escaped through
+  `load_directory` and the MCP server's reloader, taking down the entire rule
+  load over one malformed decision file. Non-string keys are now reported like
+  any other bad file.
+
 ## [1.0.0-rc9] — 2026-08-11
 
 ### Added
