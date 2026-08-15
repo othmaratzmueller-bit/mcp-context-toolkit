@@ -100,10 +100,31 @@ def _format_markdown(rules: list, decisions: list, deps: dict, file_path: str,
         for r in rules:
             short = f" [{r.short_id}]" if r.short_id else ""
             lines.append(f"- **{r.priority}** `{r.key}`{short} — {r.title}")
-            summary = r.summary.strip().replace("\n", " ")
-            if len(summary) > 160:
-                summary = summary[:157] + "..."
-            lines.append(f"  {summary}")
+            # KEINE Kuerzung. Bis 2026-08-15 wurde hier ueber 160 Zeichen auf
+            # `summary[:157] + "..."` gekappt — das traf 40 von 59 Regeln, Q12
+            # lieferte 21 Prozent aus, und dem non_negotiable S8 fiel die
+            # Owner-Freigabe-Klausel mitten im Wort weg.
+            #
+            # Die Kappung stammte aus einer Zeit, in der dieser Text bei JEDEM
+            # Dateizugriff geschickt wurde. Seit es die Erinnerungszeile im
+            # Hook gibt (`rules-on-file-edit.sh`: gleicher Fingerprint -> nur
+            # die Kuerzel plus „Volltext: get_rule"), faellt er pro Datei genau
+            # EINMAL an — und ausgerechnet diese eine Auslieferung war die
+            # verstuemmelte. Gemessen an `backend/app/services/audit_manager.py`
+            # (27 Regeln): 20474 -> 23170 Zeichen, also +2696 Zeichen ein
+            # einziges Mal pro Datei. Zeichen und nicht geschaetzte Token,
+            # weil die Umrechnung in dieser Messung schon zweimal zu
+            # abweichenden Zahlen in zwei Artefakten gefuehrt hat.
+            #
+            # Owner-Direktive 2026-08-15: „dann sollte doch nicht der echte
+            # Text gekillt werden … jedesmal kommt eine Kurzbeschreibung, und
+            # wenn noch nicht geladen, dann kommt die volle."
+            #
+            # Mehrzeilige `summary`-Bloecke werden eingerueckt statt zu einer
+            # Zeile zusammengezogen: sie bleiben so als zusammenhaengender
+            # Absatz lesbar und reissen die Markdown-Liste nicht auf.
+            for zeile in r.summary.strip().splitlines():
+                lines.append(f"  {zeile}")
         lines.append("")
 
     if decisions:
