@@ -194,6 +194,64 @@ class TestLint:
         e = WorkEngine.from_directory(tmp_path)
         assert set(e.lint()["unclosed_pairs"]) == {"a", "b"}
 
+    def test_body_link_to_missing_key_is_flagged(self, tmp_path: Path):
+        # Owner-decision 2026-08-16 (work_lint_prueft_prosa_links_nicht):
+        # a [[...]] in a work item's body must resolve to another work key —
+        # never a memory. This is the case that surfaced the whole record:
+        # a Prosa-[[...]] pointing at a memory read exactly like a dangling
+        # cross-record reference, but neither dangling_refs (structured
+        # fields only) nor memory.py's broken_links (memory tree only)
+        # ever checked it.
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01",
+               body="Siehe [[ghost_memory_or_typo]] fuer Kontext.")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["body_link_broken"] == {"a": ["ghost_memory_or_typo"]}
+
+    def test_body_link_to_existing_work_key_is_not_flagged(self, tmp_path: Path):
+        _write(tmp_path, "parent.md",
+               "key: parent\ntitle: P\nkind: goal\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01")
+        _write(tmp_path, "child.md",
+               "key: child\ntitle: C\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01",
+               body="Verwandt: [[parent]].")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["body_link_broken"] == {}
+
+    def test_body_without_links_is_not_flagged(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01",
+               body="Ganz normaler Text ohne jede Doppelklammer.")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["body_link_broken"] == {}
+
+    def test_body_link_self_reference_is_not_flagged(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01",
+               body="Dieser Eintrag verweist auf sich selbst: [[a]].")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["body_link_broken"] == {}
+
+    def test_body_link_padding_md_suffix_and_kebab_case_all_resolve(self, tmp_path: Path):
+        # Reviewer-fund (2026-08-16): the first cut compared raw match text
+        # against by_key and flagged all three of these as broken even
+        # though the target key genuinely exists — the same normalization
+        # memory.py applies (strip padding, drop `.md`, fold kebab->snake)
+        # must apply here too, via the now-shared core.norm_link.
+        _write(tmp_path, "target_key.md",
+               "key: target_key\ntitle: T\nkind: step\nstatus: open\n"
+               "theme: engine\nopened: 2026-07-01")
+        _write(tmp_path, "child.md",
+               "key: child\ntitle: C\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01",
+               body="[[ target_key ]] und [[target_key.md]] und [[target-key]].")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["body_link_broken"] == {}
+
 
 class TestKantenUndPlanPath:
     """Die zwei Pruefungen, die 2026-08-04 dazukamen — beide aus einem echten Fund.

@@ -28,11 +28,12 @@ from mcp_context_toolkit.core import (
     parse_frontmatter,
     prefix_slice,
 )
+from mcp_context_toolkit.core import LINK_RE as _LINK_RE
+from mcp_context_toolkit.core import norm_link as _norm_link
 
 MemoryType = Literal["user", "feedback", "project", "reference", "misc"]
 MemoryTier = Literal["core", "user", "project", "unknown"]
 
-_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _INDEX_REF_RE = re.compile(r"\(([A-Za-z0-9_./-]+\.md)\)")
 
 # Files that live in a memory dir but are not memory records themselves.
@@ -62,17 +63,6 @@ _W_NAME, _W_DESC, _W_TAGS, _W_BODY = 3.0, 2.0, 2.0, 1.0
 # match is weak (top itself is low) the relative floor keeps them all: the bar
 # is "comparatively a near-miss", not an absolute quality gate.
 _RECALL_FLOOR_RATIO = 0.25
-
-
-def _norm_link(target: str) -> str:
-    """Normalize a [[link]] target or memory name for resolution: drop a
-    trailing ``.md`` and fold kebab-case to snake_case. Bundling left links in
-    mixed styles (old prod kebab vs dev snake) all pointing at the same slug;
-    folding makes them resolve to one canonical form."""
-    target = target.strip()
-    if target.endswith(".md"):
-        target = target[:-3]
-    return target.replace("-", "_")
 
 
 class Memory(BaseModel):

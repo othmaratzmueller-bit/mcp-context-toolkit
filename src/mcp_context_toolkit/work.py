@@ -42,6 +42,8 @@ from mcp_context_toolkit.core import (
     iter_files,
     parse_frontmatter,
 )
+from mcp_context_toolkit.core import LINK_RE as _LINK_RE
+from mcp_context_toolkit.core import norm_link as _norm_link
 from mcp_context_toolkit.models import (
     WorkEdges, WorkEvidence, WorkItem, WorkStatus,
 )
@@ -64,6 +66,17 @@ _W_TITLE, _W_BODY = 3.0, 1.0
 # (anything sharing even one common word), which is unusable once a store
 # grows past a handful of items.
 _RECALL_FLOOR_RATIO = 0.25
+
+# `_LINK_RE`/`_norm_link` (imported from core.py above) parse a [[name]] in a
+# WORK item's prose exactly like memory.py's own links — same syntax, same
+# normalization (padding/`.md`-suffix/kebab-case). What differs is the
+# RESOLUTION target: a work-item [[name]] must resolve to a work KEY, never
+# to a memory name (Owner-decision 2026-08-16, work-record
+# work_lint_prueft_prosa_links_nicht — a Prosa-[[...]] pointing at a memory
+# read exactly like a dangling work reference and neither `dangling_refs`
+# above nor memory.py's `broken_links` ever checked it, because each store
+# only walks its own tree). A memory reference in work-item prose is written
+# out in plain text instead.
 
 
 def _meta_get(meta: dict, key: str):
@@ -486,6 +499,21 @@ class WorkEngine:
           dropped record silently corrupts closeable_goals/rollup above: a
           goal whose only still-open child failed to load looks fully
           closeable. See WorkEngine.errors / load_directory's docstring.
+        - body_link_broken: {key: [missing [[targets]]]} for `[[name]]`
+          references in the Markdown BODY that resolve to no work key.
+          `dangling_refs` above only walks the structured fields
+          (part_of/amends/supersedes/blocked_by); a `[[...]]` written into
+          the prose reads exactly like a cross-record reference but was
+          checked by nobody — not this lint's own structured-field pass, and
+          not memory.py's `broken_links` either (that walks the memory tree
+          only). Two real cases surfaced this (2026-08-15/16, work-record
+          `work_lint_prueft_prosa_links_nicht`): both were `[[name]]` links
+          that actually pointed at a MEMORY, not a work item. Owner decision
+          (2026-08-16): a work-item body `[[...]]` may only resolve to
+          another work key — a memory reference belongs in the prose as
+          plain text, never as `[[...]]`, so this check has no cross-store
+          case to special-case and simply treats every non-resolving link as
+          broken.
         """
         by_key = self._by_key()
         dangling: dict[str, list[str]] = {}
@@ -537,6 +565,26 @@ class WorkEngine:
             if i.status == "active" and i.kanten is None
         ]
 
+        # Same resolution as memory.py's broken_links: report the RAW
+        # matched text (so the record author sees exactly what they typed),
+        # but resolve through `_norm_link` (strips padding/`.md`, folds
+        # kebab->snake) so `[[ foo ]]`/`[[foo.md]]`/`[[foo-bar]]` all match
+        # an existing `foo`/`foo_bar` key. Reviewer-fund (2026-08-16): the
+        # first cut compared raw text and flagged those three spellings as
+        # broken even though the target key existed. Only the TARGET side is
+        # normalized, not `by_key` itself (memory.py normalizes both) — safe
+        # because WorkItem.key is schema-enforced to `^[a-z][a-z0-9_]*$`
+        # (models.py), so a key never carries the padding/`.md`/kebab-case
+        # that norm_link would need to fold; a memory NAME has no such
+        # constraint, which is why memory.py's own check normalizes both
+        # sides.
+        body_link_broken: dict[str, list[str]] = {}
+        for i in self._items:
+            targets = sorted(set(_LINK_RE.findall(i.body)))
+            missing = [t for t in targets if _norm_link(t) not in by_key]
+            if missing:
+                body_link_broken[i.key] = missing
+
         return {
             "total": len(self._items),
             "dangling_refs": dangling,
@@ -545,5 +593,6 @@ class WorkEngine:
             "unclosed_pairs": sorted(unclosed_pairs),
             "plan_path_broken": plan_path_broken,
             "reuse_ungeprueft": sorted(reuse_ungeprueft),
+            "body_link_broken": body_link_broken,
             "load_errors": list(self._errors),
         }

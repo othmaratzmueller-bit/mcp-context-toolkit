@@ -72,6 +72,31 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, body
 
 
+# ``[[name]]`` cross-references in a record's prose body — used by both
+# memory.py (links resolve to another memory) and work.py (links resolve to
+# another work key). Pulled here after they diverged: work.py originally
+# carried its own copy of just the regex without `norm_link`, so a padded
+# `[[ key ]]` or a `.md`-suffixed target resolved in memory bodies but not in
+# work bodies for the exact same input — two regexes that read identically
+# but behaved differently is precisely the drift `core.py` exists to prevent
+# (see the module docstring). Owner-decision 2026-08-16 (work-record
+# `work_lint_prueft_prosa_links_nicht`): a work-item body `[[...]]` may only
+# resolve to another WORK key, never a memory — so the two consumers share
+# the parsing/normalization, not the resolution target.
+LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
+def norm_link(target: str) -> str:
+    """Normalize a ``[[link]]`` target for resolution: drop a trailing
+    ``.md`` and fold kebab-case to snake_case, so links in mixed styles (old
+    prod kebab vs. dev snake, or a target typed with a `.md` suffix) all
+    resolve to the same canonical key."""
+    target = target.strip()
+    if target.endswith(".md"):
+        target = target[:-3]
+    return target.replace("-", "_")
+
+
 # ---------------------------------------------------------------------------
 # Store-directory conventions + discovery — shared between MCP server and CLI
 # ---------------------------------------------------------------------------
