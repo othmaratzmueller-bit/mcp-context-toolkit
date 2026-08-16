@@ -5,13 +5,14 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable
-from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 import yaml
 from pydantic import ValidationError
 
 from mcp_context_toolkit.models import Decision, Rule, RulePriority, RuleScope, RuleTier, RuleType
+
+from ._globs import compile_glob as _compile_glob
 
 _FINGERPRINT_EXCLUDE = {
     "source_path",
@@ -73,7 +74,7 @@ def fingerprint_rules(rules: list[Rule], decisions: list[Decision] | None = None
         # Nur key/status/title — eine Body-Aenderung ist keine neue Auskunft,
         # ein Status-Wechsel oder ein neuer Punkt schon.
         for w in sorted(arbeit, key=lambda x: x.key):
-            h.update(f"{w.key}\x1f{w.status}\x1f{w.title}".encode("utf-8"))
+            h.update(f"{w.key}\x1f{w.status}\x1f{w.title}".encode())
             h.update(b"|")
     return h.hexdigest()[:16]
 
@@ -91,44 +92,6 @@ def _erste_zeile(exc: BaseException) -> str:
     promise must not hang on every exception having something to say.
     """
     return (str(exc) or "-").splitlines()[0]
-
-
-@lru_cache(maxsize=512)
-def _compile_glob(pattern: str) -> re.Pattern[str]:
-    """Compile a glob pattern with '**' support to a regex.
-
-    Semantics match pathlib PurePosixPath.match for '**' recursive matching
-    and '*' single-segment matching. '?' matches a single non-'/' character.
-    """
-    i = 0
-    n = len(pattern)
-    out: list[str] = ["^"]
-    while i < n:
-        c = pattern[i]
-        if c == "*":
-            if i + 1 < n and pattern[i + 1] == "*":
-                j = i + 2
-                if j < n and pattern[j] == "/":
-                    out.append("(?:.*/)?")
-                    i = j + 1
-                    continue
-                out.append(".*")
-                i = j
-                continue
-            out.append("[^/]*")
-            i += 1
-            continue
-        if c == "?":
-            out.append("[^/]")
-            i += 1
-            continue
-        if c in ".+()|^$[]{}\\":
-            out.append("\\" + c)
-        else:
-            out.append(c)
-        i += 1
-    out.append("$")
-    return re.compile("".join(out))
 
 
 class RuleLoadError(Exception):
