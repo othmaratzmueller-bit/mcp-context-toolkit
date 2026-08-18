@@ -590,12 +590,20 @@ def build_server(
             theme: str | None = None,
             status: str | None = None,
             kind: str | None = None,
+            include_archived: bool = False,
         ) -> str:
             """List work items, optionally filtered by theme/status/kind.
+            Default view is the LIVE backlog — `done`/`dropped`/`superseded`
+            are excluded unless `status` names one of them explicitly or
+            `include_archived=True` is passed (closed items are never
+            deleted, just hidden from the default "what's open" view).
             Each row includes an x/y rollup when the item has children —
             computed on the fly, never a maintained field."""
             engine = work_reloader.current()
-            items = engine.list(theme=theme, status=status, kind=kind)
+            items = engine.list(
+                theme=theme, status=status, kind=kind,
+                include_archived=include_archived,
+            )
             out = []
             for w in items:
                 row = _work_summary(w)

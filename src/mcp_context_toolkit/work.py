@@ -365,12 +365,22 @@ class WorkEngine:
         theme: str | None = None,
         status: str | None = None,
         kind: str | None = None,
+        include_archived: bool = False,
     ) -> list[WorkItem]:
+        """Default view is the LIVE backlog — `done`/`dropped`/`superseded`
+        (`_CLOSED_STATUSES`) are excluded unless `status` names one of them
+        explicitly or `include_archived=True` is passed. Closed items are
+        never deleted or moved (see module docstring — this engine never
+        writes); they stay findable via an explicit `status=` filter or
+        `include_archived=True`, just not in the "what's open" default that
+        callers reach for most often."""
         result = self._items
         if theme is not None:
             result = [i for i in result if i.theme == theme]
         if status is not None:
             result = [i for i in result if i.status == status]
+        elif not include_archived:
+            result = [i for i in result if i.status not in _CLOSED_STATUSES]
         if kind is not None:
             result = [i for i in result if i.kind == kind]
         return sorted(result, key=lambda i: i.key)

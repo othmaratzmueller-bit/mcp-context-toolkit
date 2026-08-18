@@ -100,6 +100,47 @@ class TestLoading:
         assert e.get("some_filename") is None
 
 
+class TestArchivedFiltering:
+    def _five_statuses(self, tmp_path: Path):
+        for i, status in enumerate(["open", "active", "done", "dropped", "superseded"]):
+            closed = "\nclosed: 2026-07-10" if status in ("done", "dropped", "superseded") else ""
+            evidence = "\nevidence: {commits: [c1]}" if status == "done" else ""
+            _write(tmp_path, f"i{i}.md",
+                   f"key: i{i}\ntitle: I{i}\nkind: step\nstatus: {status}\n"
+                   f"theme: engine\nopened: 2026-07-01{closed}{evidence}")
+        return WorkEngine.from_directory(tmp_path)
+
+    def test_default_view_excludes_closed_statuses(self, tmp_path: Path):
+        # Owner 2026-08-18: "wenn ich frage was im work steht, wir NUR die
+        # anzeigen sollten, die offen sind ... der Rest ist als Archiv
+        # durchaus brauchbar" — closed items stay on disk, they just don't
+        # clutter the default "what's open" view.
+        e = self._five_statuses(tmp_path)
+        assert sorted(i.key for i in e.list()) == ["i0", "i1"]
+
+    def test_explicit_status_still_finds_a_closed_item(self, tmp_path: Path):
+        # The archive is not hidden, just not the DEFAULT — an explicit
+        # status= filter must still reach done/dropped/superseded.
+        e = self._five_statuses(tmp_path)
+        assert [i.key for i in e.list(status="done")] == ["i2"]
+        assert [i.key for i in e.list(status="dropped")] == ["i3"]
+        assert [i.key for i in e.list(status="superseded")] == ["i4"]
+
+    def test_include_archived_returns_everything(self, tmp_path: Path):
+        e = self._five_statuses(tmp_path)
+        assert sorted(i.key for i in e.list(include_archived=True)) == \
+            ["i0", "i1", "i2", "i3", "i4"]
+
+    def test_theme_filter_still_combines_with_the_new_default(self, tmp_path: Path):
+        # Guards against the default-exclusion silently swallowing an
+        # unrelated filter instead of composing with it.
+        _write(tmp_path, "other.md",
+               "key: other\ntitle: O\nkind: step\nstatus: open\n"
+               "theme: chat\nopened: 2026-07-01")
+        e = self._five_statuses(tmp_path)
+        assert [i.key for i in e.list(theme="engine")] == ["i0", "i1"]
+
+
 class TestHierarchyAndRollup:
     def _goal_with_children(self, tmp_path: Path, child_statuses: list[str]):
         _write(tmp_path, "goal.md",
