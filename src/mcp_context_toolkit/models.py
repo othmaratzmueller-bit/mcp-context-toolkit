@@ -166,7 +166,7 @@ class Decision(_StrengesModell):
 # ~70% prose by line count, unlike Rules/Decisions which are mostly structure.
 # ---------------------------------------------------------------------------
 
-WorkKind = Literal["goal", "step", "note"]
+WorkKind = Literal["goal", "step", "note", "decision", "changelog"]
 WorkStatus = Literal["open", "active", "done", "dropped", "superseded"]
 
 # Closed vocabulary on purpose (see the Memory `type: package` lesson: 73 of
@@ -265,6 +265,15 @@ class WorkItem(BaseModel):
     # Reuse-Suche VOR dem Bauen. None = nie gesucht (siehe WorkEdges).
     kanten: WorkEdges | None = None
     plan_path: str | None = None    # the pre-existing plan file this was cut from, if any
+
+    # Beide Felder HUMAN-ONLY: nur der Owner setzt sie, nie ein Agent (talos-
+    # plan-keeper, talos-work-migrator) — ein Agent, der sich selbst von einer
+    # Owner-Pflicht befreien koennte, waere derselbe Fehler wie ein Zyklus, der
+    # `suppressions.md` schreiben darf. Ersetzt/ergaenzt die bisherige Textsuche
+    # in `scripts/naechste_arbeit.py` (BRAUCHT_MENSCHEN/PLAN_VORBEHALT_AUFGEHOBEN)
+    # nur fuer NEUE Records — der Altbestand bleibt bei der Textsuche.
+    braucht_owner: bool = False
+    entblockt_durch: str | None = None  # Key des Records/der Entscheidung, die einen Plan-Vorbehalt aufhebt
 
     body: str = ""
     source_path: str | None = None

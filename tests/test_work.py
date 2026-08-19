@@ -100,6 +100,83 @@ class TestLoading:
         assert e.get("some_filename") is None
 
 
+class TestWorkItemFrontmatterStrenge:
+    """Etappe B (2026-08-19) — dieselbe Bauart wie der `kanten`-Zweig, eine
+    Ebene hoeher: der Loader liest WorkItem-Felder NAMENTLICH, `extra="forbid"`
+    am Model waere hier wirkungslos. Vorab gemessen (0 Treffer ueber ~1900
+    Records): `source_path` steht bei 89 Alt-Records im Frontmatter (redundant,
+    wird immer aus dem echten Pfad ueberschrieben) — die Pruefung darf das
+    NICHT als unbekannt werten, sonst bricht der Bestand beim naechsten Start."""
+
+    def test_unbekanntes_top_level_feld_ist_ein_fehler(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nstatus_hinweis: das Feld gab es nie")
+        engine = WorkEngine()
+        engine.load_directory(tmp_path, strict=False)
+        assert engine.get("a") is None
+        assert any("status_hinweis" in e for e in engine.errors), engine.errors
+
+    def test_source_path_im_frontmatter_ist_kein_fehler(self, tmp_path: Path):
+        """Regressionsschutz fuer den Vorab-Befund: 89 Records tragen ein
+        redundantes `source_path:`, das der Loader ohnehin immer mit dem
+        echten Pfad ueberschreibt — kein Informationsverlust, kein Grund zu
+        werfen."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nsource_path: irgendein/alter/pfad.md")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.get("a") is not None
+        assert e.get("a").source_path == str(tmp_path / "a.md")
+
+    def test_braucht_owner_default_ist_false(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        assert WorkEngine.from_directory(tmp_path).get("a").braucht_owner is False
+
+    def test_braucht_owner_wird_gelesen(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nbraucht_owner: true")
+        assert WorkEngine.from_directory(tmp_path).get("a").braucht_owner is True
+
+    def test_entblockt_durch_wird_gelesen(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nentblockt_durch: eine_andere_entscheidung")
+        item = WorkEngine.from_directory(tmp_path).get("a")
+        assert item.entblockt_durch == "eine_andere_entscheidung"
+
+    def test_entblockt_durch_default_ist_none(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        assert WorkEngine.from_directory(tmp_path).get("a").entblockt_durch is None
+
+    @pytest.mark.parametrize("kind", ["decision", "changelog"])
+    def test_neue_kinds_werden_geladen(self, tmp_path: Path, kind: str):
+        _write(tmp_path, "a.md",
+               f"key: a\ntitle: A\nkind: {kind}\nstatus: done\ntheme: engine\n"
+               "opened: 2026-01-01\nclosed: 2026-01-01\n"
+               "evidence: {files: [x.md]}")
+        assert WorkEngine.from_directory(tmp_path).get("a").kind == kind
+
+    def test_body_im_frontmatter_ist_ein_fehler(self, tmp_path: Path):
+        """W8-Reviewer-Fund WARNING-3: `body` gehoert zu `WorkItem.model_fields`,
+        darf aber NICHT in der Allow-List stehen — anders als `source_path`
+        waere ein Frontmatter-`body:` kein folgenloses Echo, sondern ERSETZTE
+        den echten Markdown-Inhalt lautlos (die 108-Dateien-Klasse aus
+        v1.4.314: `body: |` als YAML-Key statt als Text nach `---`)."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nbody: 'im Frontmatter, nicht als Markdown'")
+        engine = WorkEngine()
+        engine.load_directory(tmp_path, strict=False)
+        assert engine.get("a") is None
+        assert any("body" in e for e in engine.errors), engine.errors
+
+
 class TestArchivedFiltering:
     def _five_statuses(self, tmp_path: Path):
         for i, status in enumerate(["open", "active", "done", "dropped", "superseded"]):
@@ -505,6 +582,37 @@ class TestKantenUndPlanPath:
                "key: aktiv\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
                "opened: 2026-01-01")
         assert WorkEngine.from_directory(tmp_path).lint()["reuse_ungeprueft"] == ["aktiv"]
+
+    @pytest.mark.parametrize("kind", ["decision", "changelog"])
+    def test_reuse_ungeprueft_nimmt_decision_und_changelog_aus(self, tmp_path: Path, kind: str):
+        """W8-Reviewer-Fund WARNING-4: `kanten` ist ein VORWAERTS-Feld — eine
+        migrierte historische Tatsache hat vor ihrem eigenen Entstehen nichts
+        gesucht. Ohne diese Ausnahme widerspraeche der Engine-Lint der in
+        talos-plan-keeper.md dokumentierten Gate-Ausnahme."""
+        _write(tmp_path, "a.md",
+               f"key: a\ntitle: A\nkind: {kind}\nstatus: active\ntheme: engine\n"
+               "opened: 2026-01-01")
+        assert WorkEngine.from_directory(tmp_path).lint()["reuse_ungeprueft"] == []
+
+    def test_entblockt_durch_auf_unbekannten_key_wird_gemeldet(self, tmp_path: Path):
+        """W8-Reviewer-Fund WARNING-2: ohne diese Pruefung hebt jeder truthy
+        String — auch ein Tippfehler — einen Owner-Vorbehalt lautlos auf."""
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nentblockt_durch: gibt_es_nicht")
+        assert WorkEngine.from_directory(tmp_path).lint()["dangling_refs"] == \
+            {"a": ["gibt_es_nicht"]}
+
+    def test_entblockt_durch_auf_existierenden_key_ist_ok(self, tmp_path: Path):
+        _write(tmp_path, "entscheidung.md",
+               "key: entscheidung\ntitle: E\nkind: step\nstatus: done\n"
+               "theme: engine\nopened: 2026-01-01\nclosed: 2026-01-02\n"
+               "evidence: {files: [x.md]}")
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\nplan_path: irgendwas.md\n"
+               "entblockt_durch: entscheidung")
+        assert WorkEngine.from_directory(tmp_path).lint()["dangling_refs"] == {}
 
 
 class TestZustellungFuerDatei:

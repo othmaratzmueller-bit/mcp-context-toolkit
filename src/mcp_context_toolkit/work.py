@@ -145,6 +145,33 @@ def _parse_work_item(path: Path) -> WorkItem:
         raise KnowledgeLoadError(path, f"read failed: {e}") from e
     meta, body = parse_frontmatter(text)
 
+    # Unbekannte Top-Level-Schluessel LAUT machen — dieselbe Bauart wie der
+    # kanten-Zweig unten, eine Ebene hoeher. Der Loader liest die WorkItem-
+    # Felder NAMENTLICH auf; ein `extra="forbid"` am Model wuerde hier NICHT
+    # greifen, weil Unbekanntes das Model nie erreicht. Ohne diese Pruefung
+    # verschwindet ein vertippter oder erfundener Schluessel spurlos — genau
+    # der Fund von 2026-08-11 (`status_hinweis:` auf WorkItem-Ebene, kein
+    # Fehler, kein Lint-Treffer, das Feld war einfach weg). `source_path`
+    # gehoert zu `WorkItem.model_fields`, wird aber nie aus dem Frontmatter
+    # gelesen (immer der echte Pfad) — als Frontmatter-Schluessel erlaubt
+    # (89 Alt-Records tragen ein redundantes, wirkungsloses `source_path:`),
+    # nur eben folgenlos. `body` dagegen NICHT erlaubt, trotz gleicher
+    # Modellzugehoerigkeit: ein Frontmatter-`body:` waere kein Echo des
+    # echten Inhalts wie bei `source_path`, sondern ERSETZTE ihn lautlos —
+    # exakt die 108-Dateien-Klasse aus v1.4.314 (`body: |` als YAML-Key
+    # statt als Markdown-Text nach dem schliessenden `---`, W8-Reviewer-Fund).
+    # `metadata` ist der Container fuer den zweiten Frontmatter-Stil (siehe
+    # `_meta_get`), kein WorkItem-Feld.
+    erlaubt_top = (set(WorkItem.model_fields) - {"body"}) | {"metadata"}
+    unbekannt_top = sorted(set(meta) - erlaubt_top)
+    if unbekannt_top:
+        raise KnowledgeLoadError(
+            path,
+            f"unbekannte Schluessel im Frontmatter: {', '.join(unbekannt_top)} — "
+            f"erlaubt sind {', '.join(sorted(erlaubt_top))}. "
+            f"Ein unbekannter Schluessel wird sonst still verworfen."
+        )
+
     evidence_raw = _meta_get(meta, "evidence") or {}
     if not isinstance(evidence_raw, dict):
         evidence_raw = {}
@@ -187,18 +214,33 @@ def _parse_work_item(path: Path) -> WorkItem:
         )
         kanten = kandidat if kandidat.gesucht_worden() else None
 
+    # `theme`/`opened` haben (anders als `kind`/`status`) kein `or`-Fallback —
+    # ohne diese zwei Schranken bleibt ihr Typ fuer Pyright `Unknown | None`
+    # (aus `_meta_get`s letztem Zweig `return None`), obwohl beide Felder am
+    # Model REQUIRED sind. Die Schranken narrowen den Typ UND liefern eine
+    # klarere Meldung als Pydantics generische ValidationError fuer ein
+    # fehlendes Pflichtfeld (Q12-Naehe: in derselben Funktion angefasst).
+    theme_wert = _meta_get(meta, "theme")
+    if theme_wert is None:
+        raise KnowledgeLoadError(path, "`theme` fehlt")
+    opened_wert = _meta_get(meta, "opened")
+    if opened_wert is None:
+        raise KnowledgeLoadError(path, "`opened` fehlt")
+
     try:
         return WorkItem(
             key=str(_meta_get(meta, "key") or path.stem),
             title=str(_meta_get(meta, "title") or "").strip(),
             kind=_meta_get(meta, "kind") or "goal",
             status=_meta_get(meta, "status") or "open",
-            theme=_meta_get(meta, "theme"),
-            opened=_meta_get(meta, "opened"),
+            theme=theme_wert,
+            opened=opened_wert,
             closed=_meta_get(meta, "closed"),
             part_of=_meta_get(meta, "part_of"),
             amends=_meta_get(meta, "amends"),
             supersedes=_meta_get(meta, "supersedes"),
+            braucht_owner=bool(_meta_get(meta, "braucht_owner") or False),
+            entblockt_durch=_meta_get(meta, "entblockt_durch"),
             # Auch hier `_als_liste`: `evidence: commits: abc123` (ohne `- `)
             # wuerde sonst zu sechs Buchstaben und `missing_evidence`
             # faelschlich befriedigen — dieselbe Klasse wie bei `kanten`, nur
@@ -484,7 +526,8 @@ class WorkEngine:
         zolltarif-live-test-politur case sat un-actioned since 2026-07-02).
 
         - dangling_refs: {key: [missing target keys]} for part_of/amends/
-          supersedes/blocked_by pointing at a key that does not exist.
+          supersedes/blocked_by/entblockt_durch pointing at a key that does
+          not exist.
         - closeable_goals: goal keys whose children are ALL done/dropped/
           superseded but the goal itself is still open/active — the exact
           "empfohlen zu schliessen, niemand tat es" failure mode.
@@ -501,9 +544,12 @@ class WorkEngine:
           path is a different kind of reference and simply had no checker.
         - reuse_ungeprueft: keys with status=active that carry no `kanten`
           block — work that is being done RIGHT NOW without a recorded
-          reuse search. Only `active`, not `open`: an open item has not
-          reached the moment where the question changes anything, and listing
-          all 878 open items would drown the ones that matter.
+          reuse search. Excludes kind decision/changelog (Etappe B):
+          `kanten` is a FORWARD field, a migrated historical fact never
+          searched before its own existence. Only `active`, not `open`: an
+          open item has not reached the moment where the question changes
+          anything, and listing all 878 open items would drown the ones
+          that matter.
         - load_errors: files skipped at the last load (invalid schema,
           duplicate key) — surfaced here, not just at startup, because a
           dropped record silently corrupts closeable_goals/rollup above: a
@@ -528,8 +574,14 @@ class WorkEngine:
         by_key = self._by_key()
         dangling: dict[str, list[str]] = {}
         for i in self._items:
+            # `entblockt_durch` gehoert hier dazu (Etappe B, W8-Reviewer-Fund
+            # WARNING-2): es ist der Key eines Records, der einen
+            # `plan_vorbehalt` aufhebt (siehe scripts/naechste_arbeit.py) —
+            # ohne diese Pruefung hebt JEDER truthy String, auch ein
+            # Tippfehler, den Owner-Riegel lautlos auf. Dieselbe Fehlerklasse,
+            # fuer die `plan_path_broken` unten gebaut wurde.
             missing = [
-                ref for ref in (i.part_of, i.amends, i.supersedes)
+                ref for ref in (i.part_of, i.amends, i.supersedes, i.entblockt_durch)
                 if ref and ref not in by_key
             ]
             missing += [b for b in i.blocked_by if b not in by_key]
@@ -570,9 +622,16 @@ class WorkEngine:
                 if i.plan_path and not (projekt / i.plan_path).is_file():
                     plan_path_broken[i.key] = i.plan_path
 
+        # `decision`/`changelog` ausgenommen (Etappe B, W8-Reviewer-Fund
+        # WARNING-4): `kanten` ist ein VORWAERTS-Feld, eine migrierte
+        # historische Tatsache hat vor ihrem eigenen Entstehen nichts gesucht.
+        # Dieselbe Ausnahme steht bereits in talos-plan-keeper.md (13e) — ohne
+        # sie widersprechen sich Doku und Engine-Lint ab dem ersten
+        # migrierten Record (Etappe C).
         reuse_ungeprueft = [
             i.key for i in self._items
             if i.status == "active" and i.kanten is None
+            and i.kind not in ("decision", "changelog")
         ]
 
         # Same resolution as memory.py's broken_links: report the RAW
