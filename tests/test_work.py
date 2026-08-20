@@ -154,6 +154,21 @@ class TestWorkItemFrontmatterStrenge:
                "opened: 2026-01-01")
         assert WorkEngine.from_directory(tmp_path).get("a").entblockt_durch is None
 
+    def test_aus_migration_default_ist_false(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        assert WorkEngine.from_directory(tmp_path).get("a").aus_migration is False
+
+    def test_aus_migration_wird_gelesen(self, tmp_path: Path):
+        # Work-Record work_migrator_opened_stempel_traegt_das_gate: macht
+        # das plan-keeper-Reuse-Gate robust gegen die bisher unausgesprochene
+        # `opened`-Konvention, statt sich allein auf sie zu verlassen.
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\naus_migration: true")
+        assert WorkEngine.from_directory(tmp_path).get("a").aus_migration is True
+
     @pytest.mark.parametrize("kind", ["decision", "changelog"])
     def test_neue_kinds_werden_geladen(self, tmp_path: Path, kind: str):
         _write(tmp_path, "a.md",
@@ -382,6 +397,74 @@ class TestLint:
                body="[[ target_key ]] und [[target_key.md]] und [[target-key]].")
         e = WorkEngine.from_directory(tmp_path)
         assert e.lint()["body_link_broken"] == {}
+
+    @pytest.mark.parametrize("kind", ["decision", "changelog"])
+    def test_body_link_broken_excludes_decision_and_changelog(self, tmp_path: Path, kind: str):
+        # Etappe E: a migrated changelog card's VERBATIM body can contain an
+        # incidental "[[TALOS_THOUGHT]]"-style placeholder mention that reads
+        # like a cross-record link but is prose about code, not a real one.
+        _write(tmp_path, "a.md",
+               f"key: a\ntitle: A\nkind: {kind}\nstatus: done\ntheme: engine\n"
+               "opened: 2026-01-01\nclosed: 2026-01-01",
+               body="Placeholder [[TALOS_THOUGHT]] wird eingesetzt.")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["body_link_broken"] == {}
+
+    def test_kanten_gebrochen_is_none_without_symbol_check(self, tmp_path: Path):
+        # Not run vs. run-and-clean must stay distinguishable (Work-Record
+        # work_kanten_ohne_ankerpruefung) — the default, cheap lint() call
+        # never triggers the injected check.
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01\nkanten:\n  gesucht:\n    - x\n"
+               "  nutzt:\n    - services/foo.py::bar")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["kanten_gebrochen"] is None
+
+    def test_kanten_gebrochen_reports_only_unhealthy_states(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01\nkanten:\n  gesucht:\n    - x\n"
+               "  nutzt:\n    - ok.py::vorhanden\n  erweitert:\n    - weg.py::verschwunden\n"
+               "  baut:\n    - neu.py::kommt_noch\n  modul:\n    - ein_modul")
+
+        def check(typ: str, ziel: str) -> tuple:
+            werte = {
+                ("nutzt", "ok.py::vorhanden"): ("ok", None),
+                ("erweitert", "weg.py::verschwunden"): ("gebrochen", "weg"),
+                ("baut", "neu.py::kommt_noch"): ("geplant", None),
+                ("modul", "ein_modul"): ("ok", None),
+            }
+            return werte[(typ, ziel)]
+
+        e = WorkEngine.from_directory(tmp_path)
+        kg = e.lint(check)["kanten_gebrochen"]
+        # ok + geplant sind gesund und fehlen; nur gebrochen erscheint.
+        assert kg == {"a": [{"typ": "erweitert", "ziel": "weg.py::verschwunden",
+                              "zustand": "gebrochen", "hinweis": "weg"}]}
+
+    def test_kanten_gebrochen_never_calls_check_for_gesucht(self, tmp_path: Path):
+        # `gesucht` entries are search terms, not anchors, and cannot "break".
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01\nkanten:\n  gesucht:\n    - 'anonymize PII'")
+        gesehen = []
+
+        def check(typ: str, ziel: str) -> tuple:
+            gesehen.append((typ, ziel))
+            return "ok", None
+
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint(check)["kanten_gebrochen"] == {}
+        assert gesehen == []
+
+    def test_kanten_gebrochen_empty_dict_when_run_and_clean(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01\nkanten:\n  gesucht:\n    - x\n"
+               "  nutzt:\n    - services/foo.py::bar")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint(lambda _typ, _ziel: ("ok", None))["kanten_gebrochen"] == {}
 
 
 class TestKantenUndPlanPath:

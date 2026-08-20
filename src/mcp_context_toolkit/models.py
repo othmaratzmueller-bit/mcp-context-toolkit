@@ -266,5 +266,19 @@ class WorkItem(BaseModel):
     braucht_owner: bool = False
     entblockt_durch: str | None = None  # Key des Records/der Entscheidung, die einen Plan-Vorbehalt aufhebt
 
+    # Vom Migrator gesetzt, nie vom Owner erwartet (anders als die zwei Felder
+    # oben): macht das plan-keeper-Reuse-Gate (13e, `opened >= 2026-08-04`)
+    # robust GEGEN die Konvention, auf der es bisher allein ruhte — `opened`
+    # traegt bei einem migrierten Record das Datum der URSPRUENGLICHEN Idee,
+    # nicht des Migrationslaufs, und nur DESHALB faellt der Altbestand unter
+    # die Grenze. Kippte ein kuenftiger Migrator diese unausgesprochene
+    # Konvention (stempelte `opened` mit dem Lauf-Datum), waeren alle
+    # migrierten Records ploetzlich UEBER der Grenze — das Gate wuerde genau
+    # die Records blockieren, fuer deren Freigabe es gebaut wurde, und zwar
+    # STILL: kein Fehler, kein Lint-Treffer (Work-Record `work_migrator_
+    # opened_stempel_traegt_das_gate`, Reviewer-Beobachtung 2026-08-05). Das
+    # Gate prueft seither BEIDE: `opened < 2026-08-04 ODER aus_migration`.
+    aus_migration: bool = False
+
     body: str = ""
     source_path: str | None = None

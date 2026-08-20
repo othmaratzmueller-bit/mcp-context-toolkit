@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,69 @@ def _discover_wissen() -> "capability.CapabilityQuelle | None":
                 return None
             return capability.CapabilityQuelle(candidate, index, zerlege, bauer)
     return None
+
+
+def _kanten_check_factory(work_dir: Path) -> Callable[[str, str], tuple[str, str | None]] | None:
+    """Build the `symbol_check` closure `WorkEngine.lint()` needs for
+    `kanten_gebrochen` (Work-Record `work_kanten_ohne_ankerpruefung`).
+
+    Same file-import shape as `_discover_wissen` above: this engine stays
+    project-agnostic (no `scripts/`, no TALOS knowledge), so the actual
+    anchor lookup is TALOS-side code, loaded by path, never a package
+    import. `scripts/plan_graph.py::_zustand`/`_modul_vorhanden` already
+    solve exactly this (S8) — reused here, not reimplemented; the ~1.7s
+    tree-scan (`symbol_inventory.bestand`, which `plan_graph` imports
+    itself) only runs when a caller opts in (`work_lint(check_symbols=True)`),
+    never on the default, cheap path.
+
+    None if `scripts/plan_graph.py` does not exist (generic-engine use
+    outside TALOS, or a project that has not built it) or fails to import —
+    a missing symbol-checker degrades to `kanten_gebrochen: None`, not a
+    crash.
+    """
+    projekt = work_dir.resolve().parent.parent
+    plan_graph_pfad = projekt / "scripts" / "plan_graph.py"
+    if not plan_graph_pfad.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("_talos_plan_graph", plan_graph_pfad)
+    if spec is None or spec.loader is None:
+        return None
+    modul = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(modul)
+        best = modul.bestand(modul.SCAN_WURZELN, str(projekt))
+        namen = modul.nach_namen(best)
+    except Exception as e:
+        # Degrade loud (W4-Klasse, W8-Reviewer-Fund WARNING-3): anders als
+        # das fehlende `plan_graph.py` oben (normaler Fall ausserhalb TALOS)
+        # ist das hier ein Bruch in vorhandenem Code — ein ausdruecklicher
+        # `check_symbols=True`-Aufruf soll nicht still im selben `None`
+        # landen wie der billige Default-Pfad, der nie danach gefragt hat.
+        print(f"[context-toolkit] kanten_gebrochen-Checker fehlgeschlagen "
+              f"({plan_graph_pfad}): {e}", file=sys.stderr)
+        return None
+
+    def symbol_check(typ: str, ziel: str) -> tuple[str, str | None]:
+        if typ == "modul":
+            # Gespiegelt von plan_graph.py:241 (W8-Reviewer-Fund ERROR-1,
+            # Etappe E): "kein Verzeichnis dieses Namens" ist bei `modul` der
+            # NORMALZUSTAND vor dem Bau, nicht anders als bei `baut` — nicht
+            # "gebrochen". Der urspruengliche Zweig hier wich davon ab und
+            # meldete jedes noch nicht angelegte Modul-Verzeichnis als Bruch;
+            # gemessen 17/17 Falschmeldungen gegen den echten Bestand, 14
+            # davon sogar auf einem existierenden Pfad (Work-Store-`modul:`-
+            # Werte sind haeufig Datei- oder `datei::symbol`-Anker, keine
+            # reinen Verzeichnisnamen — `_modul_vorhanden` prueft nur
+            # Verzeichnisse, kann so einen echten Pfad nie als vorhanden
+            # erkennen). "gebrochen" bleibt hier absichtlich unerreichbar:
+            # ein Modul-Anker kann laut Quelle nicht "existieren, aber falsch
+            # benannt" sein wie ein Symbol-Anker — nur da oder noch nicht da.
+            if modul._modul_vorhanden(ziel, str(projekt)):
+                return "ok", None
+            return "geplant", None
+        return modul._zustand(typ, ziel, best, namen)
+
+    return symbol_check
 
 
 def _optional_dir(env_name: str) -> Path | None:
@@ -192,6 +256,7 @@ def build_server(
     usage: UsageStore | None = None,
     work_reloader: _Reloader | None = None,
     wissen: capability.CapabilityQuelle | None = None,
+    work_dir: Path | None = None,
 ):
     from mcp.server.fastmcp import FastMCP
 
@@ -638,14 +703,25 @@ def build_server(
             )
 
         @_tool("work")
-        def work_lint() -> str:
+        def work_lint(check_symbols: bool = False) -> str:
             """Hygiene report over the work store: dangling part_of/amends/
             supersedes/blocked_by references, goals whose children are ALL
             closed but the goal itself is not (the exact "recommended closing
             it, nobody did" failure mode this store was built to catch),
-            done items with no evidence, and half-closed status/date pairs."""
+            done items with no evidence, and half-closed status/date pairs.
+
+            `check_symbols=True` additionally resolves every `nutzt`/
+            `erweitert`/`baut`/`modul` anchor against the real symbol tree
+            (`kanten_gebrochen` in the result) — off by default because it
+            costs a full tree scan (~1.7s measured); ask for it explicitly
+            when you actually need to know whether recorded anchors still
+            hold, not on every routine lint call."""
+            symbol_check = (
+                _kanten_check_factory(work_dir)
+                if check_symbols and work_dir is not None else None
+            )
             return json.dumps(
-                work_reloader.current().lint(), indent=2, ensure_ascii=False
+                work_reloader.current().lint(symbol_check), indent=2, ensure_ascii=False
             )
 
         @_tool("work")
@@ -985,7 +1061,7 @@ def main() -> None:
     # registration, so the figure can never drift from what is actually served.
     wissen = _discover_wissen()
     server = build_server(rules_reloader, memory_reloader, usage,
-                          work_reloader, wissen)
+                          work_reloader, wissen, work_dir)
     _print_banner(
         engine, memory_engine,
         getattr(server, "context_toolkit_inventory", None), work_engine,

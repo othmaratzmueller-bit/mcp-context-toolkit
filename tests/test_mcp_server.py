@@ -173,6 +173,122 @@ class TestToolInventory:
         assert "Tools" not in capsys.readouterr().err
 
 
+def _write_fake_plan_graph(tmp_path: Path) -> None:
+    """Minimal stand-in for `scripts/plan_graph.py` — just enough surface
+    (`SCAN_WURZELN`/`bestand`/`nach_namen`/`_zustand`/`_modul_vorhanden`) for
+    `_kanten_check_factory` to import and drive, without depending on the
+    real repo's script or its ~1.7s tree scan."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "plan_graph.py").write_text(
+        '''
+SCAN_WURZELN = ("modules",)
+
+def bestand(wurzeln, projekt_dir="."):
+    return {"modules/real.py": [{"name": "vorhanden"}]}
+
+def nach_namen(best):
+    return {"vorhanden": [{"pfad": "modules/real.py"}]}
+
+def _zustand(typ, ziel, best, namen):
+    pfad, _, symbol = ziel.partition("::")
+    if any(s["name"] == symbol for s in best.get(pfad, ())):
+        return "ok", None
+    return "gebrochen", "Symbol existiert nirgends im Baum"
+
+def _modul_vorhanden(name, projekt):
+    import os
+    return os.path.isdir(os.path.join(projekt, "modules", name))
+''',
+        encoding="utf-8",
+    )
+
+
+class TestKantenCheckFactory:
+    """W8-Reviewer-Fund ERROR-1 (Etappe E): der `modul`-Zweig meldete jedes
+    noch nicht angelegte Modul-Verzeichnis als "gebrochen" statt "geplant"
+    (der Normalzustand vor dem Bau, wie bei `baut`) — 17/17 Falschmeldungen
+    gegen den echten Bestand. `_kanten_check_factory` hatte davor NULL
+    Testabdeckung (WARNING-2 derselben Runde): alle `kanten_gebrochen`-Tests
+    in `test_work.py` stubben den Checker, der echte `modul`-Zweig lief nie."""
+
+    def test_modul_ohne_verzeichnis_ist_geplant_nicht_gebrochen(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _kanten_check_factory
+
+        _write_fake_plan_graph(tmp_path)
+        work_dir = tmp_path / ".claude" / "work"
+        work_dir.mkdir(parents=True)
+        check = _kanten_check_factory(work_dir)
+        assert check is not None
+        assert check("modul", "noch_nicht_gebaut") == ("geplant", None)
+
+    def test_modul_mit_verzeichnis_ist_ok(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _kanten_check_factory
+
+        _write_fake_plan_graph(tmp_path)
+        (tmp_path / "modules" / "vorhanden").mkdir(parents=True)
+        work_dir = tmp_path / ".claude" / "work"
+        work_dir.mkdir(parents=True)
+        check = _kanten_check_factory(work_dir)
+        assert check is not None
+        assert check("modul", "vorhanden") == ("ok", None)
+
+    def test_nicht_modul_typen_delegieren_an_zustand(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _kanten_check_factory
+
+        _write_fake_plan_graph(tmp_path)
+        work_dir = tmp_path / ".claude" / "work"
+        work_dir.mkdir(parents=True)
+        check = _kanten_check_factory(work_dir)
+        assert check is not None
+        assert check("nutzt", "modules/real.py::vorhanden") == ("ok", None)
+        assert check("nutzt", "modules/real.py::weg") == (
+            "gebrochen", "Symbol existiert nirgends im Baum")
+
+    def test_fehlendes_plan_graph_gibt_none_zurueck(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _kanten_check_factory
+
+        work_dir = tmp_path / ".claude" / "work"
+        work_dir.mkdir(parents=True)
+        assert _kanten_check_factory(work_dir) is None
+
+    def test_kaputtes_plan_graph_degradiert_laut_auf_stderr(self, tmp_path: Path, capsys):
+        # WARNING-3: ein ausdrueckliches check_symbols=True darf nicht still
+        # im selben None wie der Default-Pfad landen.
+        from mcp_context_toolkit.mcp_server import _kanten_check_factory
+
+        scripts = tmp_path / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "plan_graph.py").write_text("raise RuntimeError('kaputt')\n", encoding="utf-8")
+        work_dir = tmp_path / ".claude" / "work"
+        work_dir.mkdir(parents=True)
+        assert _kanten_check_factory(work_dir) is None
+        assert "kaputt" in capsys.readouterr().err
+
+    def test_work_lint_check_symbols_end_to_end_ueber_den_tool_aufruf(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        from mcp_context_toolkit.mcp_server import build_server
+
+        _write_fake_plan_graph(tmp_path)
+        work_dir = tmp_path / ".claude" / "work"
+        _write_work(work_dir, "w")
+        (work_dir / "w.md").write_text(
+            "---\nkey: w\ntitle: w\nkind: goal\nstatus: open\ntheme: engine\n"
+            "opened: 2026-07-01\nkanten:\n  gesucht:\n    - x\n"
+            "  modul:\n    - noch_nicht_gebaut\n---\n\nx\n",
+            encoding="utf-8",
+        )
+        rules = _Reloader(lambda: None, [])
+        work = _Reloader(lambda: WorkEngine.from_directory(work_dir), [work_dir])
+        server = build_server(rules, None, None, work, None, work_dir)
+
+        result = asyncio.run(server.call_tool("work_lint", {"check_symbols": True}))
+        data = json.loads(result[0][0].text)
+        assert data["kanten_gebrochen"] == {}          # "geplant" ist gesund, kein Befund
+
+
 class TestWorkErrorVisibility:
     """F2 (2026-07-28 review): a work item dropped at load time used to be
     invisible everywhere a real server actually reports through — banner,

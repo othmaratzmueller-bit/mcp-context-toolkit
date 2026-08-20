@@ -31,6 +31,7 @@ for items that will only ever be one record. Instead hierarchy is a relation
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -241,6 +242,7 @@ def _parse_work_item(path: Path) -> WorkItem:
             supersedes=_meta_get(meta, "supersedes"),
             braucht_owner=bool(_meta_get(meta, "braucht_owner") or False),
             entblockt_durch=_meta_get(meta, "entblockt_durch"),
+            aus_migration=bool(_meta_get(meta, "aus_migration") or False),
             # Auch hier `_als_liste`: `evidence: commits: abc123` (ohne `- `)
             # wuerde sonst zu sechs Buchstaben und `missing_evidence`
             # faelschlich befriedigen — dieselbe Klasse wie bei `kanten`, nur
@@ -533,9 +535,11 @@ class WorkEngine:
         # Kanten vor Evidence, danach aktive vor offenen, dann juengste zuerst.
         treffer.sort(key=lambda t: (t[0], 0 if t[1].status == "active" else 1,
                                     -t[1].opened.toordinal()))
-        return [i for _r, i in treffer[:limit]]
+        return [i for _, i in treffer[:limit]]
 
-    def lint(self) -> dict:
+    def lint(
+        self, symbol_check: Callable[[str, str], tuple[str, str | None]] | None = None,
+    ) -> dict:
         """Read-only hygiene report — mirrors memory.py's ``lint()`` shape so
         both stores are consumed the same way, but every rule here maps to a
         NAMED actor (see the plan's section 2: a finding without an executing
@@ -593,7 +597,29 @@ class WorkEngine:
           another work key — a memory reference belongs in the prose as
           plain text, never as `[[...]]`, so this check has no cross-store
           case to special-case and simply treats every non-resolving link as
-          broken.
+          broken. Excludes kind decision/changelog (Etappe E): their body is
+          VERBATIM migrated text, never written under this convention — a
+          quoted `[[TALOS_THOUGHT]]` placeholder or `` `[[link]]` `` mention
+          from an old changelog line reads like a cross-record reference but
+          is prose about code, same reasoning as the missing_evidence/
+          reuse_ungeprueft exclusions above.
+        - kanten_gebrochen: {key: [{typ, ziel, zustand, hinweis}, ...]} for
+          `nutzt`/`erweitert`/`baut`/`modul` anchors whose zustand is not
+          "ok" or "geplant" (the two healthy states, see `symbol_check`
+          below). ``None`` when no `symbol_check` was passed, an empty dict
+          when it WAS passed and found nothing — the two must stay
+          distinguishable, same reasoning as `gesucht` set vs. no `kanten`
+          block at all (never let "not checked" read as "checked, clean").
+          This engine stays project-agnostic (no `scripts/`, no TALOS
+          knowledge) by construction, so the actual anchor lookup is
+          INJECTED, never imported here — same pattern as the tokenizer in
+          capability.py. `symbol_check(typ, ziel) -> (zustand, hinweis)`;
+          the caller closes over its own symbol inventory (in TALOS:
+          `scripts/symbol_inventory.py` + `scripts/plan_graph.py::_zustand`)
+          and decides how expensive building it is — this lint pass itself
+          does zero I/O for it. `gesucht` entries are never checked: they
+          are search terms, not anchors, and cannot "break" (Work-Record
+          `work_kanten_ohne_ankerpruefung`).
         """
         by_key = self._by_key()
         dangling: dict[str, list[str]] = {}
@@ -672,12 +698,48 @@ class WorkEngine:
         # that norm_link would need to fold; a memory NAME has no such
         # constraint, which is why memory.py's own check normalizes both
         # sides.
+        # `decision`/`changelog` ausgenommen (Etappe E, gefunden beim ersten
+        # Lauf gegen den frisch geflossenen Changelog-Backfill): ihr Body ist
+        # VERBATIM migrierter Alttext, nie unter der `[[name]]`-Konvention
+        # geschrieben. Ein "[[TALOS_THOUGHT]]"-Platzhalter oder ein
+        # "`[[link]]`-Kanten" in Anfuehrungszeichen aus dem Original-Changelog
+        # sieht syntaktisch wie ein Cross-Record-Verweis aus, ist aber Prosa
+        # ueber Code, kein Work-Store-Bezug. Gleiche Ausnahme-Logik wie
+        # missing_evidence/reuse_ungeprueft oben, dieselbe Begruendung.
         body_link_broken: dict[str, list[str]] = {}
         for i in self._items:
+            if i.kind in ("decision", "changelog"):
+                continue
             targets = sorted(set(_LINK_RE.findall(i.body)))
             missing = [t for t in targets if _norm_link(t) not in by_key]
             if missing:
                 body_link_broken[i.key] = missing
+
+        # `None` (not run) vs. `{}` (run, nothing broken) is deliberate — see
+        # the docstring entry above. Only computed when the caller injects a
+        # checker, so a plain `WorkEngine.lint()` stays as cheap as before.
+        kanten_gebrochen: dict[str, list[dict]] | None = None
+        if symbol_check is not None:
+            kanten_gebrochen = {}
+            for i in self._items:
+                if i.kanten is None:
+                    continue
+                funde = []
+                for typ, ziele in (
+                    ("nutzt", i.kanten.nutzt),
+                    ("erweitert", i.kanten.erweitert),
+                    ("baut", i.kanten.baut),
+                    ("modul", i.kanten.modul),
+                ):
+                    for ziel in ziele:
+                        zustand, hinweis = symbol_check(typ, ziel)
+                        if zustand not in ("ok", "geplant"):
+                            funde.append({
+                                "typ": typ, "ziel": ziel,
+                                "zustand": zustand, "hinweis": hinweis,
+                            })
+                if funde:
+                    kanten_gebrochen[i.key] = funde
 
         return {
             "total": len(self._items),
@@ -688,5 +750,6 @@ class WorkEngine:
             "plan_path_broken": plan_path_broken,
             "reuse_ungeprueft": sorted(reuse_ungeprueft),
             "body_link_broken": body_link_broken,
+            "kanten_gebrochen": kanten_gebrochen,
             "load_errors": list(self._errors),
         }
