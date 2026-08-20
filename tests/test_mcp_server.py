@@ -337,3 +337,239 @@ class TestWorkErrorVisibility:
         banner = capsys.readouterr().err
         work_line = next(line for line in banner.splitlines() if line.strip().startswith("Work"))
         assert "1 skipped (invalid)" in work_line
+
+
+class TestDocsTool:
+    """Fourth domain (Work-Record `doku_lesend_indexieren_statt_zerreissen`,
+    Etappe F): docs/**/*.md stays documents, made searchable via docs_recall
+    — citations (file + heading + line), never torn into cards."""
+
+    def _write_doc(self, d: Path, rel: str, body: str) -> None:
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+
+    def _server_with_docs(self, tmp_path: Path):
+        from mcp_context_toolkit.docs import DocsEngine
+        from mcp_context_toolkit.mcp_server import build_server
+
+        self._write_doc(tmp_path, "guide.md", "# Datenbank-Migration\n\nSchema-Aenderungen hier.\n")
+        rules = _Reloader(lambda: None, [])
+        docs = _Reloader(lambda: DocsEngine.from_directory(tmp_path), [tmp_path])
+        return build_server(rules, None, None, None, None, None, docs)
+
+    def test_docs_recall_absent_without_a_docs_dir(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import build_server
+
+        rules = _Reloader(lambda: None, [])
+        server = build_server(rules)
+        inv = server.context_toolkit_inventory
+        assert inv["docs"] == []
+
+    def test_docs_recall_present_with_a_docs_dir(self, tmp_path: Path):
+        server = self._server_with_docs(tmp_path)
+        inv = server.context_toolkit_inventory
+        assert inv["docs"] == ["docs_recall"]
+
+    def test_docs_recall_returns_citation_via_tool_call(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        server = self._server_with_docs(tmp_path)
+        result = asyncio.run(server.call_tool("docs_recall", {"query": "Datenbank Migration Schema"}))
+        data = json.loads(result[0][0].text)
+        assert data[0]["path"] == "guide.md"
+        assert data[0]["heading"] == "Datenbank-Migration"
+        assert data[0]["line"] == 1
+
+    def test_docs_recall_truncates_long_section_text(self, tmp_path: Path):
+        # W8-Reviewer-Fund ERROR-1, Etappe F: docs_recall used to return the
+        # full section body — measured up to ~4,736 tokens for a normal
+        # 8-hit call against the real corpus, contradicting the tool's own
+        # docstring ("citation, not a full record").
+        import asyncio
+        import json
+
+        long_text = "Suchbegriff. " + ("Fuelltext. " * 200)  # well over 400 chars
+        self._write_doc(tmp_path, "big.md", f"# Grosser Abschnitt\n\n{long_text}\n")
+        rules = _Reloader(lambda: None, [])
+        from mcp_context_toolkit.docs import DocsEngine
+        from mcp_context_toolkit.mcp_server import build_server
+
+        docs = _Reloader(lambda: DocsEngine.from_directory(tmp_path), [tmp_path])
+        server = build_server(rules, None, None, None, None, None, docs)
+        result = asyncio.run(server.call_tool("docs_recall", {"query": "Suchbegriff"}))
+        data = json.loads(result[0][0].text)
+        assert len(data[0]["text"]) < len(long_text)
+        assert data[0]["text"].endswith("…")
+
+    def test_banner_reports_docs_when_present(self, tmp_path: Path, capsys):
+        from mcp_context_toolkit.docs import DocsEngine
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _print_banner
+
+        self._write_doc(tmp_path, "a.md", "# A\n\nText.\n")
+        docs_engine = DocsEngine.from_directory(tmp_path)
+        _print_banner(RulesEngine(), None, None, None, docs_engine)
+        banner = capsys.readouterr().err
+        docs_line = next(line for line in banner.splitlines() if line.strip().startswith("Docs"))
+        assert "1 file(s)" in docs_line
+
+    def test_banner_shows_no_store_found_without_docs(self, capsys):
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _print_banner
+
+        _print_banner(RulesEngine(), None, None, None, None)
+        banner = capsys.readouterr().err
+        docs_line = next(line for line in banner.splitlines() if line.strip().startswith("Docs"))
+        assert "no store found" in docs_line
+
+
+class TestBausteinFunctionDocTools:
+    """Fifth domain (Work-Record `mcp_baustein_funktions_doku_domaene_
+    konvergiertes_design`), deliberately SEPARATE from docs_recall above:
+    exact-key lookup over a purpose entry, not ranked search over prose."""
+
+    def _write_baustein_docs(self, tmp_path: Path, entries: dict) -> Path:
+        p = tmp_path / "baustein-docs.json"
+        p.write_text(__import__("json").dumps(entries), encoding="utf-8")
+        return p
+
+    def _write_function_docs(self, tmp_path: Path, entries: dict) -> Path:
+        p = tmp_path / "function-docs.json"
+        p.write_text(__import__("json").dumps(entries), encoding="utf-8")
+        return p
+
+    def test_json_doc_store_returns_none_for_missing_key(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _JsonDocStore
+
+        p = self._write_baustein_docs(tmp_path, {"py:a": {"zweck": "x"}})
+        store = _JsonDocStore(p)
+        assert store.get("py:does_not_exist") is None
+
+    def test_json_doc_store_returns_entry_for_known_key(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _JsonDocStore
+
+        p = self._write_baustein_docs(tmp_path, {"py:a": {"zweck": "x"}})
+        store = _JsonDocStore(p)
+        assert store.get("py:a") == {"zweck": "x"}
+
+    def test_json_doc_store_missing_file_returns_none_not_crash(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _JsonDocStore
+
+        store = _JsonDocStore(tmp_path / "does-not-exist.json")
+        assert store.get("anything") is None
+
+    def test_json_doc_store_malformed_json_returns_none_not_crash(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import _JsonDocStore
+
+        p = tmp_path / "broken.json"
+        p.write_text("{not valid json", encoding="utf-8")
+        store = _JsonDocStore(p)
+        assert store.get("anything") is None
+
+    def test_get_baustein_doc_absent_without_a_file(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import build_server
+
+        rules = _Reloader(lambda: None, [])
+        server = build_server(rules)
+        inv = server.context_toolkit_inventory
+        assert inv["baustein"] == []
+
+    def test_get_baustein_doc_end_to_end_via_tool_call(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        from mcp_context_toolkit.mcp_server import build_server
+
+        baustein_file = self._write_baustein_docs(
+            tmp_path, {"py:a": {"zweck": "Testzweck fuer Modul a"}})
+        rules = _Reloader(lambda: None, [])
+        server = build_server(rules, None, None, None, None, None, None, baustein_file)
+        inv = server.context_toolkit_inventory
+        assert inv["baustein"] == ["get_baustein_doc"]
+
+        # `_path_to_id_factory` walks up from the process CWD, not tmp_path —
+        # pytest's CWD is the real repo checkout, so it resolves via the
+        # REAL `tools/code-graph/site_kit.py` (PY_ROOT="backend/app") even
+        # though the JSON file itself is a throwaway fixture. That is the
+        # correct, intended behaviour: the resolver is a fixed repo
+        # convention, only the doc DATA is swapped out per test.
+        result = asyncio.run(server.call_tool("get_baustein_doc", {"pfad": "backend/app/a.py"}))
+        data = json.loads(result[0][0].text)
+        assert data == {"zweck": "Testzweck fuer Modul a"}
+
+    def test_get_function_doc_absent_without_a_file(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import build_server
+
+        rules = _Reloader(lambda: None, [])
+        server = build_server(rules)
+        inv = server.context_toolkit_inventory
+        assert inv["baustein"] == []
+
+    def test_get_function_doc_end_to_end_via_tool_call(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        from mcp_context_toolkit.mcp_server import build_server
+
+        anchor = "backend/app/a.py::Foo.bar"
+        function_file = self._write_function_docs(
+            tmp_path, {anchor: {"zweck": "Kuerzt Foo.bar in einem Satz."}})
+        rules = _Reloader(lambda: None, [])
+        server = build_server(rules, None, None, None, None, None, None,
+                              None, function_file)
+        inv = server.context_toolkit_inventory
+        assert inv["baustein"] == ["get_function_doc"]
+
+        result = asyncio.run(server.call_tool("get_function_doc", {"anchor": anchor}))
+        data = json.loads(result[0][0].text)
+        assert data == {"zweck": "Kuerzt Foo.bar in einem Satz."}
+
+    def test_get_function_doc_unknown_anchor_returns_empty(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        from mcp_context_toolkit.mcp_server import build_server
+
+        function_file = self._write_function_docs(tmp_path, {})
+        rules = _Reloader(lambda: None, [])
+        server = build_server(rules, None, None, None, None, None, None,
+                              None, function_file)
+        result = asyncio.run(server.call_tool("get_function_doc", {"anchor": "x.py::y"}))
+        assert json.loads(result[0][0].text) == {}
+
+    def test_both_baustein_and_function_tool_register_together(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import build_server
+
+        baustein_file = self._write_baustein_docs(tmp_path, {})
+        function_file = self._write_function_docs(tmp_path, {})
+        rules = _Reloader(lambda: None, [])
+        server = build_server(rules, None, None, None, None, None, None,
+                              baustein_file, function_file)
+        inv = server.context_toolkit_inventory
+        assert set(inv["baustein"]) == {"get_baustein_doc", "get_function_doc"}
+
+
+class TestPathToIdFactory:
+    """Real-repo verification of the site_kit.py::path_to_id file-import
+    (Work-Record `mcp_baustein_funktions_doku_domaene_konvergiertes_design`)
+    — round-trips against the real `id_to_path` for every existing
+    baustein-docs.json key, so the factory is proven against the actual
+    convention it must resolve, not just a synthetic stand-in."""
+
+    def test_resolves_real_baustein_docs_keys(self):
+        import json
+
+        from mcp_context_toolkit.mcp_server import _path_to_id_factory
+
+        path_to_id = _path_to_id_factory()
+        assert path_to_id is not None
+        data_file = (Path(__file__).resolve().parents[3]
+                     / "tools" / "code-graph" / "data" / "baustein-docs.json")
+        if not data_file.is_file():
+            import pytest
+            pytest.skip("baustein-docs.json not present in this checkout")
+        data = json.loads(data_file.read_text(encoding="utf-8"))
+        for key, entry in data.items():
+            assert path_to_id(entry["path"]) == key

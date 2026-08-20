@@ -17,6 +17,7 @@ from mcp_context_toolkit.core import (
     store_conventions,
     warn_if_example_rules,
 )
+from mcp_context_toolkit.docs import DocsEngine
 from mcp_context_toolkit.engine import RulesEngine
 from mcp_context_toolkit.memory import MemoryEngine
 from mcp_context_toolkit.usage import UsageStore
@@ -57,6 +58,35 @@ def _discover_memory_dir() -> Path | None:
             if mem.is_dir():
                 return mem
     return None
+
+
+def _find_project_root() -> Path | None:
+    """Walk up from cwd for a directory carrying a `<convention>/` marker
+    (`.claude`/`.context`) — the same project-root test `_discover_wissen`
+    inlines. Shared here so a THIRD near-identical copy (baustein/function
+    doc factory, below) does not repeat it a third time (S8)."""
+    for candidate in [Path.cwd(), *Path.cwd().parents]:
+        for conv in store_conventions():
+            if (candidate / conv).is_dir():
+                return candidate
+    return None
+
+
+def _discover_docs_dir() -> Path | None:
+    """Locate the PROJECT `docs/` tree (prose documentation, e.g. TALOS's
+    architecture/governance docs — Work-Record `doku_lesend_indexieren_statt_
+    zerreissen`). Env CONTEXT_DOCS_DIR wins, else the project root's `docs/`
+    sibling. Returns None if none found — the docs tools are then simply not
+    registered, same gating shape as memory/work."""
+    env = os.environ.get("CONTEXT_DOCS_DIR")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_dir() else None
+    root = _find_project_root()
+    if root is None:
+        return None
+    docs = root / "docs"
+    return docs if docs.is_dir() else None
 
 
 def _discover_wissen() -> "capability.CapabilityQuelle | None":
@@ -153,6 +183,34 @@ def _kanten_check_factory(work_dir: Path) -> Callable[[str, str], tuple[str, str
     return symbol_check
 
 
+def _path_to_id_factory() -> Callable[[str], str | None] | None:
+    """Build the `path -> baustein-docs.json key` resolver `get_baustein_doc`
+    needs (Work-Record `mcp_baustein_funktions_doku_domaene_konvergiertes_
+    design`). Same file-import shape as `_kanten_check_factory` above: this
+    engine stays project-agnostic, so the actual `py:`/`js:` id convention
+    is TALOS-side code (`tools/code-graph/site_kit.py::path_to_id`), loaded
+    by path, never imported as a package. None if the project root or the
+    script cannot be found/loaded — `get_baustein_doc` then degrades to
+    "not found" for every path, not a crash."""
+    root = _find_project_root()
+    if root is None:
+        return None
+    site_kit_pfad = root / "tools" / "code-graph" / "site_kit.py"
+    if not site_kit_pfad.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("_talos_site_kit", site_kit_pfad)
+    if spec is None or spec.loader is None:
+        return None
+    modul = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(modul)
+        return modul.path_to_id
+    except Exception as e:
+        print(f"[context-toolkit] get_baustein_doc-Pfadaufloeser fehlgeschlagen "
+              f"({site_kit_pfad}): {e}", file=sys.stderr)
+        return None
+
+
 def _optional_dir(env_name: str) -> Path | None:
     """Resolve an optional tier directory from an env var. Returns None if the
     var is unset/empty or does not point at an existing directory. Used for the
@@ -164,6 +222,42 @@ def _optional_dir(env_name: str) -> Path | None:
         return None
     p = Path(raw).expanduser()
     return p if p.is_dir() else None
+
+
+def _optional_file(env_name: str) -> Path | None:
+    """Resolve an optional FILE from an env var — same shape as
+    `_optional_dir`, one level down (a single JSON file, not a tree). Used
+    for the baustein/function doc domain (Work-Record `mcp_baustein_
+    funktions_doku_domaene_konvergiertes_design`): those JSON files already
+    exist at a TALOS-specific path (`tools/code-graph/data/*.json`) outside
+    any `.claude/` convention, so this engine stays generic by taking the
+    path from config (`CONTEXT_BAUSTEIN_DOCS_FILE`/`CONTEXT_FUNCTION_DOCS_
+    FILE`) instead of hard-coding a TALOS path."""
+    raw = os.environ.get(env_name)
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    return p if p.is_file() else None
+
+
+class _JsonDocStore:
+    """Read-only, exact-key lookup over a flat `{anchor: {...}}` JSON file —
+    the SAME file `tools/code-graph/generate_handbuch.py` reads (S8, one
+    data source, no second copy to drift out of sync). No BM25, no caching:
+    re-read on every call. Deliberately simple — an agent looks this up
+    before touching an unfamiliar file, not in a hot loop, and a fresh read
+    is trivially correct where a cache would need its own staleness story."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def get(self, key: str) -> dict | None:
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        entry = data.get(key)
+        return entry if isinstance(entry, dict) else None
 
 
 def _rule_summary(rule: Any) -> dict:
@@ -192,6 +286,22 @@ def _memory_summary(m: Any) -> dict:
         "description": m.description,
         "source_path": m.source_path,
     }
+
+
+# Snippet length for a docs_recall hit — a CITATION, not the section body.
+# W8-Reviewer-Fund ERROR-1, Etappe F: the first cut returned s.text
+# unclamped, contradicting the tool's own docstring ("not a full record");
+# measured up to ~4,736 tokens for a normal 8-hit call and the largest real
+# section alone (governance/Systembeschreibung_TALOS_Anlage1.md, "8.2
+# Audit-Trail") is ~184,586 chars / ~46k tokens on its own.
+_DOC_SNIPPET_CHARS = 400
+
+
+def _doc_section_summary(s: Any) -> dict:
+    text = s.text
+    if len(text) > _DOC_SNIPPET_CHARS:
+        text = text[:_DOC_SNIPPET_CHARS].rstrip() + "…"
+    return {"path": s.path, "heading": s.heading, "line": s.line, "text": text}
 
 
 def _tree_mtime(root: Path) -> float:
@@ -257,6 +367,9 @@ def build_server(
     work_reloader: _Reloader | None = None,
     wissen: capability.CapabilityQuelle | None = None,
     work_dir: Path | None = None,
+    docs_reloader: _Reloader | None = None,
+    baustein_docs_file: Path | None = None,
+    function_docs_file: Path | None = None,
 ):
     from mcp.server.fastmcp import FastMCP
 
@@ -267,7 +380,7 @@ def build_server(
     # has to be edited by hand drifts silently the moment a tool is added; this
     # toolkit's own line is that a system must measure its state, not claim it.
     inventory: dict[str, list[str]] = {"rules": [], "memory": [], "work": [],
-                                   "capability": []}
+                                   "capability": [], "docs": [], "baustein": []}
 
     def _tool(group: str):
         """Register an MCP tool and record its name under `group`."""
@@ -776,6 +889,85 @@ def build_server(
                 "recommendation": recommendation,
             }, indent=2, ensure_ascii=False)
 
+    # ---- docs (fourth domain: prose documentation, Work-Record
+    # doku_lesend_indexieren_statt_zerreissen) — registered only when a
+    # docs/ tree was found, same optional-gating shape as memory/work ----
+    if docs_reloader is not None:
+
+        @_tool("docs")
+        def docs_recall(query: str, limit: int = 8) -> str:
+            """Find sections of prose documentation (docs/**/*.md) by
+            keyword, ranked BM25F over heading + body — same ranking
+            algorithm as memory/work recall (core.bm25_scores).
+
+            Documentation stays documents here — this does NOT tear docs
+            into cards the way the Work-Store does. Each hit is a citation
+            (file path + section heading + starting line), not a full
+            record: read the file at that path for full context, this only
+            tells you WHERE to look. Use this before reading a large doc
+            end to end, or when you know roughly what you need but not
+            which file it lives in."""
+            engine = docs_reloader.current()
+            hits = engine.recall(query, limit=limit)
+            return json.dumps(
+                [_doc_section_summary(s) for s in hits], indent=2, ensure_ascii=False
+            )
+
+    # ---- baustein/function docs (fifth domain, Work-Record `mcp_baustein_
+    # funktions_doku_domaene_konvergiertes_design`) — DELIBERATELY separate
+    # from `docs` above ("Zwei Maschinen, zwei Tool-Saetze — NICHT in ein
+    # Schema pressen"): exact-key lookup over a purpose entry, not ranked
+    # search over prose. Each tool gated on its own JSON file independently
+    # — a project can have baustein docs without function docs or vice
+    # versa. ----
+    if baustein_docs_file is not None:
+        store = _JsonDocStore(baustein_docs_file)
+        path_to_id = _path_to_id_factory()
+
+        @_tool("baustein")
+        def get_baustein_doc(pfad: str) -> str:
+            """Fetch the purpose entry for a whole file (a "Baustein") —
+            what it does, why it exists, what it is coupled to. Reads
+            `tools/code-graph/data/baustein-docs.json` (the same file the
+            TALOS handbuch generator reads — one data source, no drift).
+
+            Call this BEFORE reading an unfamiliar file end to end: if a
+            purpose entry exists, it answers "what is this for" in one
+            lookup instead of reconstructing it from the code.
+
+            `pfad` is the real repo-relative path (e.g.
+            `backend/app/rag/chunking.py`). Returns an empty object `{}`
+            when no entry exists — most files have none, that is the
+            normal case, not an error."""
+            if path_to_id is None:
+                return json.dumps({}, ensure_ascii=False)
+            key = path_to_id(pfad)
+            if key is None:
+                return json.dumps({}, ensure_ascii=False)
+            entry = store.get(key)
+            return json.dumps(entry or {}, indent=2, ensure_ascii=False)
+
+    if function_docs_file is not None:
+        func_store = _JsonDocStore(function_docs_file)
+
+        @_tool("baustein")
+        def get_function_doc(anchor: str) -> str:
+            """Fetch the one-sentence purpose entry for a single function or
+            method. Reads `tools/code-graph/data/function-docs.json`, keyed
+            by the SAME anchor format as the handbuch's Ablauf-Anker
+            (`pfad.py::Qualname`, e.g.
+            `backend/app/rag/chunking.py::ChunkingService.chunk_document`)
+            — one anchor convention across the codebase, not a second one
+            invented for this domain.
+
+            Populated organically (Work-Record `mcp_baustein_funktions_
+            doku_domaene_konvergiertes_design`): the executing agent adds
+            an entry for every function it writes or meaningfully changes,
+            as part of the same edit — not a batch-generated backfill.
+            Returns an empty object `{}` when no entry exists yet."""
+            entry = func_store.get(anchor)
+            return json.dumps(entry or {}, indent=2, ensure_ascii=False)
+
     # ---- capability search (registered only when an index source was wired) ----
     if wissen is not None:
 
@@ -845,6 +1037,7 @@ def _print_banner(
     memory_engine: MemoryEngine | None,
     inventory: dict[str, list[str]] | None = None,
     work_engine: WorkEngine | None = None,
+    docs_engine: DocsEngine | None = None,
 ) -> None:
     """Print the startup banner to stderr — every MCP client that launches the
     server sees it (generic, not tied to any one client). Lists what is loaded
@@ -895,6 +1088,14 @@ def _print_banner(
         data.append(("Work", len(work_engine.items), work_detail))
     else:
         data.append(("Work", 0, "(no store found)"))
+    if docs_engine is not None:
+        files = len({s.path for s in docs_engine.sections})
+        data.append((
+            "Docs", len(docs_engine.sections),
+            f"{files} file(s) · read-only" if files else "—",
+        ))
+    else:
+        data.append(("Docs", 0, "(no store found)"))
     if inventory is not None:
         groups = [(g, len(names)) for g, names in inventory.items() if names]
         data.append((
@@ -1057,14 +1258,36 @@ def main() -> None:
         for err in work_engine.errors:
             print(f"[context-toolkit]   - {err}", file=sys.stderr)
 
+    # Docs tree is optional, same gating shape as memory/work — prose docs
+    # stay documents (Work-Record doku_lesend_indexieren_statt_zerreissen),
+    # just made searchable via docs_recall.
+    docs_reloader = None
+    docs_dir = _discover_docs_dir()
+    if docs_dir is not None:
+        def _load_docs() -> DocsEngine:
+            return DocsEngine.from_directory(docs_dir)
+
+        docs_reloader = _Reloader(_load_docs, [docs_dir])
+
+    docs_engine = docs_reloader.current() if docs_reloader is not None else None
+
+    # Baustein/function docs are two INDEPENDENTLY optional JSON files —
+    # config-driven since they live at a TALOS-specific path this generic
+    # engine never hard-codes (Work-Record `mcp_baustein_funktions_doku_
+    # domaene_konvergiertes_design`).
+    baustein_docs_file = _optional_file("CONTEXT_BAUSTEIN_DOCS_FILE")
+    function_docs_file = _optional_file("CONTEXT_FUNCTION_DOCS_FILE")
+
     # Build BEFORE printing: the banner reports the tool count recorded during
     # registration, so the figure can never drift from what is actually served.
     wissen = _discover_wissen()
     server = build_server(rules_reloader, memory_reloader, usage,
-                          work_reloader, wissen, work_dir)
+                          work_reloader, wissen, work_dir, docs_reloader,
+                          baustein_docs_file, function_docs_file)
     _print_banner(
         engine, memory_engine,
         getattr(server, "context_toolkit_inventory", None), work_engine,
+        docs_engine,
     )
     server.run()
 
