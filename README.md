@@ -10,8 +10,10 @@
 
 > A generic [MCP](https://modelcontextprotocol.io) server that feeds any MCP client
 > the *right context at the right time* — file-scoped **rules**, frecency-ranked
-> **memory**, and a navigable **link-graph**, loaded on demand from plain markdown +
-> YAML-frontmatter stores ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible).
+> **memory**, an evidence-backed **work store** (goals/steps with reuse-search
+> baked into the schema), and a navigable **link-graph**, loaded on demand from
+> plain markdown + YAML-frontmatter stores
+> ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible).
 
 **By [Othmar Atzmüller](https://github.com/othmaratzmueller-bit)** and
 <img src="assets/talos-logo.png" alt="TALOS" height="18" align="absmiddle"> **TALOS**
@@ -50,13 +52,14 @@ Don't load everything upfront. Load the right thing at the right moment:
 - Memory injects when the prompt matches (UserPromptSubmit hook)
 - Nothing else enters context until it's needed
 
-## Three content types
+## Four content types
 
 | Type | Query model | Use it for |
 | --- | --- | --- |
 | **Rules** | file-path glob → matching rules, by priority | standards, security policies, review gates — anything tied to *which file you touch* |
 | **Decisions** | file-path glob → matching decisions (ADRs) | design decisions, architecture records (ADRs), rationales — *why* something is built the way it is |
 | **Memory** | keyword relevance × frecency (hot/cold) + backlink boost | lessons, user preferences, context — anything worth recalling later |
+| **Work items** | BM25F keyword search, or direct key lookup | goals/steps/notes/decisions/changelog entries — a plan that stays a record, not a stale markdown file (see [Work store](#work-store) below) |
 
 Decisions injection is cut by default (`query_decisions_for_file`): only the newest
 `DECISION_TOP_K` (8) decisions with an allowed `status` (`accepted`) are returned for a
@@ -100,6 +103,36 @@ to surface hot notes first. `memory_dream_status` tells you when such a consolid
 pass is due (files changed since last dream + lint issues against configurable
 thresholds).
 
+## Work store
+
+A work item is `goal` / `step` / `note` / `decision` / `changelog`, with a
+`status` (`open` → `active` → `done`/`dropped`/`superseded`) and a `theme` —
+a closed vocabulary (`WorkTheme` in `models.py`), shipped here with this
+project's own set. Fork/edit that `Literal` for your project's themes —
+deliberately, one at a time: an unlisted value is a load error, not a
+silent `misc`. Steps point at their goal via `part_of`; a
+goal's `open`/`active`/`done` counts are **computed from its children**,
+never stored, so a goal can't silently claim progress its children no
+longer show.
+
+Two fields, easy to conflate, deliberately kept apart:
+
+- **`evidence`** (commits/files) — backward-looking, filled when *closing*
+  an item: what this actually touched.
+- **`kanten`** — forward-looking, filled when *planning*: what already
+  exists that this item uses, extends, or will build. The load-bearing
+  sub-field is `gesucht` (what was searched for) — it is what separates
+  "never searched" (no `kanten` block at all) from "searched, found
+  nothing" (`gesucht` set, everything else empty). `gefunden` deliberately
+  includes *rejected* hits, because "mixin pattern found, discarded — no
+  class here" is the most valuable part of a reuse record and fits in
+  none of `nutzt`/`erweitert`/`baut`.
+
+`work_lint` surfaces goals whose children are all closed but the goal
+itself is not — a real failure mode, not a hypothetical one: a plan that
+gets marked done by consensus while the record itself sits open is
+invisible to anything that only reads the record.
+
 ## Install
 
 ```bash
@@ -125,7 +158,8 @@ clients). Point it at your stores via env:
       "env": {
         "CONTEXT_RULES_DIR": "/abs/path/to/repo/.context/rules",
         "CONTEXT_MEMORY_DIR": "/abs/path/to/repo/.context/memory",
-        "CONTEXT_USER_MEMORY_DIR": "/home/you/.context/memory"
+        "CONTEXT_USER_MEMORY_DIR": "/home/you/.context/memory",
+        "CONTEXT_WORK_DIR": "/abs/path/to/repo/.context/work"
       }
     }
   }
@@ -133,11 +167,11 @@ clients). Point it at your stores via env:
 ```
 
 Any unset dir is auto-discovered by walking up from the working directory, looking for
-`<dir>/.context/rules` (and `…/memory`) first, then `<dir>/.claude/rules` as a fallback
-for existing Claude Code repos. The convention list itself is configurable via
+`<dir>/.context/rules` (and `…/memory`, `…/work`) first, then `<dir>/.claude/rules` as a
+fallback for existing Claude Code repos. The convention list itself is configurable via
 `CONTEXT_STORE_CONVENTIONS` (comma-separated, e.g. `.talos,.context,.claude` to prefer a
-`.talos` store first). Memory tools register only when a memory store is found —
-rules-only setups keep working untouched.
+`.talos` store first). Memory tools register only when a memory store is found, work
+tools only when a work store is found — rules-only setups keep working untouched.
 
 ## Freshness / reloading
 
@@ -171,6 +205,25 @@ from clobbering each other). Nothing is served staler than your last edit.
 | `memory_dream_status(files_threshold?, lint_threshold?)` | consolidation trigger: changed files + lint issues → "dream fällig?" |
 | `memory_lint()` | hygiene: broken `[[links]]`, index orphans, stale pointers |
 | `memory_usage(limit?)` | hot→cold usage report (opens, recalls, heat) |
+
+**Work store**
+
+| Tool | Purpose |
+| --- | --- |
+| `work_recall(query, limit?)` | find work items by keyword, BM25F over title + body |
+| `get_work(key)` | one work item, with its computed open/active/done rollup if it has children |
+| `list_work(theme?, status?, kind?, include_archived?)` | bulk fetch by metadata |
+| `work_children(key)` | direct children of a goal via `part_of` |
+| `work_status()` | closeable-goal count, dangling references, records that failed to load — the work-store counterpart to `memory_dream_status` |
+| `work_lint(check_symbols?)` | hygiene report: dangling refs, closeable goals, (optionally) `kanten` anchors that no longer resolve to a real symbol |
+
+**Docs & code structure** (optional — registers only when the relevant files exist; see [Register with any MCP client](#register-with-any-mcp-client))
+
+| Tool | Purpose |
+| --- | --- |
+| `docs_recall(query, limit?)` | find sections of prose documentation (`docs/**/*.md`) by keyword, same BM25F ranking as memory/work recall |
+| `get_baustein_doc(pfad)` | purpose entry for a whole file — what it does, why it exists, what it's coupled to (project-specific data file, path via `CONTEXT_BAUSTEIN_DOCS_FILE`) |
+| `get_function_doc(anchor)` | one-sentence purpose entry for a single function/method, keyed by `path/to/file.py::Symbol` (`CONTEXT_FUNCTION_DOCS_FILE`) |
 
 ## CLI
 
@@ -302,19 +355,19 @@ Create a `.context` (or `.claude`) directory in your project root — auto-disco
 
 ```
 your-project/
-├── .context/               # Core intelligence folder (rules, decisions, memories)
+├── .context/               # Core intelligence folder (rules, decisions, memories, work)
 │   ├── rules/              # Rule files (*.yaml)
 │   │   ├── security/       # Organized by domain (optional structure)
 │   │   ├── frontend/
 │   │   └── backend/
-│   ├── decisions/          # Architectural decisions / ADRs (*.yaml)
-│   │   ├── 2026-07-05_auth.yaml
-│   │   └── 2026-07-05_mcp.yaml
 │   ├── graph/              # Optional dependency graph (see "Dependency graph" below)
 │   │   └── reference-index.json
-│   └── memory/             # Project-tier memories (*.md)
-│       ├── MEMORY.md       # Human-curated index
-│       └── _descriptions.md # Auto-generated catalog index (run --reindex to update)
+│   ├── memory/             # Project-tier memories (*.md)
+│   │   ├── MEMORY.md       # Human-curated index
+│   │   └── _descriptions.md # Auto-generated catalog index (run --reindex to update)
+│   └── work/               # Work items — goals/steps/notes/decisions/changelog (*.md)
+│       ├── decisions/*.md  # kind: decision cards — architectural decisions / ADRs
+│       └── <theme>/*.md    # Everything else: recursive rglob, any nesting works
 ```
 
 For global user-specific memories that apply across *all* of your projects, place them in `~/.context/memory/` (user-tier).
@@ -370,19 +423,27 @@ content: |
 created: 2026-01-01
 ```
 
-A decision (`.context/decisions/**/*.yaml`):
+A decision (`.context/work/decisions/*.md`) — a Work-Store card with
+`kind: decision`, translated into the `Decision` shape `query_rules_for_file`
+serves: `opened` → `date`, `evidence.files` → `applies_to.files`, the body →
+`reason`, and `status` mapped `open`/`active` → `draft`, `done` → `accepted`,
+`dropped` → `rejected`, `superseded` → `superseded`:
 
-```yaml
+```markdown
+---
 key: graph_injection
 title: Code Graph Context Injection
-date: 2026-07-05
-status: accepted          # draft | accepted | rejected | superseded | deprecated
-applies_to:
-  modules: []
+kind: decision
+status: done               # -> accepted
+theme: engine
+opened: 2026-07-05
+closed: 2026-07-05
+evidence:
   files: ["backend/app/**/*.py"]
-reason: |
-  Decision: Need to automatically inject graph coupling into the prompt context via MCP.
-  Why: Without element context, the agent answers generically.
+---
+
+Decision: Need to automatically inject graph coupling into the prompt context via MCP.
+Why: Without element context, the agent answers generically.
 ```
 
 A memory (`.context/memory/**/*.md`):
@@ -404,6 +465,37 @@ The note itself. Link related notes with [[their-name]].
 `type`/`tier`/`members`/`tags`/`resource`/`timestamp` may live **top-level or nested under
 `metadata:`** — both are read (top-level wins). `MEMORY.md` in the memory dir is the
 human-curated index (skipped as a record); `memory_lint` checks it against the actual files.
+
+A work item (`.context/work/**/*.md`):
+
+```markdown
+---
+key: rate_limit_retry_backoff
+title: Exponential backoff on the rate-limit retry path
+kind: step                # goal | step | note | decision | changelog
+status: done               # open | active | done | dropped | superseded
+theme: infra                # your project's own closed vocabulary, see WorkTheme
+opened: 2026-07-01
+closed: 2026-07-03
+part_of: api_reliability_hardening   # the goal this step belongs to
+evidence:
+  commits: [a1b2c3d]
+  files: [src/http/retry.py]
+kanten:
+  gesucht: ["existing retry helper", "backoff jitter"]
+  gefunden: ["a fixed-delay retry in http/client.py — rejected, no jitter, would thunder-herd"]
+  entscheidung: "New exponential-backoff-with-jitter helper; the fixed-delay one stays for its one caller."
+  nutzt: ["http/client.py::Session"]
+  baut: ["http/retry.py::exponential_backoff"]
+---
+
+Body: full prose, same rules as a memory note (`[[links]]` resolve the same way).
+```
+
+`kind: goal` and `kind: step` form the hierarchy via `part_of` (a goal has no
+`part_of`; a step's `part_of` names its goal). `kind: note`/`decision`/`changelog`
+are typically leaves. See [Work store](#work-store) above for what `evidence`
+vs. `kanten` are each for.
 
 ## OKF interoperability
 
