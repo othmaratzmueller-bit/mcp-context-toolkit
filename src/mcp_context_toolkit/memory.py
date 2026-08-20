@@ -20,6 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from mcp_context_toolkit.core import LINK_RE as _LINK_RE
 from mcp_context_toolkit.core import (
     KnowledgeLoadError,
     bm25_scores,
@@ -28,7 +29,6 @@ from mcp_context_toolkit.core import (
     parse_frontmatter,
     prefix_slice,
 )
-from mcp_context_toolkit.core import LINK_RE as _LINK_RE
 from mcp_context_toolkit.core import norm_link as _norm_link
 
 MemoryType = Literal["user", "feedback", "project", "reference", "misc"]

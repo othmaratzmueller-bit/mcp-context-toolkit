@@ -12,8 +12,8 @@ from typing import Any
 
 from mcp_context_toolkit import capability
 from mcp_context_toolkit.core import (
-    discover_work_dir,
     discover_shared_rules_dir,
+    discover_work_dir,
     store_conventions,
     warn_if_example_rules,
 )
@@ -89,7 +89,7 @@ def _discover_docs_dir() -> Path | None:
     return docs if docs.is_dir() else None
 
 
-def _discover_wissen() -> "capability.CapabilityQuelle | None":
+def _discover_wissen() -> capability.CapabilityQuelle | None:
     """Wire the capability index: project root, index file, builder, tokenizer.
 
     Returns None — and the tool is simply not registered — when any piece is

@@ -36,6 +36,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from mcp_context_toolkit.core import LINK_RE as _LINK_RE
 from mcp_context_toolkit.core import (
     KnowledgeLoadError,
     bm25_scores,
@@ -43,10 +44,12 @@ from mcp_context_toolkit.core import (
     iter_files,
     parse_frontmatter,
 )
-from mcp_context_toolkit.core import LINK_RE as _LINK_RE
 from mcp_context_toolkit.core import norm_link as _norm_link
 from mcp_context_toolkit.models import (
-    WorkEdges, WorkEvidence, WorkItem, WorkStatus,
+    WorkEdges,
+    WorkEvidence,
+    WorkItem,
+    WorkStatus,
 )
 
 # Statuses that count as "resolved" for an x/y summary — done AND dropped both

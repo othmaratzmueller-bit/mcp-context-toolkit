@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+
 class _StrengesModell(BaseModel):
     """Basis fuer alles, was aus YAML geladen wird: unbekannte Schluessel WERFEN.
 

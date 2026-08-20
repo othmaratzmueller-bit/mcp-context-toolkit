@@ -35,8 +35,9 @@ import json
 import math
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # How strongly a document's structural weight (how often its module is imported)
 # lifts its score. Deliberately small: importance is a tiebreaker between
@@ -296,10 +297,9 @@ class CapabilityQuelle:
 
     def current(self) -> Wissensindex | None:
         with self._sperre:
-            if not self.pfad.is_file():
-                if self._bau_gescheitert or not self._bauen():
-                    self._bau_gescheitert = True
-                    return None
+            if not self.pfad.is_file() and (self._bau_gescheitert or not self._bauen()):
+                self._bau_gescheitert = True
+                return None
             try:
                 mtime = self.pfad.stat().st_mtime
             except OSError:

@@ -480,7 +480,22 @@ class TestBausteinFunctionDocTools:
         import asyncio
         import json
 
-        from mcp_context_toolkit.mcp_server import build_server
+        import pytest
+
+        from mcp_context_toolkit.mcp_server import _path_to_id_factory, build_server
+
+        # `_path_to_id_factory` walks up from the process CWD, not tmp_path,
+        # looking for a real `tools/code-graph/site_kit.py` — a fixed repo
+        # convention this generic package does not ship itself (see the
+        # factory's own docstring). Inside the host repo that built it, this
+        # proves the real end-to-end wiring; run standalone (this package's
+        # own CI, a fresh clone, `pip install` elsewhere) there is no such
+        # file to find, and the resolver correctly degrades to None rather
+        # than crash — skip here instead of asserting a repo layout this
+        # checkout does not have.
+        if _path_to_id_factory() is None:
+            pytest.skip("no tools/code-graph/site_kit.py in this checkout — "
+                        "TALOS-specific resolver convention, not part of this package")
 
         baustein_file = self._write_baustein_docs(
             tmp_path, {"py:a": {"zweck": "Testzweck fuer Modul a"}})
@@ -489,12 +504,6 @@ class TestBausteinFunctionDocTools:
         inv = server.context_toolkit_inventory
         assert inv["baustein"] == ["get_baustein_doc"]
 
-        # `_path_to_id_factory` walks up from the process CWD, not tmp_path —
-        # pytest's CWD is the real repo checkout, so it resolves via the
-        # REAL `tools/code-graph/site_kit.py` (PY_ROOT="backend/app") even
-        # though the JSON file itself is a throwaway fixture. That is the
-        # correct, intended behaviour: the resolver is a fixed repo
-        # convention, only the doc DATA is swapped out per test.
         result = asyncio.run(server.call_tool("get_baustein_doc", {"pfad": "backend/app/a.py"}))
         data = json.loads(result[0][0].text)
         assert data == {"zweck": "Testzweck fuer Modul a"}
@@ -561,14 +570,22 @@ class TestPathToIdFactory:
     def test_resolves_real_baustein_docs_keys(self):
         import json
 
-        from mcp_context_toolkit.mcp_server import _path_to_id_factory
+        import pytest
 
+        from mcp_context_toolkit.mcp_server import _find_project_root, _path_to_id_factory
+
+        root = _find_project_root()
+        if root is None or not (root / "tools" / "code-graph" / "site_kit.py").is_file():
+            pytest.skip("no tools/code-graph/site_kit.py in this checkout — "
+                        "TALOS-specific resolver convention, not part of this package")
+        # The file is there, so the factory MUST load it — a None here would
+        # be a real regression (broken site_kit.py, not an absent checkout),
+        # and skipping on that would silently hide it.
         path_to_id = _path_to_id_factory()
         assert path_to_id is not None
         data_file = (Path(__file__).resolve().parents[3]
                      / "tools" / "code-graph" / "data" / "baustein-docs.json")
         if not data_file.is_file():
-            import pytest
             pytest.skip("baustein-docs.json not present in this checkout")
         data = json.loads(data_file.read_text(encoding="utf-8"))
         for key, entry in data.items():

@@ -12,7 +12,8 @@ from mcp_context_toolkit.models import Rule, RuleApplyTo, RuleComplianceRef, Rul
 # Wahrheit lesen liesse, und eine erfundene Zahl waere schlimmer als ein
 # ehrliches "unbekannt".
 try:
-    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("mcp-context-toolkit")
 except PackageNotFoundError:  # pragma: no cover — nur ohne Installation
     __version__ = "0.0.0+unbekannt"

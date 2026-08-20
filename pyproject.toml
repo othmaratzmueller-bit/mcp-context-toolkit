@@ -18,7 +18,13 @@ classifiers = [
 dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
-    "mcp>=1.0",
+    # Upper-bounded on purpose (same lesson as the CI ruff pin, ci.yml):
+    # mcp 2.0.0 restructured the SDK and dropped `mcp.server.fastmcp`, the
+    # import this package's server entry point (mcp_server.py) is written
+    # against. An unbounded ">=1.0" installs whatever PyPI has today and
+    # breaks a commit tree that never changed — measured: CI red on a push
+    # that touched zero server code.
+    "mcp>=1.0,<2.0",
 ]
 
 [project.urls]
