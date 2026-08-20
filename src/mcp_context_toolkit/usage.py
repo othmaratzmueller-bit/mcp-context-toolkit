@@ -182,3 +182,49 @@ class UsageStore:
             os.replace(tmp, self.path)  # atomic on POSIX
         except OSError:
             pass  # usage is best-effort; never break recall on a write failure
+
+
+class TelemetryStore:
+    """Logs tool latencies, matched record counts, and estimated token savings to JSONL."""
+
+    LOG_FILENAME = "telemetry.jsonl"
+
+    def __init__(self, log_dir: Path):
+        self.log_dir = Path(log_dir)
+        self.log_file = self.log_dir / self.LOG_FILENAME
+
+    @classmethod
+    def default_store(cls, root: Path | None = None) -> TelemetryStore:
+        base = root or Path.cwd()
+        log_dir = base / ".context" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return cls(log_dir)
+
+    def record_event(
+        self,
+        tool: str,
+        latency_ms: float,
+        matched_count: int,
+        delivered_tokens_est: int,
+        monolith_tokens_est: int = 2320000,
+    ) -> None:
+        savings_pct = (
+            round((1.0 - (delivered_tokens_est / monolith_tokens_est)) * 100.0, 2)
+            if monolith_tokens_est > 0
+            else 100.0
+        )
+        entry = {
+            "timestamp": _now_iso(),
+            "tool": tool,
+            "latency_ms": round(latency_ms, 2),
+            "matched_count": matched_count,
+            "delivered_tokens": delivered_tokens_est,
+            "token_savings_pct": savings_pct,
+        }
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass  # Telemetry is strictly fail-soft
+

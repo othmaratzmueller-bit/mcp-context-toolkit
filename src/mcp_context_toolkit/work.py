@@ -166,7 +166,8 @@ def _parse_work_item(path: Path) -> WorkItem:
     # statt als Markdown-Text nach dem schliessenden `---`, W8-Reviewer-Fund).
     # `metadata` ist der Container fuer den zweiten Frontmatter-Stil (siehe
     # `_meta_get`), kein WorkItem-Feld.
-    erlaubt_top = (set(WorkItem.model_fields) - {"body"}) | {"metadata"}
+    LEGACY_TOP_ALIASES = {"kanten", "braucht_owner", "entblockt_durch", "aus_migration"}
+    erlaubt_top = (set(WorkItem.model_fields) - {"body"}) | {"metadata"} | LEGACY_TOP_ALIASES
     unbekannt_top = sorted(set(meta) - erlaubt_top)
     if unbekannt_top:
         raise KnowledgeLoadError(
@@ -180,41 +181,41 @@ def _parse_work_item(path: Path) -> WorkItem:
     if not isinstance(evidence_raw, dict):
         evidence_raw = {}
 
-    # `kanten` bleibt None, wenn der Block fehlt ODER leer ist — beides heisst
+    # `reuse` / `kanten` bleibt None, wenn der Block fehlt ODER leer ist — beides heisst
     # "nie gesucht". Ein leerer Block darf NICHT als gesuchte-und-nichts-
-    # gefunden durchgehen, sonst genuegt ein `kanten: {}` um das Gate zu
+    # gefunden durchgehen, sonst genuegt ein `reuse: {}` um das Gate zu
     # umgehen, und der Unterschied, um den es geht, waere wieder weg.
-    kanten_raw = _meta_get(meta, "kanten")
+    kanten_raw = _meta_get(meta, "reuse") if _meta_get(meta, "reuse") is not None else _meta_get(meta, "kanten")
     kanten = None
     if isinstance(kanten_raw, dict):
-        # Unbekannte Schluessel LAUT machen. Dieser Loader liest die Felder
-        # namentlich auf — ein `extra="forbid"` am Model greift hier gar nicht,
-        # weil Unbekanntes es nie erreicht. Ohne diese Pruefung verschwindet ein
-        # vertippter oder erfundener Schluessel spurlos: kein Fehler, kein
-        # Lint-Treffer, nur ein Nachweis, den niemand mehr findet. Genau so
-        # gingen `gefunden`/`entscheidung` in sechs Records verloren, bevor sie
-        # (v1.4.474) ins Schema kamen — die Autoren hatten den Dreisatz aus
-        # CLAUDE.md woertlich uebernommen, und das Frontmatter schwieg dazu.
-        # Erlaubte Namen aus dem Model ableiten, nicht danebenschreiben — eine
-        # handgepflegte Zweitliste waere beim naechsten Feld sofort veraltet.
-        erlaubt = set(WorkEdges.model_fields)
+        # Unbekannte Schluessel LAUT machen. Erlaubte Namen aus dem Model ableiten
+        # sowie abwärtskompatible deutsche Alt-Namen zuschalten.
+        erlaubt = set(WorkEdges.model_fields) | {"gesucht", "gefunden", "entscheidung", "nutzt", "erweitert", "baut", "modul"}
         unbekannt = sorted(set(kanten_raw) - erlaubt)
         if unbekannt:
             raise KnowledgeLoadError(
                 path,
-                f"unbekannte Schluessel unter `kanten:`: {', '.join(unbekannt)} — "
+                f"unbekannte Schluessel unter `reuse:` / `kanten:`: {', '.join(unbekannt)} — "
                 f"erlaubt sind {', '.join(sorted(erlaubt))}. "
                 f"Ein unbekannter Schluessel wird sonst still verworfen."
             )
+        blk = "reuse" if _meta_get(meta, "reuse") is not None else "kanten"
+        sf_key = "searched_for" if "searched_for" in kanten_raw else "gesucht"
+        fnd_key = "found" if "found" in kanten_raw else "gefunden"
+        conc_key = "conclusion" if "conclusion" in kanten_raw else "entscheidung"
+        uses_key = "uses" if "uses" in kanten_raw else "nutzt"
+        ext_key = "extends" if "extends" in kanten_raw else "erweitert"
+        crt_key = "creates" if "creates" in kanten_raw else "baut"
+        mod_key = "modules" if "modules" in kanten_raw else "modul"
+
         kandidat = WorkEdges(
-            gesucht=_als_liste(kanten_raw.get("gesucht"), "kanten.gesucht", path),
-            gefunden=_als_liste(kanten_raw.get("gefunden"), "kanten.gefunden", path),
-            entscheidung=_als_text(kanten_raw.get("entscheidung"),
-                                   "kanten.entscheidung", path),
-            nutzt=_als_liste(kanten_raw.get("nutzt"), "kanten.nutzt", path),
-            erweitert=_als_liste(kanten_raw.get("erweitert"), "kanten.erweitert", path),
-            baut=_als_liste(kanten_raw.get("baut"), "kanten.baut", path),
-            modul=_als_liste(kanten_raw.get("modul"), "kanten.modul", path),
+            searched_for=_als_liste(kanten_raw.get(sf_key), f"{blk}.{sf_key}", path),
+            found=_als_liste(kanten_raw.get(fnd_key), f"{blk}.{fnd_key}", path),
+            conclusion=_als_text(kanten_raw.get(conc_key), f"{blk}.{conc_key}", path),
+            uses=_als_liste(kanten_raw.get(uses_key), f"{blk}.{uses_key}", path),
+            extends=_als_liste(kanten_raw.get(ext_key), f"{blk}.{ext_key}", path),
+            creates=_als_liste(kanten_raw.get(crt_key), f"{blk}.{crt_key}", path),
+            modules=_als_liste(kanten_raw.get(mod_key), f"{blk}.{mod_key}", path),
         )
         kanten = kandidat if kandidat.gesucht_worden() else None
 
@@ -243,9 +244,9 @@ def _parse_work_item(path: Path) -> WorkItem:
             part_of=_meta_get(meta, "part_of"),
             amends=_meta_get(meta, "amends"),
             supersedes=_meta_get(meta, "supersedes"),
-            braucht_owner=bool(_meta_get(meta, "braucht_owner") or False),
-            entblockt_durch=_meta_get(meta, "entblockt_durch"),
-            aus_migration=bool(_meta_get(meta, "aus_migration") or False),
+            requires_owner=bool(_meta_get(meta, "requires_owner") or _meta_get(meta, "braucht_owner") or False),
+            unblocked_by=_meta_get(meta, "unblocked_by") or _meta_get(meta, "entblockt_durch"),
+            migrated=bool(_meta_get(meta, "migrated") or _meta_get(meta, "aus_migration") or False),
             # Auch hier `_als_liste`: `evidence: commits: abc123` (ohne `- `)
             # wuerde sonst zu sechs Buchstaben und `missing_evidence`
             # faelschlich befriedigen — dieselbe Klasse wie bei `kanten`, nur
@@ -257,7 +258,7 @@ def _parse_work_item(path: Path) -> WorkItem:
                                    "evidence.commits", path),
                 files=_als_liste(evidence_raw.get("files"), "evidence.files", path),
             ),
-            kanten=kanten,
+            reuse=kanten,
             plan_path=_meta_get(meta, "plan_path"),
             body=body,
             source_path=str(path),

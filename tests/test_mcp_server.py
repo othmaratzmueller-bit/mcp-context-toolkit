@@ -76,6 +76,17 @@ class TestReloader:
         assert r.current().get("a") is not None
 
 
+class TestDiscoverAgentMemoryDir:
+    def test_discovers_agent_memory(self, tmp_path: Path, monkeypatch):
+        agent_mem = tmp_path / ".context" / "agent-memory"
+        agent_mem.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        from mcp_context_toolkit.mcp_server import _discover_agent_memory_dir
+        found = _discover_agent_memory_dir()
+        assert found == agent_mem
+
+
+
 
 class TestToolInventory:
     """The banner's tool count must be MEASURED, not a maintained literal.
@@ -476,26 +487,22 @@ class TestBausteinFunctionDocTools:
         inv = server.context_toolkit_inventory
         assert inv["baustein"] == []
 
-    def test_get_baustein_doc_end_to_end_via_tool_call(self, tmp_path: Path):
+    def test_get_baustein_doc_end_to_end_via_tool_call(self, tmp_path: Path, monkeypatch):
         import asyncio
         import json
 
-        import pytest
+        from mcp_context_toolkit.mcp_server import build_server
 
-        from mcp_context_toolkit.mcp_server import _path_to_id_factory, build_server
-
-        # `_path_to_id_factory` walks up from the process CWD, not tmp_path,
-        # looking for a real `tools/code-graph/site_kit.py` — a fixed repo
-        # convention this generic package does not ship itself (see the
-        # factory's own docstring). Inside the host repo that built it, this
-        # proves the real end-to-end wiring; run standalone (this package's
-        # own CI, a fresh clone, `pip install` elsewhere) there is no such
-        # file to find, and the resolver correctly degrades to None rather
-        # than crash — skip here instead of asserting a repo layout this
-        # checkout does not have.
-        if _path_to_id_factory() is None:
-            pytest.skip("no tools/code-graph/site_kit.py in this checkout — "
-                        "TALOS-specific resolver convention, not part of this package")
+        # Synthetischer site_kit.py-Resolver für autarken Testlauf ohne TALOS-Checkout
+        (tmp_path / ".context").mkdir(parents=True, exist_ok=True)
+        site_kit_dir = tmp_path / "tools" / "code-graph"
+        site_kit_dir.mkdir(parents=True, exist_ok=True)
+        (site_kit_dir / "site_kit.py").write_text(
+            "def path_to_id(p: str):\n"
+            "    return 'py:a' if 'a.py' in p else None\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
 
         baustein_file = self._write_baustein_docs(
             tmp_path, {"py:a": {"zweck": "Testzweck fuer Modul a"}})
@@ -561,32 +568,22 @@ class TestBausteinFunctionDocTools:
 
 
 class TestPathToIdFactory:
-    """Real-repo verification of the site_kit.py::path_to_id file-import
-    (Work-Record `mcp_baustein_funktions_doku_domaene_konvergiertes_design`)
-    — round-trips against the real `id_to_path` for every existing
-    baustein-docs.json key, so the factory is proven against the actual
-    convention it must resolve, not just a synthetic stand-in."""
+    """Contract verification of the site_kit.py::path_to_id file-import factory."""
 
-    def test_resolves_real_baustein_docs_keys(self):
-        import json
+    def test_synthetic_path_to_id_factory(self, tmp_path: Path, monkeypatch):
+        from mcp_context_toolkit.mcp_server import _path_to_id_factory
 
-        import pytest
+        (tmp_path / ".context").mkdir(parents=True, exist_ok=True)
+        site_kit_dir = tmp_path / "tools" / "code-graph"
+        site_kit_dir.mkdir(parents=True, exist_ok=True)
+        (site_kit_dir / "site_kit.py").write_text(
+            "def path_to_id(p: str):\n"
+            "    return 'py:a' if 'a.py' in p else None\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
 
-        from mcp_context_toolkit.mcp_server import _find_project_root, _path_to_id_factory
-
-        root = _find_project_root()
-        if root is None or not (root / "tools" / "code-graph" / "site_kit.py").is_file():
-            pytest.skip("no tools/code-graph/site_kit.py in this checkout — "
-                        "TALOS-specific resolver convention, not part of this package")
-        # The file is there, so the factory MUST load it — a None here would
-        # be a real regression (broken site_kit.py, not an absent checkout),
-        # and skipping on that would silently hide it.
         path_to_id = _path_to_id_factory()
         assert path_to_id is not None
-        data_file = (Path(__file__).resolve().parents[3]
-                     / "tools" / "code-graph" / "data" / "baustein-docs.json")
-        if not data_file.is_file():
-            pytest.skip("baustein-docs.json not present in this checkout")
-        data = json.loads(data_file.read_text(encoding="utf-8"))
-        for key, entry in data.items():
-            assert path_to_id(entry["path"]) == key
+        assert path_to_id("backend/app/a.py") == "py:a"
+        assert path_to_id("backend/app/b.py") is None

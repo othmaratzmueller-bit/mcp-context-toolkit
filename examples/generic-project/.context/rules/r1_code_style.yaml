@@ -1,0 +1,18 @@
+key: code_style
+title: Code Style and Quality Standards
+type: code_quality
+scope: all
+priority: mandatory
+modules:
+  - core
+summary: Maintain clean code, explicit function return types, and thorough unit testing across modules.
+applies_to:
+  files:
+    - "**/*.py"
+    - "**/*.ts"
+    - "**/*.js"
+content: |
+  1. Always write explicit type annotations for public methods.
+  2. Maintain 100% test coverage for core business logic.
+  3. Fail fast and fail loud — do not swallow exceptions with bare `except: pass`.
+created: 2026-08-20

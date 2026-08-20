@@ -60,6 +60,22 @@ def _discover_memory_dir() -> Path | None:
     return None
 
 
+def _discover_agent_memory_dir() -> Path | None:
+    """Locate the PROJECT agent-memory directory. Env CONTEXT_AGENT_MEMORY_DIR wins,
+    else walk up for .context/agent-memory (or .claude/agent-memory). Returns None if absent."""
+    env = os.environ.get("CONTEXT_AGENT_MEMORY_DIR")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_dir() else None
+    for candidate in [Path.cwd(), *Path.cwd().parents]:
+        for conv in store_conventions():
+            mem = candidate / conv / "agent-memory"
+            if mem.is_dir():
+                return mem
+    return None
+
+
+
 def _find_project_root() -> Path | None:
     """Walk up from cwd for a directory carrying a `<convention>/` marker
     (`.claude`/`.context`) — the same project-root test `_discover_wissen`
@@ -73,7 +89,7 @@ def _find_project_root() -> Path | None:
 
 
 def _discover_docs_dir() -> Path | None:
-    """Locate the PROJECT `docs/` tree (prose documentation, e.g. TALOS's
+    """Locate the PROJECT `docs/` tree (prose documentation, e.g. project
     architecture/governance docs — Work-Record `doku_lesend_indexieren_statt_
     zerreissen`). Env CONTEXT_DOCS_DIR wins, else the project root's `docs/`
     sibling. Returns None if none found — the docs tools are then simply not
@@ -125,16 +141,12 @@ def _kanten_check_factory(work_dir: Path) -> Callable[[str, str], tuple[str, str
     `kanten_gebrochen` (Work-Record `work_kanten_ohne_ankerpruefung`).
 
     Same file-import shape as `_discover_wissen` above: this engine stays
-    project-agnostic (no `scripts/`, no TALOS knowledge), so the actual
-    anchor lookup is TALOS-side code, loaded by path, never a package
-    import. `scripts/plan_graph.py::_zustand`/`_modul_vorhanden` already
-    solve exactly this (S8) — reused here, not reimplemented; the ~1.7s
-    tree-scan (`symbol_inventory.bestand`, which `plan_graph` imports
-    itself) only runs when a caller opts in (`work_lint(check_symbols=True)`),
-    never on the default, cheap path.
+    project-agnostic (no `scripts/`, no host knowledge), so the actual
+    anchor lookup is host-side code, loaded by path, never a package
+    import.
 
     None if `scripts/plan_graph.py` does not exist (generic-engine use
-    outside TALOS, or a project that has not built it) or fails to import —
+    outside host repo, or a project that has not built it) or fails to import —
     a missing symbol-checker degrades to `kanten_gebrochen: None`, not a
     crash.
     """
@@ -142,7 +154,7 @@ def _kanten_check_factory(work_dir: Path) -> Callable[[str, str], tuple[str, str
     plan_graph_pfad = projekt / "scripts" / "plan_graph.py"
     if not plan_graph_pfad.is_file():
         return None
-    spec = importlib.util.spec_from_file_location("_talos_plan_graph", plan_graph_pfad)
+    spec = importlib.util.spec_from_file_location("_context_plan_graph", plan_graph_pfad)
     if spec is None or spec.loader is None:
         return None
     modul = importlib.util.module_from_spec(spec)
@@ -162,19 +174,6 @@ def _kanten_check_factory(work_dir: Path) -> Callable[[str, str], tuple[str, str
 
     def symbol_check(typ: str, ziel: str) -> tuple[str, str | None]:
         if typ == "modul":
-            # Gespiegelt von plan_graph.py:241 (W8-Reviewer-Fund ERROR-1,
-            # Etappe E): "kein Verzeichnis dieses Namens" ist bei `modul` der
-            # NORMALZUSTAND vor dem Bau, nicht anders als bei `baut` — nicht
-            # "gebrochen". Der urspruengliche Zweig hier wich davon ab und
-            # meldete jedes noch nicht angelegte Modul-Verzeichnis als Bruch;
-            # gemessen 17/17 Falschmeldungen gegen den echten Bestand, 14
-            # davon sogar auf einem existierenden Pfad (Work-Store-`modul:`-
-            # Werte sind haeufig Datei- oder `datei::symbol`-Anker, keine
-            # reinen Verzeichnisnamen — `_modul_vorhanden` prueft nur
-            # Verzeichnisse, kann so einen echten Pfad nie als vorhanden
-            # erkennen). "gebrochen" bleibt hier absichtlich unerreichbar:
-            # ein Modul-Anker kann laut Quelle nicht "existieren, aber falsch
-            # benannt" sein wie ein Symbol-Anker — nur da oder noch nicht da.
             if modul._modul_vorhanden(ziel, str(projekt)):
                 return "ok", None
             return "geplant", None
@@ -184,31 +183,49 @@ def _kanten_check_factory(work_dir: Path) -> Callable[[str, str], tuple[str, str
 
 
 def _path_to_id_factory() -> Callable[[str], str | None] | None:
-    """Build the `path -> baustein-docs.json key` resolver `get_baustein_doc`
-    needs (Work-Record `mcp_baustein_funktions_doku_domaene_konvergiertes_
-    design`). Same file-import shape as `_kanten_check_factory` above: this
-    engine stays project-agnostic, so the actual `py:`/`js:` id convention
-    is TALOS-side code (`tools/code-graph/site_kit.py::path_to_id`), loaded
-    by path, never imported as a package. None if the project root or the
-    script cannot be found/loaded — `get_baustein_doc` then degrades to
-    "not found" for every path, not a crash."""
+    """Build the `path_to_id` resolver for `get_baustein_doc`.
+
+    Same file-import shape as `_kanten_check_factory` above: the resolver
+    is host-side code (`tools/code-graph/site_kit.py::path_to_id`), loaded
+    by path, never a package import.
+
+    Returns None if `site_kit.py` is missing or fails to import — the tool then
+    returns empty results rather than crashing.
+    """
     root = _find_project_root()
     if root is None:
         return None
     site_kit_pfad = root / "tools" / "code-graph" / "site_kit.py"
     if not site_kit_pfad.is_file():
         return None
-    spec = importlib.util.spec_from_file_location("_talos_site_kit", site_kit_pfad)
+    spec = importlib.util.spec_from_file_location("site_kit", site_kit_pfad)
     if spec is None or spec.loader is None:
         return None
-    modul = importlib.util.module_from_spec(spec)
     try:
+        modul = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(modul)
-        return modul.path_to_id
+        return getattr(modul, "path_to_id", None)
     except Exception as e:
-        print(f"[context-toolkit] get_baustein_doc-Pfadaufloeser fehlgeschlagen "
-              f"({site_kit_pfad}): {e}", file=sys.stderr)
+        print(f"[context-toolkit] site_kit.py-Import fehlgeschlagen ({e}) — "
+              f"baustein_doc-Resolver wird deaktiviert", file=sys.stderr)
         return None
+
+
+def _load_json_data(file_path: Path | None) -> dict:
+    """Load a JSON data file (e.g., baustein-docs.json or function-docs.json).
+
+    Helper for `get_baustein_doc` and `get_function_doc`. Returns an empty dict
+    if `file_path` is None, file does not exist, or fails to parse.
+
+    Explicit configuration via arguments or env vars (`CONTEXT_BAUSTEIN_DOCS_FILE` /
+    `CONTEXT_FUNCTION_DOCS_FILE`) instead of hard-coding a host path."""
+    if file_path is None or not file_path.is_file():
+        return {}
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _optional_dir(env_name: str) -> Path | None:
@@ -1204,12 +1221,13 @@ def main() -> None:
     memory_reloader = None
     usage = None
     mem_dir = _discover_memory_dir()                       # project tier (optional)
+    agent_mem_dir = _discover_agent_memory_dir()           # agent-memory tree (optional)
     user_mem_dir = _optional_dir("CONTEXT_USER_MEMORY_DIR")  # user tier, cross-project (optional)
     core_mem_dir = _optional_dir("CONTEXT_CORE_MEMORY_DIR")  # core tier, org/institutional (optional)
     # Register the memory tools if ANY tier is present — NOT only when a project
     # tier exists. A fresh workspace (no .context/memory) must still expose the
     # user/core tiers, otherwise a brand-new project silently loses all memory tools.
-    if mem_dir is not None or user_mem_dir is not None or core_mem_dir is not None:
+    if mem_dir is not None or agent_mem_dir is not None or user_mem_dir is not None or core_mem_dir is not None:
 
         def _load_memory() -> MemoryEngine:
             me = MemoryEngine()
@@ -1218,13 +1236,15 @@ def main() -> None:
             # org reference; the core tier never overrides a personal/project note).
             if mem_dir is not None:
                 me.load_directory(mem_dir, tier="project", strict=False)
+            if agent_mem_dir is not None:
+                me.load_directory(agent_mem_dir, tier="project", strict=False)
             if user_mem_dir is not None:
                 me.load_directory(user_mem_dir, tier="user", strict=False)
             if core_mem_dir is not None:
                 me.load_directory(core_mem_dir, tier="core", strict=False)
             return me
 
-        memory_reloader = _Reloader(_load_memory, [mem_dir, user_mem_dir, core_mem_dir])
+        memory_reloader = _Reloader(_load_memory, [mem_dir, agent_mem_dir, user_mem_dir, core_mem_dir])
         # Hot/cold (frecency) signal — sidecar lives in the PROJECT memory dir; only
         # meaningful when a project tier is present.
         if mem_dir is not None:

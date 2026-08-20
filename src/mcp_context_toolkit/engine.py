@@ -22,7 +22,7 @@ from ._globs import compile_glob as _compile_glob
 # edge: WorkStatus "dropped" collapses both "rejected" and "deprecated" — measured
 # over the full migrated corpus (669 cards) there are 0 "deprecated" records, so
 # "rejected" is the only value this ever actually produces today. "active" is
-# defensive-only: talos-plan-keeper.md's kanten-gate exception lets decision/
+# defensive-only: plan-keeper.md's kanten-gate exception lets decision/
 # changelog cards skip straight open->done, so a decision should never be caught
 # mid-flight — if one ever is, "draft" (still-in-motion) is the safer read than
 # claiming it was "accepted".
@@ -503,8 +503,8 @@ class RulesEngine:
         ]
         critical.sort(
             key=lambda r: (
-                {"non_negotiable": 0, "mandatory": 1, "recommended": 2}[r.priority],
                 r.type,
+                {"non_negotiable": 0, "mandatory": 1, "recommended": 2}[r.priority],
                 r.key,
             )
         )
@@ -662,3 +662,27 @@ class RulesEngine:
         if module is not None:
             result = [r for r in result if module in r.modules or "all" in r.modules]
         return list(result)
+
+    def lint_conflicts(self) -> dict[str, list[str]]:
+        """Lint rules for potential contradictions, short_id collisions, and glob overlaps."""
+        conflicts: list[str] = []
+        short_ids: dict[str, str] = {}
+        for r in self._rules:
+            if r.short_id:
+                if r.short_id in short_ids:
+                    conflicts.append(f"Kollision bei short_id '{r.short_id}': {r.key} vs {short_ids[r.short_id]}")
+                else:
+                    short_ids[r.short_id] = r.key
+
+        # Check for glob overlap with opposing priorities
+        for i, r1 in enumerate(self._rules):
+            for r2 in self._rules[i + 1:]:
+                if r1.key == r2.key:
+                    continue
+                overlap_globs = set(r1.applies_to.files) & set(r2.applies_to.files)
+                if overlap_globs and r1.priority != r2.priority and r1.scope == r2.scope:
+                    conflicts.append(
+                        f"Widersprüchliche Priorität bei Globs {sorted(overlap_globs)}: "
+                        f"{r1.key} ({r1.priority}) vs {r2.key} ({r2.priority})"
+                    )
+        return {"conflicts": conflicts}

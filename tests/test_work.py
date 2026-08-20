@@ -506,15 +506,23 @@ class TestKantenUndPlanPath:
                "opened: 2026-01-01")
         assert WorkEngine.from_directory(work).lint()["plan_path_broken"] == {}
 
-    def test_kanten_werden_gelesen(self, tmp_path: Path):
+    def test_english_fields_reading(self, tmp_path: Path):
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
-               "opened: 2026-01-01\nkanten:\n  gesucht:\n    - 'anonymize PII'\n"
-               "  nutzt:\n    - services/privacy_filter.py::anonymize")
+               "opened: 2026-01-01\nrequires_owner: true\nunblocked_by: b\nmigrated: true\n"
+               "reuse:\n  searched_for:\n    - 'anonymize PII'\n"
+               "  uses:\n    - services/privacy_filter.py::anonymize")
         item = WorkEngine.from_directory(tmp_path).get("a")
-        assert item is not None and item.kanten is not None
+        assert item is not None
+        assert item.requires_owner is True
+        assert item.unblocked_by == "b"
+        assert item.migrated is True
+        assert item.reuse is not None
+        assert item.reuse.searched_for == ["anonymize PII"]
+        assert item.reuse.uses == ["services/privacy_filter.py::anonymize"]
+        # Alias properties work
+        assert item.braucht_owner is True
         assert item.kanten.nutzt == ["services/privacy_filter.py::anonymize"]
-        assert item.kanten.gesucht == ["anonymize PII"]
 
     def test_gesucht_ohne_treffer_zaehlt_als_geprueft(self, tmp_path: Path):
         """Der Kern: leere Listen sind ein ERGEBNIS, kein fehlender Eintrag."""

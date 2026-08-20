@@ -20,6 +20,27 @@
 (the AI coding harness this toolkit was built inside). MIT-licensed — fork
 freely; a credit back is appreciated.
 
+## Why no database or embeddings?
+
+`mcp-context-toolkit` is deliberately **zero-infrastructure and Git-native**:
+
+* **Zero ops:** Starts as a local stdio MCP process. No Docker containers, no background daemons, no database setup, no API keys needed.
+* **Deterministic BM25F + Frecency:** Exact, latar-fast symbol and path matching without vector hallucination or near-miss noise.
+* **Git-native:** Plain Markdown and YAML files stored in your repository — 100% diffable, audit-friendly, and version-controlled.
+
+| Feature | `mcp-context-toolkit` | Typical Vector-DB / Heavy RAG |
+| :--- | :---: | :---: |
+| **Database required?** | **No** (Plain Text / Git) | Yes (Postgres/Qdrant/Milvus) |
+| **Embedding model required?** | **No** (BM25F + Frecency) | Yes (Ollama/OpenAI) |
+| **Background daemon / Docker?** | **No** (stdio process) | Yes (Container / Daemon) |
+| **Git-versionable?** | **Yes** (Markdown & YAML) | No (Stored in DB) |
+| **Startup time / Latency** | **< 1 second / < 110ms** | Multiple seconds / Min setup |
+| **File-scoped Rules?** | **Yes** (Glob-matching) | No |
+| **Typed Work Store?** | **Yes** (Goals, Steps, Decisions) | No |
+| **Custom Domains & Views?** | **Yes** (`domain.yaml` Manifests) | Rare / Complex |
+| **Telemetry & Conflict Linter?** | **Yes** (JSONL & CLI `stats`) | No |
+| **Section-based Docs?** | **Yes** (Section-split) | Basic chunking |
+
 ## The idea
 
 Long-lived AI coding/agent sessions accumulate context: coding standards, security

@@ -8,7 +8,7 @@ purpose: prose documentation (`docs/**/*.md`) stays exactly what it is,
 files with headings, not frontmatter-tagged records. Owner decision
 (2026-08-19): make it SEARCHABLE, never tear it into cards — the governance
 corpus (ISO/AI-Act) must stay citable as documents for the
-`talos-audit-keeper` drift mechanism and for auditors, and most prose docs
+`audit-keeper` drift mechanism and for auditors, and most prose docs
 have no natural per-idea boundary the way a Work-Store record does.
 
 A file is split into SECTIONS by its own Markdown headings (`^#{1,6} `) —
@@ -51,7 +51,7 @@ _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 # snapshot equal to the current file it was frozen from (W8-Reviewer-Fund
 # WARNING-2, Etappe F: `governance/Sicherheitsarchitektur_Uebersicht.md` and
 # its 2026-06-01 snapshot both surfaced for the same query, one of them
-# silently stale). `talos-audit-keeper` already treats `audit/<date>/` as
+# silently stale). `audit-keeper` already treats `audit/<date>/` as
 # untouchable evidence for the same reason — this mirrors that convention
 # instead of inventing a second one.
 _DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -63,8 +63,8 @@ _DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # query — the folder's own 00_README.md declares "Status: ENTWURF zur
 # Freigabe" (placeholders unfilled, unsigned), not settled governance. Path-
 # based exclusion, not content-sniffed (chosen over parsing a status marker
-# out of the text — simpler, and the naming convention is a real TALOS
-# convention for GF decision bundles, not a one-off).
+# out of the text — simpler, and the naming convention is a real project
+# convention for decision bundles, not a one-off).
 _DRAFT_BUNDLE_RE = re.compile(r"^Entscheidung\b", re.IGNORECASE)
 
 

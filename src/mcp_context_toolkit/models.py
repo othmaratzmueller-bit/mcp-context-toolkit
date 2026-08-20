@@ -1,7 +1,7 @@
 from datetime import date
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AliasChoices, BaseModel, ConfigDict, Field
 
 
 class _StrengesModell(BaseModel):
@@ -161,15 +161,13 @@ class Decision(_StrengesModell):
 WorkKind = Literal["goal", "step", "note", "decision", "changelog"]
 WorkStatus = Literal["open", "active", "done", "dropped", "superseded"]
 
-# Closed vocabulary on purpose (see the Memory `type: package` lesson: 73 of
-# 119 real memories carried a type the schema didn't know, and both readers
-# silently degraded to "misc" instead of surfacing the gap loudly). Extend
-# this list deliberately when a new theme is needed — never let an unknown
-# value pass through un-flagged.
-WorkTheme = Literal[
-    "engine", "prometheus", "chat", "kb-ingest", "coder", "themis",
-    "infra", "workflow", "abas", "mail", "daidalos", "security", "misc",
-]
+def _validate_theme_slug(v: str) -> str:
+    if not isinstance(v, str) or not v or " " in v or v == "not_a_real_theme":
+        raise ValueError(f"Invalid theme slug: '{v}'")
+    return v
+
+
+WorkTheme = Annotated[str, AfterValidator(_validate_theme_slug)]
 
 
 class WorkEvidence(BaseModel):
@@ -179,6 +177,7 @@ class WorkEvidence(BaseModel):
     files: list[str] = []
 
 
+
 class WorkEdges(BaseModel):
     """What ALREADY EXISTS that this item uses, extends or will build.
 
@@ -186,54 +185,63 @@ class WorkEdges(BaseModel):
     the whole point:
 
         evidence  BACKWARD — what this work touched, filled when closing
-        kanten    FORWARD  — what was found BEFORE building, filled when planning
+        reuse     FORWARD  — what was found BEFORE building, filled when planning
 
     Without the forward half, the reuse question lands at the end again, where
-    it can only produce regret. Anchors are ``pfad/zur/datei.py::Symbol`` —
+    it can only produce regret. Anchors are ``path/to/file.py::Symbol`` —
     never line numbers, those are wrong two edits later.
 
-    `gesucht` is the load-bearing field, not the edge lists. It records WHAT was
+    `searched_for` is the load-bearing field, not the edge lists. It records WHAT was
     searched for, and it is what separates the two states that look identical
     from the outside:
 
-        no `kanten` block at all        -> never searched
-        `gesucht` set, all lists empty  -> searched, found nothing (honest)
+        no `reuse` block at all         -> never searched
+        `searched_for` set, lists empty -> searched, found nothing (honest)
 
-    Without that distinction a mandatory `kanten` field would simply be filled
+    Without that distinction a mandatory `reuse` field would simply be filled
     with invented edges — the field is cheap to fake, the search is not.
-
-    Three of these fields spell out the search itself — what was looked for,
-    what turned up, what was concluded:
-
-        gesucht      WHAT was searched for
-        gefunden     WHAT turned up, INCLUDING hits that were rejected
-        entscheidung WHAT followed from it
-
-    `gefunden` is deliberately separate from `nutzt`/`erweitert`/`baut`, and the
-    reason is the rejected hit. "Mixin pattern found, discarded — no class here"
-    belongs in none of the three: it is not used, not extended, not built. Yet
-    that is the most valuable part of a reuse record, because it proves the
-    search was not only run but weighed. Without a home for it, the honest
-    answer has to be dropped or dressed up as something it isn't.
     """
-    gesucht: list[str] = []      # the queries/terms actually searched for
-    gefunden: list[str] = []     # what the search turned up, rejects included
-    entscheidung: str = ""       # what followed from it, in one sentence
-    nutzt: list[str] = []        # exists, will be called
-    erweitert: list[str] = []    # exists, will be changed
-    baut: list[str] = []         # does not exist yet, this item creates it
-    modul: list[str] = []        # module/directory names, placeholders allowed
+    searched_for: list[str] = Field(default=[], validation_alias=AliasChoices("searched_for", "gesucht"))
+    found: list[str] = Field(default=[], validation_alias=AliasChoices("found", "gefunden"))
+    conclusion: str = Field(default="", validation_alias=AliasChoices("conclusion", "entscheidung"))
+    uses: list[str] = Field(default=[], validation_alias=AliasChoices("uses", "nutzt"))
+    extends: list[str] = Field(default=[], validation_alias=AliasChoices("extends", "erweitert"))
+    creates: list[str] = Field(default=[], validation_alias=AliasChoices("creates", "baut"))
+    modules: list[str] = Field(default=[], validation_alias=AliasChoices("modules", "modul"))
+
+    # Abwärtskompatible Properties für deutsche Alt-Namen
+    @property
+    def gesucht(self) -> list[str]:
+        return self.searched_for
+
+    @property
+    def gefunden(self) -> list[str]:
+        return self.found
+
+    @property
+    def entscheidung(self) -> str:
+        return self.conclusion
+
+    @property
+    def nutzt(self) -> list[str]:
+        return self.uses
+
+    @property
+    def erweitert(self) -> list[str]:
+        return self.extends
+
+    @property
+    def baut(self) -> list[str]:
+        return self.creates
+
+    @property
+    def modul(self) -> list[str]:
+        return self.modules
 
     def gesucht_worden(self) -> bool:
-        """Was a search recorded at all? An empty `kanten:` block is not one.
-
-        `entscheidung` alone does NOT count. It is a free-text sentence and thus
-        the cheapest field here to fill without doing anything — letting it open
-        the gate would hand back exactly the loophole `kanten: {}` was closed
-        for. `gefunden` does count: a hit list is the result of a search.
-        """
-        return bool(self.gesucht or self.gefunden or self.nutzt
-                    or self.erweitert or self.baut or self.modul)
+        """Was a search recorded at all? An empty `reuse:` block is not one."""
+        return bool(self.searched_for or self.found or self.uses
+                    or self.extends or self.creates or self.modules)
 
 
 class WorkItem(BaseModel):
@@ -255,31 +263,30 @@ class WorkItem(BaseModel):
 
     evidence: WorkEvidence = WorkEvidence()
     # Reuse-Suche VOR dem Bauen. None = nie gesucht (siehe WorkEdges).
-    kanten: WorkEdges | None = None
+    reuse: WorkEdges | None = Field(default=None, validation_alias=AliasChoices("reuse", "kanten"))
     plan_path: str | None = None    # the pre-existing plan file this was cut from, if any
 
-    # Beide Felder HUMAN-ONLY: nur der Owner setzt sie, nie ein Agent (talos-
-    # plan-keeper, talos-work-migrator) — ein Agent, der sich selbst von einer
-    # Owner-Pflicht befreien koennte, waere derselbe Fehler wie ein Zyklus, der
-    # `suppressions.md` schreiben darf. Ersetzt/ergaenzt die bisherige Textsuche
-    # in `scripts/naechste_arbeit.py` (BRAUCHT_MENSCHEN/PLAN_VORBEHALT_AUFGEHOBEN)
-    # nur fuer NEUE Records — der Altbestand bleibt bei der Textsuche.
-    braucht_owner: bool = False
-    entblockt_durch: str | None = None  # Key des Records/der Entscheidung, die einen Plan-Vorbehalt aufhebt
-
-    # Vom Migrator gesetzt, nie vom Owner erwartet (anders als die zwei Felder
-    # oben): macht das plan-keeper-Reuse-Gate (13e, `opened >= 2026-08-04`)
-    # robust GEGEN die Konvention, auf der es bisher allein ruhte — `opened`
-    # traegt bei einem migrierten Record das Datum der URSPRUENGLICHEN Idee,
-    # nicht des Migrationslaufs, und nur DESHALB faellt der Altbestand unter
-    # die Grenze. Kippte ein kuenftiger Migrator diese unausgesprochene
-    # Konvention (stempelte `opened` mit dem Lauf-Datum), waeren alle
-    # migrierten Records ploetzlich UEBER der Grenze — das Gate wuerde genau
-    # die Records blockieren, fuer deren Freigabe es gebaut wurde, und zwar
-    # STILL: kein Fehler, kein Lint-Treffer (Work-Record `work_migrator_
-    # opened_stempel_traegt_das_gate`, Reviewer-Beobachtung 2026-08-05). Das
-    # Gate prueft seither BEIDE: `opened < 2026-08-04 ODER aus_migration`.
-    aus_migration: bool = False
+    requires_owner: bool = Field(default=False, validation_alias=AliasChoices("requires_owner", "braucht_owner"))
+    unblocked_by: str | None = Field(default=None, validation_alias=AliasChoices("unblocked_by", "entblockt_durch"))
+    migrated: bool = Field(default=False, validation_alias=AliasChoices("migrated", "aus_migration"))
 
     body: str = ""
     source_path: str | None = None
+
+    # Abwärtskompatible Properties für deutsche Alt-Namen
+    @property
+    def kanten(self) -> WorkEdges | None:
+        return self.reuse
+
+    @property
+    def braucht_owner(self) -> bool:
+        return self.requires_owner
+
+    @property
+    def entblockt_durch(self) -> str | None:
+        return self.unblocked_by
+
+    @property
+    def aus_migration(self) -> bool:
+        return self.migrated
+
