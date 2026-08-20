@@ -2,8 +2,10 @@
 
 Ausgelagert aus `engine.py` (Reviewer-Fund, Handbuch-Stufe-1-Sprint
 2026-08-16): `generate_handbuch.py` unter `tools/code-graph/` matcht
-`.claude/decisions/*.yaml::applies_to.files` gegen Datei-Pfade mit exakt
-derselben Glob-Semantik wie diese Engine (`applies_to.files` bei Rules) —
+Decision-Karten (`.claude/work/decisions/*.md::evidence.files`, bis Etappe C
+2026-08-19: `.claude/decisions/*.yaml::applies_to.files`) gegen Datei-Pfade
+mit exakt derselben Glob-Semantik wie diese Engine (`applies_to.files` bei
+Rules) —
 vorher pflegte `generate_handbuch.py` eine woertliche Kopie dieser Funktion
 (S8-Verstoss: zwei Quellen fuer denselben Algorithmus, die auseinanderlaufen
 koennen). Diese Datei ist jetzt die EINE Quelle fuer beide.

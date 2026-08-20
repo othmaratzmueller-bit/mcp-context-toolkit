@@ -807,16 +807,22 @@ class TestDecisionLoaderMeldetFehler:
 
     Nachsichtig bleibt der Loader: eine kaputte Datei darf den Store nicht
     umwerfen. Neu ist, dass sie GEMELDET wird.
+
+    Etappe C (2026-08-19): Decisions sind jetzt `kind: decision` Work-Store-
+    Karten (`.claude/work/decisions/*.md`) statt YAML — die Fixtures hier
+    wurden auf das neue Format umgestellt, die Zusicherungen (kaputt wird
+    gemeldet, heil laedt trotzdem) sind unveraendert.
     """
 
-    def _engine_mit(self, tmp_path: Path, inhalt: str) -> RulesEngine:
+    def _engine_mit(self, tmp_path: Path, karten_inhalt: str,
+                     dateiname: str = "kaputt.md") -> RulesEngine:
         rules_dir = tmp_path / "rules"
         _write_rule_yaml(rules_dir, "r1")
-        dec_dir = tmp_path / "decisions"
-        dec_dir.mkdir()
-        (dec_dir / "kaputt.yaml").write_text(inhalt, encoding="utf-8")
+        dec_dir = tmp_path / "work" / "decisions"
+        dec_dir.mkdir(parents=True)
+        (dec_dir / dateiname).write_text(karten_inhalt, encoding="utf-8")
         e = RulesEngine()
-        # `load_directory` laedt die Decisions SELBST aus `root.parent/decisions`
+        # `load_directory` laedt die Decisions SELBST aus `root.parent/work/decisions`
         # (engine.py, "Decisions + graph"). Ein zusaetzlicher `_load_decisions`
         # haette sie ein zweites Mal gelesen und jeden Fehler doppelt gemeldet —
         # der erste Anlauf dieses Tests tat genau das und mass seine eigene
@@ -824,28 +830,57 @@ class TestDecisionLoaderMeldetFehler:
         e.load_directory(rules_dir)
         return e
 
-    def test_unlesbares_yaml_wird_gemeldet(self, tmp_path: Path):
-        e = self._engine_mit(tmp_path, "key: k\nreason: 'nie geschlossen\n")
-        assert any("kaputt.yaml" in f and "nicht lesbar" in f for f in e.load_errors), \
+    def _heile_karte(self) -> str:
+        return (
+            "---\nkey: heil\ntitle: T\nkind: decision\nstatus: done\n"
+            "theme: engine\nopened: 2026-01-01\nclosed: 2026-01-01\n"
+            "evidence:\n  commits: []\n  files: []\n---\n\n"
+            "Ein Grund mit genug Zeichen.\n"
+        )
+
+    def test_kaputtes_frontmatter_wird_gemeldet(self, tmp_path: Path):
+        """`parse_frontmatter` faengt YAML-Fehler bereits selbst ab und liefert
+        `{}` zurueck (core.py) — ein unterminierter Scalar erreicht diesen
+        Loader deshalb als LEERES Frontmatter, nicht als Exception. Andere
+        Fehlerklasse als vorher (`nicht lesbar` -> `kein gueltiges
+        Frontmatter`), gleiche Zusicherung: gemeldet, nicht verschluckt."""
+        e = self._engine_mit(
+            tmp_path, "---\nkey: k\nreason: 'nie geschlossen\n---\n\nText\n")
+        assert any("kaputt.md" in f and "Frontmatter" in f for f in e.load_errors), \
             f"kein Ladefehler gemeldet: {e.load_errors}"
 
     def test_schemaverletzung_wird_gemeldet(self, tmp_path: Path):
+        """Der Loader baut den `Decision(**data)`-Aufruf jetzt aus einem FESTEN
+        Feld-Set (siehe engine.py) statt das rohe Frontmatter durchzureichen —
+        ein erfundenes WorkItem-Feld erreicht `Decision(...)` also nie mehr.
+        Was weiterhin durchschlagen kann: ein Wert, den Pydantic am ZIEL-Feld
+        ablehnt — hier ein `opened`, das kein Datum ist."""
         e = self._engine_mit(tmp_path, (
-            "key: probe\ntitle: T\ndate: '2026-01-01'\nstatus: accepted\n"
-            "applies_to:\n  files: []\nreason: 'Ein Grund mit genug Zeichen.'\n"
-            "erfundenes_feld: x\n"
+            "---\nkey: probe\ntitle: T\nkind: decision\nstatus: done\n"
+            "theme: engine\nopened: kein-datum\nclosed: 2026-01-01\n"
+            "evidence:\n  commits: []\n  files: []\n---\n\n"
+            "Ein Grund mit genug Zeichen.\n"
         ))
-        assert any("kaputt.yaml" in f and "erfundenes_feld" in f for f in e.load_errors), \
+        assert any("kaputt.md" in f and "Schema verletzt" in f for f in e.load_errors), \
             f"Schemaverletzung nicht gemeldet: {e.load_errors}"
 
+    def test_falscher_kind_wird_gemeldet(self, tmp_path: Path):
+        """`.claude/work/decisions/` sollte nur `kind: decision` enthalten —
+        ein Fremdkoerper (z.B. durch einen kuenftigen Bug im Schreibpfad) wird
+        gemeldet statt stillschweigend als Decision fehlgedeutet."""
+        e = self._engine_mit(tmp_path, (
+            "---\nkey: k\ntitle: T\nkind: step\nstatus: open\n"
+            "theme: engine\nopened: 2026-01-01\n---\n\nText\n"
+        ))
+        assert any("kaputt.md" in f and "kind=" in f for f in e.load_errors), \
+            f"Fremd-kind nicht gemeldet: {e.load_errors}"
+
     def test_eine_kaputte_datei_wirft_den_store_nicht_um(self, tmp_path: Path):
-        dec_dir = tmp_path / "decisions"
-        dec_dir.mkdir()
-        (dec_dir / "kaputt.yaml").write_text("reason: 'offen\n", encoding="utf-8")
-        (dec_dir / "heil.yaml").write_text(
-            "key: heil\ntitle: T\ndate: '2026-01-01'\nstatus: accepted\n"
-            "applies_to:\n  files: []\nreason: 'Ein Grund mit genug Zeichen.'\n",
-            encoding="utf-8")
+        dec_dir = tmp_path / "work" / "decisions"
+        dec_dir.mkdir(parents=True)
+        (dec_dir / "kaputt.md").write_text(
+            "---\nkey: k\nreason: 'offen\n---\n\nText\n", encoding="utf-8")
+        (dec_dir / "heil.md").write_text(self._heile_karte(), encoding="utf-8")
         rules_dir = tmp_path / "rules"
         _write_rule_yaml(rules_dir, "r1")
         e = RulesEngine()
@@ -853,30 +888,26 @@ class TestDecisionLoaderMeldetFehler:
         assert [d.key for d in e._decisions] == ["heil"]
         assert len(e.load_errors) == 1
 
-    def test_nicht_string_schluessel_wirft_den_store_nicht_um(self, tmp_path: Path):
-        """Der Pfad, den die erste Fassung dieses Tests NICHT abgedeckt hat.
+    def test_gemischte_schluessel_typen_wirft_den_store_nicht_um(self, tmp_path: Path):
+        """Nachfolger von `test_nicht_string_schluessel_wirft_den_store_nicht_um`.
 
-        YAML typisiert Schluessel: `2026-08-03:` wird `datetime.date`, `on:`
-        wird `bool`. `Decision(**data)` wirft darauf `TypeError: keywords must
-        be strings` — BEVOR Pydantic etwas sieht, also an einem
-        `except ValidationError` vorbei. Gemessen (Reviewer): der Fehler lief
-        durch `load_directory` und `_Reloader.__init__` hinaus und riss den
-        gesamten Rule-Load um.
-
-        Der Vorgaenger-Test fuetterte einen PARSE-Fehler und war deshalb gruen,
-        waehrend genau diese Bruchstelle offen stand — ein Testname, der mehr
-        behauptet als seine Zusicherung.
+        YAML typisiert Schluessel: `2026-08-03:` wird zu `datetime.date`. Der
+        ALTE Loader entpackte das rohe Dict direkt in `Decision(**data)` und
+        das warf `TypeError: keywords must be strings` — BEVOR Pydantic etwas
+        sah, also an `except ValidationError` vorbei (Reviewer-Fund,
+        v1.4.492). Der NEUE Loader baut nie ein `**data`-Unpacking aus dem
+        rohen Frontmatter — er liest jedes Feld einzeln per `meta.get("kind")`
+        etc., und `dict.get()` mit einem String-Schluessel ist unabhaengig
+        davon sicher, ob ANDERE Schluessel im selben Dict nicht-String sind.
+        Die ganze Fehlerklasse ist damit strukturell unerreichbar geworden,
+        nicht nur abgefangen — dieser Test haelt genau das fest, nicht nur
+        „wirft nicht um".
         """
-        dec_dir = tmp_path / "decisions"
-        dec_dir.mkdir()
-        (dec_dir / "datum_als_schluessel.yaml").write_text(
-            "2026-08-03: irgendwas\n", encoding="utf-8")
-        (dec_dir / "ja_als_schluessel.yaml").write_text(
-            "on: irgendwas\n", encoding="utf-8")
-        (dec_dir / "heil.yaml").write_text(
-            "key: heil\ntitle: T\ndate: '2026-01-01'\nstatus: accepted\n"
-            "applies_to:\n  files: []\nreason: 'Ein Grund mit genug Zeichen.'\n",
-            encoding="utf-8")
+        dec_dir = tmp_path / "work" / "decisions"
+        dec_dir.mkdir(parents=True)
+        (dec_dir / "datum_als_schluessel.md").write_text(
+            "---\n2026-08-03: irgendwas\n---\n\nText\n", encoding="utf-8")
+        (dec_dir / "heil.md").write_text(self._heile_karte(), encoding="utf-8")
         rules_dir = tmp_path / "rules"
         _write_rule_yaml(rules_dir, "r1")
 
@@ -885,10 +916,7 @@ class TestDecisionLoaderMeldetFehler:
 
         assert [r.key for r in e.rules] == ["r1"], "die Regeln muessen trotzdem stehen"
         assert [d.key for d in e._decisions] == ["heil"]
-        assert len(e.load_errors) == 2, e.load_errors
-        assert all("Schluessel muessen Strings sein" in f for f in e.load_errors)
-
-    def test_amended_wird_nicht_mehr_verschluckt(self):
-        """Das Feld stand seit 2026-07-22 in einem echten Record und war weg."""
-        d = _make_decision("probe", [], amended=date(2026, 7, 22))
-        assert d.amended == date(2026, 7, 22)
+        # Der Datums-Schluessel hat keinen String-Key "kind" -> meta.get("kind")
+        # liefert None -> gemeldet als Fremd-kind, nicht als Crash.
+        assert len(e.load_errors) == 1, e.load_errors
+        assert "kind=" in e.load_errors[0]

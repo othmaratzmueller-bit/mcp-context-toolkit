@@ -854,7 +854,9 @@ def main() -> None:
     watch_dirs: list = []
     if rules_dir is not None:
         watch_dirs.append(rules_dir)
-        decisions_dir = rules_dir.parent / "decisions"
+        # Etappe C (2026-08-19): decisions folded into the Work-Store
+        # (mcp_decisions_in_work_falten) — watch the new leaf.
+        decisions_dir = rules_dir.parent / "work" / "decisions"
         if decisions_dir.is_dir():
             watch_dirs.append(decisions_dir)
     if shared_rules_dir is not None:

@@ -3,14 +3,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# `Decision` hat ein FELD namens `date`, das den Typ gleichen Namens im
-# Klassenkoerper ueberschattet — jede weitere Datums-Annotation dort braucht
-# deshalb diesen Alias. Zur Laufzeit ginge auch `date` (Pydantic loest im
-# Modul-Scope auf), aber ein Type-Checker liest den Klassen-Scope und meldet
-# es zu Recht.
-Datum = date
-
-
 class _StrengesModell(BaseModel):
     """Basis fuer alles, was aus YAML geladen wird: unbekannte Schluessel WERFEN.
 
@@ -142,17 +134,16 @@ class Decision(_StrengesModell):
 
     supersedes: str | None = None
 
-    # Wann dieser Record AN ORT UND STELLE praezisiert wurde — im Unterschied
-    # zu `supersedes`, das auf einen anderen Record zeigt, der ihn ersetzt.
-    #
-    # Das Feld stand seit 2026-07-22 in
-    # `2026-06-21_prometheus_a4_completeness_gate__a3_entwurf_marker.yaml` und
-    # wurde bis 2026-08-12 STILL verworfen (`extra='ignore'`), obwohl es
-    # gebraucht wurde: derselbe Record traegt zwei Zeilen tiefer den Kommentar
-    # „2026-07-22 ergaenzt". Aufgenommen statt geloescht — der Autor hat es
-    # bewusst geschrieben, der Fehler lag im Schema, das schwieg.
-    amended: Datum | None = None
-
+    # `amended` (wann dieser Record an Ort und Stelle praezisiert wurde) stand
+    # hier von 2026-08-12 bis Etappe C (2026-08-19, W8-Reviewer-Fund WARNING-3):
+    # entfernt, weil der neue Loader (`engine.py::_load_decisions`, seit Decisions
+    # als Work-Store-Karten statt YAML leben) es strukturell nie mehr befuellen
+    # kann — das Karten-Frontmatter hat kein eigenes Feld dafuer, nur `body`-
+    # Prosa. Ein Pydantic-Feld, das JEDER Loader-Pfad konstant auf `None` setzt,
+    # ist dieselbe stille Verlust-Klasse, gegen die dieses Feld urspruenglich
+    # gebaut wurde — nur eine Ebene tiefer, und diesmal strukturell statt durch
+    # ein Schema-Versehen. Der Inhalt ist nicht verloren: migrierte Karten tragen
+    # ihn als Prosa-Satz im Body ("Am <Datum> vor Ort praezisiert").
     source_path: str | None = None
 
 

@@ -10,9 +10,40 @@ from pathlib import Path, PurePosixPath
 import yaml
 from pydantic import ValidationError
 
+from mcp_context_toolkit.core import iter_files, parse_frontmatter
 from mcp_context_toolkit.models import Decision, Rule, RulePriority, RuleScope, RuleTier, RuleType
 
 from ._globs import compile_glob as _compile_glob
+
+# Etappe C (mcp_decisions_in_work_falten, 2026-08-19): the decision store folded
+# into the Work-Store as `kind: decision` cards — WorkStatus back to the narrower
+# DecisionStatus vocabulary this engine still speaks externally (Decision model,
+# query_decisions_for_file's contract, _format_markdown in cli.py). Lossy on one
+# edge: WorkStatus "dropped" collapses both "rejected" and "deprecated" — measured
+# over the full migrated corpus (669 cards) there are 0 "deprecated" records, so
+# "rejected" is the only value this ever actually produces today. "active" is
+# defensive-only: talos-plan-keeper.md's kanten-gate exception lets decision/
+# changelog cards skip straight open->done, so a decision should never be caught
+# mid-flight — if one ever is, "draft" (still-in-motion) is the safer read than
+# claiming it was "accepted".
+#
+# THREE places carry a status-mapping table for this same concept (W8-Reviewer-
+# Fund WARNING-5, 2026-08-19) — they cannot share one import, each runs in a
+# different Python environment (this engine's venv / doc-flush.py's system-python
+# / handbuch_payload.py's zero-dependency system-python) and none can pull in the
+# other two without pulling in a dependency that environment must not have. Same
+# direction (WorkStatus -> DecisionStatus) as `tools/code-graph/handbuch_payload.
+# py::_WORK_TO_DECISION_STATUS` (same name, on purpose). The INVERSE direction
+# (DecisionStatus -> WorkStatus, used when WRITING a new card) lives in
+# `.claude/hooks/doc-flush.py::_DECISION_TO_WORK_STATUS`. Add a WorkStatus here,
+# add it in both.
+_WORK_TO_DECISION_STATUS: dict[str, str] = {
+    "open": "draft",
+    "active": "draft",
+    "done": "accepted",
+    "dropped": "rejected",
+    "superseded": "superseded",
+}
 
 _FINGERPRINT_EXCLUDE = {
     "source_path",
@@ -228,8 +259,14 @@ class RulesEngine:
 
         # Decisions + graph: the FIRST loaded tier that provides them wins (no
         # cross-tier replace). On a single-tier load this is identical to before.
+        #
+        # Etappe C (2026-08-19): decisions live under the Work-Store now
+        # (`.claude/work/decisions/`, `kind: decision` cards) — the old sibling
+        # `.claude/decisions/*.yaml` store was folded in and retired
+        # (mcp_decisions_in_work_falten). Same relative-to-rules-dir shape
+        # (`root_path.parent / ...`), only the leaf changed.
         if not self._decisions:
-            decisions_dir = root_path.parent / "decisions"
+            decisions_dir = root_path.parent / "work" / "decisions"
             if decisions_dir.is_dir():
                 self._load_decisions(decisions_dir)
 
@@ -255,68 +292,73 @@ class RulesEngine:
     def _load_decisions(self, decisions_dir: Path):
         """Load the decision store, and REPORT what could not be loaded.
 
+        Etappe C (2026-08-19): decisions are now `kind: decision` Work-Store
+        cards (frontmatter+body, like every other work item) instead of
+        standalone YAML files — the fold-in this method exists for
+        (mcp_decisions_in_work_falten). The card's WorkItem-shaped fields are
+        translated back into a `Decision` object so every downstream reader
+        (`query_decisions_for_file`, `fingerprint_rules`, `cli.py`'s
+        `_format_markdown`) keeps working against the unchanged `Decision`
+        model — the swap is contained entirely inside this one seam.
+
         The previous body ended in ``except Exception: pass`` — a broken
         decision vanished without a trace. Measured 2026-08-12 over 397 files:
         two carry unparseable YAML (an unterminated quoted scalar in
         ``reason:``) and had been invisible for weeks; nobody could have known,
-        because nothing said so.
-
-        This matters more since ``Rule``/``Decision`` gained
-        ``extra='forbid'``: a typo'd key now raises where it used to be
-        dropped silently. With a swallowing loader that turns a lost FIELD into
-        a lost RECORD — the fix would have made the diagnosis worse, not
-        better. Errors go into the same ``load_errors`` channel the rule loader
-        already uses, so the runtime callers surface them the same way.
-
-        Still lenient by design: one broken file must not take the store down.
-        The difference is that it is now lenient *and* loud.
+        because nothing said so. That lesson carries over unchanged: still
+        lenient (one broken card must not take the store down), but loud.
         """
         self._decisions = []
-        for yaml_file in sorted(decisions_dir.rglob("*.yaml")):
-            if any(part.startswith("_") for part in yaml_file.relative_to(decisions_dir).parts):
-                continue
+        for card_file in iter_files(decisions_dir, ".md"):
             try:
-                raw = yaml_file.read_text(encoding="utf-8")
-                data = yaml.safe_load(raw)
-            except Exception as exc:
+                text = card_file.read_text(encoding="utf-8")
+            except OSError as exc:
                 self._load_errors.append(
-                    f"[decision] {yaml_file.name}: nicht lesbar — {exc.__class__.__name__}: "
+                    f"[decision] {card_file.name}: nicht lesbar — {exc.__class__.__name__}: "
                     f"{_erste_zeile(exc)}"
                 )
                 continue
 
-            if not isinstance(data, dict):
+            meta, body = parse_frontmatter(text)
+            if not meta:
                 self._load_errors.append(
-                    f"[decision] {yaml_file.name}: YAML-Wurzel ist kein Mapping"
+                    f"[decision] {card_file.name}: kein gueltiges Frontmatter"
+                )
+                continue
+            if meta.get("kind") != "decision":
+                # Fremdkoerper im decisions/-Verzeichnis (falscher kind) —
+                # laut melden statt still zu ignorieren oder als Decision
+                # fehlzudeuten.
+                self._load_errors.append(
+                    f"[decision] {card_file.name}: kind={meta.get('kind')!r} statt 'decision'"
                 )
                 continue
 
-            # YAML typisiert Schluessel: `2026-08-03:` wird zu `datetime.date`,
-            # `on:`/`yes:`/`no:` zu `bool`, `123:` zu `int`. `Decision(**data)`
-            # wirft darauf `TypeError: keywords must be strings` — und zwar
-            # BEVOR Pydantic etwas sieht, also an einem `except ValidationError`
-            # vorbei. Gemessen mit einer Datei, die nur `2026-08-03: irgendwas`
-            # enthaelt: der Fehler lief durch `load_directory` und
-            # `_Reloader.__init__` hinaus und riss den gesamten Rule-Load um —
-            # kein einziges Rule wurde mehr injiziert, wegen EINER kaputten
-            # Decision (Reviewer-Fund, erste Fassung dieses Sprints).
-            nicht_string = [k for k in data if not isinstance(k, str)]
-            if nicht_string:
+            work_status = str(meta.get("status") or "open")
+            decision_status = _WORK_TO_DECISION_STATUS.get(work_status)
+            if decision_status is None:
                 self._load_errors.append(
-                    f"[decision] {yaml_file.name}: Schluessel muessen Strings sein — "
-                    f"{', '.join(f'{k!r} ({type(k).__name__})' for k in nicht_string)}. "
-                    f"In YAML brauchen Datums-, Zahl- und Ja/Nein-Schluessel "
-                    f"Anfuehrungszeichen."
+                    f"[decision] {card_file.name}: unbekannter status {work_status!r}"
                 )
                 continue
 
-            data["source_path"] = str(yaml_file)
+            files = list((meta.get("evidence") or {}).get("files") or [])
+            data = {
+                "key": meta.get("key") or card_file.stem,
+                "title": meta.get("title"),
+                "date": meta.get("opened"),
+                "status": decision_status,
+                "applies_to": {"modules": [], "files": files},
+                "reason": body.strip(),
+                "supersedes": meta.get("supersedes"),
+                "source_path": str(card_file),
+            }
             try:
                 self._decisions.append(Decision(**data))
             except ValidationError as exc:
                 felder = sorted({".".join(str(p) for p in e["loc"]) for e in exc.errors()})
                 self._load_errors.append(
-                    f"[decision] {yaml_file.name}: Schema verletzt — {', '.join(felder)}"
+                    f"[decision] {card_file.name}: Schema verletzt — {', '.join(felder)}"
                 )
             except Exception as exc:
                 # Breit gefangen, und das ist hier kein Schluder: die Zusage
@@ -327,7 +369,7 @@ class RulesEngine:
                 # gescheitert. Der Unterschied zum alten `except Exception:
                 # pass` ist nicht die Breite, sondern dass hier etwas STEHT.
                 self._load_errors.append(
-                    f"[decision] {yaml_file.name}: nicht ladbar — "
+                    f"[decision] {card_file.name}: nicht ladbar — "
                     f"{exc.__class__.__name__}: {_erste_zeile(exc)}"
                 )
 
