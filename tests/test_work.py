@@ -301,6 +301,19 @@ class TestLint:
         e = WorkEngine.from_directory(tmp_path)
         assert e.lint()["missing_evidence"] == []
 
+    @pytest.mark.parametrize("kind", ["decision", "changelog"])
+    def test_missing_evidence_excludes_decision_and_changelog(self, tmp_path: Path, kind: str):
+        """W8-Reviewer-Fund WARNING-4 (Etappe D): eine migrierte historische
+        Karte hat kein Commit, auf das evidence zeigen koennte — der Backfill
+        (2377 Changelog-Karten) begrub sonst die 29 echten Faelle unter fast
+        30-fachem Rauschen. Dieselbe Ausnahme wie bereits bei
+        reuse_ungeprueft (Etappe B)."""
+        _write(tmp_path, "a.md",
+               f"key: a\ntitle: A\nkind: {kind}\nstatus: done\ntheme: engine\n"
+               "opened: 2026-07-01\nclosed: 2026-07-05")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.lint()["missing_evidence"] == []
+
     def test_unclosed_pair_both_directions(self, tmp_path: Path):
         # closed set but status still open, AND status closed but no closed date.
         _write(tmp_path, "a.md",
@@ -751,3 +764,27 @@ class TestRecall:
         e = WorkEngine.from_directory(tmp_path)
         results = e.recall("deploy_workflow")
         assert [i.key for i in results] == ["a"]
+
+    def test_exclude_kinds_drops_candidates_before_the_limit_cut(self, tmp_path: Path):
+        """W8-Reviewer-Fund ERROR-2 (Etappe D): nach dem Changelog-Backfill
+        (2377 `kind: changelog`-Karten) verdraengten Changelog-Treffer echte
+        goal/step-Records vollstaendig aus den Top-8 (gemessen: 8/8 bei einer
+        Query). Ein Post-Hoc-Filter auf die bereits limitierten Top-N haette
+        nicht geholfen (waere teils leer geblieben) — `exclude_kinds` muss
+        VOR dem `limit`-Schnitt greifen, deshalb hier mit `limit=1` gegen
+        einen Bestand, in dem die Changelog-Karte den staerkeren Treffer hat."""
+        _write(tmp_path, "changelog_hit.md",
+               "key: changelog_hit\ntitle: Zolltarif Suche\nkind: changelog\n"
+               "status: done\ntheme: engine\nopened: 2026-01-01\nclosed: 2026-01-01")
+        _write(tmp_path, "goal_hit.md",
+               "key: goal_hit\ntitle: Sonstiges\nkind: goal\nstatus: open\n"
+               "theme: engine\nopened: 2026-01-01",
+               body="Erwaehnt Zolltarif nur einmal beilaeufig im Fliesstext.")
+        e = WorkEngine.from_directory(tmp_path)
+        # Ohne Filter gewinnt der Titel-Treffer (Changelog) den einzigen Platz.
+        assert [i.key for i in e.recall("zolltarif suche", limit=1)] == ["changelog_hit"]
+        # Mit Filter faellt die Changelog-Karte VOR dem limit=1-Schnitt raus,
+        # der goal-Record bleibt uebrig statt einer leeren Liste.
+        gefiltert = e.recall("zolltarif suche", limit=1,
+                             exclude_kinds=frozenset({"decision", "changelog"}))
+        assert [i.key for i in gefiltert] == ["goal_hit"]

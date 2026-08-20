@@ -359,7 +359,10 @@ class WorkEngine:
     def get(self, key: str) -> WorkItem | None:
         return self._by_key().get(key)
 
-    def recall(self, query: str, limit: int = 8) -> list[WorkItem]:
+    def recall(
+        self, query: str, limit: int = 8,
+        exclude_kinds: frozenset[str] = frozenset(),
+    ) -> list[WorkItem]:
         """Rank work items by keyword overlap with the query — same BM25F
         ranking as MemoryEngine.recall(), via the shared core.bm25_scores (see
         core.py's module docstring for why this lives in one place: the
@@ -373,6 +376,18 @@ class WorkEngine:
         item" concept it can be added the same way memory's was — a {key:
         factor} map layered on the base score, not a change to this method's
         core ranking.
+
+        `exclude_kinds` drops matching items from the CANDIDATE POOL, before
+        the floor-ratio cut and the `limit` slice — not a post-hoc filter on
+        the returned top-N. Etappe D (W8-Reviewer-Fund ERROR-2, 2026-08-20):
+        `work_recall` is the tool S8 reuse-search and `talos-plan-keeper` use
+        to find an EXISTING capability before building a new one; after the
+        changelog backfill (2377 new `kind: changelog` cards), a query for
+        real functionality returned up to 8/8 changelog hits and zero of the
+        actual sibling records — a historical changelog line is never "an
+        existing item to reuse". A post-hoc filter on the top-`limit` results
+        would still under-fill (measured: some queries had 0 of 8 survive);
+        excluding before the cut keeps the requested `limit` meaningful.
         """
         bases = bm25_scores(self._bm25_index(), query)
         if not bases:
@@ -380,6 +395,8 @@ class WorkEngine:
 
         by_key = self._by_key()
         scored = [(base, by_key[key]) for key, base in bases.items() if base > 0]
+        if exclude_kinds:
+            scored = [s for s in scored if s[1].kind not in exclude_kinds]
         scored.sort(key=lambda s: (-s[0], s[1].key))
 
         # Same relative floor as memory.py — see _RECALL_FLOOR_RATIO.
@@ -532,7 +549,14 @@ class WorkEngine:
           superseded but the goal itself is still open/active — the exact
           "empfohlen zu schliessen, niemand tat es" failure mode.
         - missing_evidence: keys with status=done and no commits/files in
-          evidence — a closed item that asserts rather than shows.
+          evidence — a closed item that asserts rather than shows. Excludes
+          kind decision/changelog (Etappe D, W8-Reviewer-Fund WARNING-4): a
+          migrated historical fact has no commit to point at by construction
+          (the "evidence" concept describes work just claimed done, not a
+          changelog line already true when it was written) — without the
+          exclusion the 2377-card backfill buried the 78 real cases the
+          counter exists to surface under 29x noise, the same reasoning
+          already applied to `reuse_ungeprueft` in Etappe B.
         - unclosed_pairs: keys where `closed` is set but status is not a
           closed one, or vice versa — a half-closed record.
         - plan_path_broken: {key: plan_path} where the referenced plan file
@@ -599,6 +623,7 @@ class WorkEngine:
         missing_evidence = [
             i.key for i in self._items
             if i.status == "done" and not (i.evidence.commits or i.evidence.files)
+            and i.kind not in ("decision", "changelog")
         ]
 
         unclosed_pairs = [

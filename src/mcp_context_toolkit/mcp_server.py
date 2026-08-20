@@ -564,9 +564,22 @@ def build_server(
 
             Use this to find an existing item before creating a new one — the
             store's whole purpose is one record per idea, not a duplicate
-            because the existing one wasn't found."""
+            because the existing one wasn't found.
+
+            Excludes `kind: changelog` (Etappe D, W8-Reviewer-Fund ERROR-2,
+            narrowed in the delta round per ERROR-B): a changelog line is
+            never "an existing item to reuse" — after the changelog backfill
+            it crowded out the goal/step/note records this search exists to
+            find. `kind: decision` stays IN the pool on purpose — a decision
+            record answers exactly the W20/S8 question ("was this already
+            considered?"), and Etappe C folded decisions into this store
+            specifically so they would stay findable here; excluding them
+            too undid that (measured: up to 5/8 top slots lost on a
+            decision-heavy query, for zero benefit — the pollution ERROR-2
+            found was 100% changelog, 0% decision)."""
             engine = work_reloader.current()
-            hits = engine.recall(query, limit=limit)
+            hits = engine.recall(query, limit=limit,
+                                 exclude_kinds=frozenset({"changelog"}))
             return json.dumps(
                 [_work_summary(w) for w in hits], indent=2, ensure_ascii=False
             )
