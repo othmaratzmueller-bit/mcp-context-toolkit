@@ -251,8 +251,11 @@ def _cmd_stats(json_format: bool = False) -> int:
     stats = {
         "status": "ok",
         "engine_latency_ms": latency_ms,
-        "estimated_token_savings_pct": 98.56,
-        "compression_ratio": "69.3x",
+        "benchmark_metrics": {
+            "estimated_token_savings_pct": 98.56,
+            "compression_ratio": "69.3x",
+            "note": "Estimated project benchmark metric vs 2.3M monolith prompt, not a runtime guarantee",
+        },
         "rule_conflicts": rule_conflicts,
         "conflict_count": len(rule_conflicts),
     }
@@ -262,7 +265,7 @@ def _cmd_stats(json_format: bool = False) -> int:
     else:
         print("=== mcp-context-toolkit stats ===")
         print(f"Engine Latency:         {latency_ms} ms")
-        print("Estimated Token Savings: 98.56% (~69.3x compression vs 2.3M monolith)")
+        print("Project Benchmark:      98.56% savings (~69.3x compression vs 2.3M monolith; estimated benchmark metric)")
         print(f"Rule Conflicts:         {len(rule_conflicts)}")
         if rule_conflicts:
             for c in rule_conflicts:
