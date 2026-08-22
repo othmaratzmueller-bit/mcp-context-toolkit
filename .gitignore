@@ -16,3 +16,8 @@ htmlcov/
 _usage.json
 _usage.json.lock
 _usage.json.tmp
+
+# Throwaway working files (audit scripts, one-off scratch data) — never meant
+# to ship in the published package (W8-review finding, mct-Reifeplan Etappe 3:
+# an untracked scratch/ file was one `git add -A` away from being published).
+scratch/

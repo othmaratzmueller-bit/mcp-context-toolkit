@@ -1,14 +1,14 @@
 [project]
 name = "mcp-context-toolkit"
 version = "1.0.0"
-description = "Feed any AI agent the right context on demand — file-scoped rules, frecency-ranked memory, and a navigable link-graph, from plain markdown/YAML stores (OKF-compatible)"
+description = "Feed any AI agent the right context on demand — file-scoped rules, frecency-ranked memory, a work-item tracker, and section-indexed docs search, from plain markdown/YAML stores (OKF-compatible)"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Othmar Atzmüller" }]
 requires-python = ">=3.11"
-keywords = ["mcp", "rules", "memory", "frecency", "context", "ai-agents", "knowledge-graph", "okf"]
+keywords = ["mcp", "rules", "memory", "frecency", "context", "ai-agents", "knowledge-graph", "okf", "work-tracking", "docs-search"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

@@ -41,6 +41,7 @@ from mcp_context_toolkit.core import (
     KnowledgeLoadError,
     bm25_scores,
     build_bm25_index,
+    clamp_limit,
     iter_files,
     parse_frontmatter,
 )
@@ -217,7 +218,7 @@ def _parse_work_item(path: Path) -> WorkItem:
             creates=_als_liste(kanten_raw.get(crt_key), f"{blk}.{crt_key}", path),
             modules=_als_liste(kanten_raw.get(mod_key), f"{blk}.{mod_key}", path),
         )
-        kanten = kandidat if kandidat.gesucht_worden() else None
+        kanten = kandidat if kandidat.searched() else None
 
     # `theme`/`opened` haben (anders als `kind`/`status`) kein `or`-Fallback —
     # ohne diese zwei Schranken bleibt ihr Typ fuer Pyright `Unknown | None`
@@ -307,7 +308,7 @@ class WorkEngine:
         A dropped record is not a cosmetic gap: ``lint()``'s ``closeable_goals``
         counts a goal's CURRENT children, so a goal whose only still-open
         child failed to load looks fully closeable — the exact inverted
-        zolltarif failure mode this store exists to catch. ``self._errors`` is
+        failure mode this store exists to catch. ``self._errors`` is
         therefore kept on the engine (not just returned here), so every reader
         of this store — ``work_lint``, ``work_status``, the startup banner —
         can surface "N records dropped" instead of silently ranking against an
@@ -386,7 +387,7 @@ class WorkEngine:
         `exclude_kinds` drops matching items from the CANDIDATE POOL, before
         the floor-ratio cut and the `limit` slice — not a post-hoc filter on
         the returned top-N. Etappe D (W8-Reviewer-Fund ERROR-2, 2026-08-20):
-        `work_recall` is the tool S8 reuse-search and `talos-plan-keeper` use
+        `work_recall` is the tool reuse-search and planning agents use
         to find an EXISTING capability before building a new one; after the
         changelog backfill (2377 new `kind: changelog` cards), a query for
         real functionality returned up to 8/8 changelog hits and zero of the
@@ -394,6 +395,11 @@ class WorkEngine:
         existing item to reuse". A post-hoc filter on the top-`limit` results
         would still under-fill (measured: some queries had 0 of 8 survive);
         excluding before the cut keeps the requested `limit` meaningful.
+
+        `limit` is clamped via `core.clamp_limit` — an LLM-supplied tool
+        parameter is not trusted input, and a bare `scored[:limit]` treats
+        a negative `limit` as a valid, reversed Python slice (the same gap
+        docs.py's recall() had before it was clamped).
         """
         bases = bm25_scores(self._bm25_index(), query)
         if not bases:
@@ -409,6 +415,7 @@ class WorkEngine:
         if scored:
             floor = scored[0][0] * _RECALL_FLOOR_RATIO
             scored = [s for s in scored if s[0] >= floor]
+        limit = clamp_limit(limit)
         return [i for _, i in scored[:limit]]
 
     def _bm25_index(self) -> dict:
@@ -493,6 +500,10 @@ class WorkEngine:
         return counts
 
     def fuer_datei(self, file_path: str, limit: int = 8) -> list[WorkItem]:
+        """Deprecated alias for `for_file()` — kept for existing Python callers."""
+        return self.for_file(file_path, limit=limit)
+
+    def for_file(self, file_path: str, limit: int = 8) -> list[WorkItem]:
         """Offene Work-Items, die diese Datei nennen — fuer die Zustellung beim Edit.
 
         Aus "hier sind deine Regeln" wird damit "hier sind deine Regeln, die
@@ -513,7 +524,9 @@ class WorkEngine:
 
         Nur `open`/`active`: ein geschlossener Punkt ist keine Arbeit mehr.
         Deckel bei `limit`, weil eine einzelne Datei sonst zweistellig viele Items
-        zieht und die Zustellung zur Wand wird, die man ueberblaettert.
+        zieht und die Zustellung zur Wand wird, die man ueberblaettert. `limit`
+        laeuft durch `core.clamp_limit` — derselbe Grund wie bei `recall()`
+        oben: ein negativer Wert ist sonst ein gueltiger, umgekehrter Slice.
         """
         ziel = file_path.strip().lstrip("./")
         if not ziel:
@@ -522,10 +535,10 @@ class WorkEngine:
         for i in self._items:
             if i.status not in ("open", "active"):
                 continue
-            # Kanten zuerst: praeziser (Symbol-Ebene) und ausdruecklich vorwaerts.
+            # Reuse-Kanten zuerst: praeziser (Symbol-Ebene) und ausdruecklich vorwaerts.
             rang = None
-            if i.kanten is not None:
-                for anker in (i.kanten.nutzt + i.kanten.erweitert + i.kanten.baut):
+            if i.reuse is not None:
+                for anker in (i.reuse.uses + i.reuse.extends + i.reuse.creates):
                     if anker.split("::", 1)[0].strip().lstrip("./") == ziel:
                         rang = 0
                         break
@@ -539,6 +552,7 @@ class WorkEngine:
         # Kanten vor Evidence, danach aktive vor offenen, dann juengste zuerst.
         treffer.sort(key=lambda t: (t[0], 0 if t[1].status == "active" else 1,
                                     -t[1].opened.toordinal()))
+        limit = clamp_limit(limit)
         return [i for _, i in treffer[:limit]]
 
     def lint(
@@ -547,8 +561,8 @@ class WorkEngine:
         """Read-only hygiene report — mirrors memory.py's ``lint()`` shape so
         both stores are consumed the same way, but every rule here maps to a
         NAMED actor (see the plan's section 2: a finding without an executing
-        party is inert, however correct — that is precisely how the
-        zolltarif-live-test-politur case sat un-actioned since 2026-07-02).
+        party is inert, however correct — that is precisely how a real
+        finding sat un-actioned).
 
         - dangling_refs: {key: [missing target keys]} for part_of/amends/
           supersedes/blocked_by/entblockt_durch pointing at a key that does
@@ -574,10 +588,10 @@ class WorkEngine:
           `plans/begonnen/`, while this very lint reported `dangling_refs: 0`.
           `dangling_refs` above deliberately only covers WORK KEYS; a filesystem
           path is a different kind of reference and simply had no checker.
-        - reuse_ungeprueft: keys with status=active that carry no `kanten`
+        - reuse_not_checked: keys with status=active that carry no `reuse`
           block — work that is being done RIGHT NOW without a recorded
           reuse search. Excludes kind decision/changelog (Etappe B):
-          `kanten` is a FORWARD field, a migrated historical fact never
+          `reuse` is a FORWARD field, a migrated historical fact never
           searched before its own existence. Only `active`, not `open`: an
           open item has not reached the moment where the question changes
           anything, and listing all 878 open items would drown the ones
@@ -607,13 +621,14 @@ class WorkEngine:
           from an old changelog line reads like a cross-record reference but
           is prose about code, same reasoning as the missing_evidence/
           reuse_ungeprueft exclusions above.
-        - kanten_gebrochen: {key: [{typ, ziel, zustand, hinweis}, ...]} for
-          `nutzt`/`erweitert`/`baut`/`modul` anchors whose zustand is not
+        - broken_reuse_refs: {key: [{kind, target, state, hint}, ...]} for
+          `uses`/`extends`/`creates`/`modules` anchors whose state is not
           "ok" or "geplant" (the two healthy states, see `symbol_check`
           below). ``None`` when no `symbol_check` was passed, an empty dict
           when it WAS passed and found nothing — the two must stay
-          distinguishable, same reasoning as `gesucht` set vs. no `kanten`
-          block at all (never let "not checked" read as "checked, clean").
+          distinguishable, same reasoning as `searched_for` set vs. no
+          `reuse` block at all (never let "not checked" read as "checked,
+          clean").
           This engine stays project-agnostic (no `scripts/`, no TALOS
           knowledge) by construction, so the actual anchor lookup is
           INJECTED, never imported here — same pattern as the tokenizer in
@@ -635,7 +650,7 @@ class WorkEngine:
             # Tippfehler, den Owner-Riegel lautlos auf. Dieselbe Fehlerklasse,
             # fuer die `plan_path_broken` unten gebaut wurde.
             missing = [
-                ref for ref in (i.part_of, i.amends, i.supersedes, i.entblockt_durch)
+                ref for ref in (i.part_of, i.amends, i.supersedes, i.unblocked_by)
                 if ref and ref not in by_key
             ]
             missing += [b for b in i.blocked_by if b not in by_key]
@@ -680,12 +695,12 @@ class WorkEngine:
         # `decision`/`changelog` ausgenommen (Etappe B, W8-Reviewer-Fund
         # WARNING-4): `kanten` ist ein VORWAERTS-Feld, eine migrierte
         # historische Tatsache hat vor ihrem eigenen Entstehen nichts gesucht.
-        # Dieselbe Ausnahme steht bereits in talos-plan-keeper.md (13e) — ohne
-        # sie widersprechen sich Doku und Engine-Lint ab dem ersten
-        # migrierten Record (Etappe C).
-        reuse_ungeprueft = [
+        # Dieselbe Ausnahme steht bereits in der Migrations-Doku fuer die
+        # anlegenden Agenten — ohne sie widersprechen sich Doku und
+        # Engine-Lint ab dem ersten migrierten Record (Etappe C).
+        reuse_not_checked = [
             i.key for i in self._items
-            if i.status == "active" and i.kanten is None
+            if i.status == "active" and i.reuse is None
             and i.kind not in ("decision", "changelog")
         ]
 
@@ -722,28 +737,28 @@ class WorkEngine:
         # `None` (not run) vs. `{}` (run, nothing broken) is deliberate — see
         # the docstring entry above. Only computed when the caller injects a
         # checker, so a plain `WorkEngine.lint()` stays as cheap as before.
-        kanten_gebrochen: dict[str, list[dict]] | None = None
+        broken_reuse_refs: dict[str, list[dict]] | None = None
         if symbol_check is not None:
-            kanten_gebrochen = {}
+            broken_reuse_refs = {}
             for i in self._items:
-                if i.kanten is None:
+                if i.reuse is None:
                     continue
                 funde = []
                 for typ, ziele in (
-                    ("nutzt", i.kanten.nutzt),
-                    ("erweitert", i.kanten.erweitert),
-                    ("baut", i.kanten.baut),
-                    ("modul", i.kanten.modul),
+                    ("uses", i.reuse.uses),
+                    ("extends", i.reuse.extends),
+                    ("creates", i.reuse.creates),
+                    ("modules", i.reuse.modules),
                 ):
                     for ziel in ziele:
                         zustand, hinweis = symbol_check(typ, ziel)
                         if zustand not in ("ok", "geplant"):
                             funde.append({
-                                "typ": typ, "ziel": ziel,
-                                "zustand": zustand, "hinweis": hinweis,
+                                "kind": typ, "target": ziel,
+                                "state": zustand, "hint": hinweis,
                             })
                 if funde:
-                    kanten_gebrochen[i.key] = funde
+                    broken_reuse_refs[i.key] = funde
 
         return {
             "total": len(self._items),
@@ -752,8 +767,8 @@ class WorkEngine:
             "missing_evidence": sorted(missing_evidence),
             "unclosed_pairs": sorted(unclosed_pairs),
             "plan_path_broken": plan_path_broken,
-            "reuse_ungeprueft": sorted(reuse_ungeprueft),
+            "reuse_not_checked": sorted(reuse_not_checked),
             "body_link_broken": body_link_broken,
-            "kanten_gebrochen": kanten_gebrochen,
+            "broken_reuse_refs": broken_reuse_refs,
             "load_errors": list(self._errors),
         }

@@ -156,6 +156,23 @@ def discover_work_dir() -> Path | None:
     return None
 
 
+def discover_domains_dir() -> Path | None:
+    """Locate the PROJECT custom-domains directory. Env ``CONTEXT_DOMAINS_DIR``
+    wins, else walk up for ``<convention>/domains``. Returns ``None`` when
+    absent — same optional-store gating shape as ``discover_work_dir``."""
+    env = os.environ.get("CONTEXT_DOMAINS_DIR")
+    if env:
+        p = Path(env).expanduser().resolve()
+        return p if p.is_dir() else None
+    cwd = Path.cwd()
+    for candidate in [cwd, *cwd.parents]:
+        for conv in store_conventions():
+            doms = candidate / conv / "domains"
+            if doms.is_dir():
+                return doms.resolve()
+    return None
+
+
 def warn_if_example_rules(rules_dir: Path) -> None:
     """The shipped starter pack (``examples/rules``) is INERT — copy-to-activate,
     never a production default. Auto-discovery (``<dir>/.context/rules`` or
@@ -329,3 +346,27 @@ def bm25_scores(
             norm = 1 - b + b * (lengths[key] / avg_len)
             bases[key] = bases.get(key, 0.0) + idf * (tf * (k1 + 1) / (tf + k1 * norm))
     return bases
+
+
+# Shared upper bound for every `limit:` parameter across rules/memory/work/
+# docs — generous enough that no real caller needs more in one call, far
+# below the "return most of the corpus" scale an unclamped bad/negative
+# value hits. `docs.recall()` was the first to need this (measured:
+# limit=-1 returned 1,954 sections, ~1.44M tokens, for a single call — a
+# bare `scored[:limit]` treats a negative limit as a valid, reversed Python
+# slice). memory.recall()/work.recall() had the identical gap; this was a
+# second, independently-written copy waiting to happen, not a
+# domain-specific concern — hence one function here instead of four.
+MAX_RECALL_LIMIT = 50
+
+
+def clamp_limit(limit: int, *, maximum: int = MAX_RECALL_LIMIT) -> int:
+    """Coerce a caller-supplied `limit` into `[1, maximum]`. An LLM-supplied
+    tool parameter is not trusted input — this is the one place every
+    recall/list-style tool enforces that, so the failure mode (unbounded
+    slice on a negative or huge value) cannot be independently reintroduced
+    per call site. Type errors (e.g. a string) are the MCP framework's job
+    (FastMCP validates against the `int` type hint before the tool body
+    ever runs) — this only handles values that are legal Python ints but
+    semantically out of range."""
+    return max(1, min(int(limit), maximum))

@@ -271,10 +271,10 @@ class TestHierarchyAndRollup:
         assert e.rollup("goal") == {"total": 3, "open": 1, "active": 2,
                                      "done": 0, "dropped": 0, "superseded": 0}
 
-    def test_closeable_goal_is_the_zolltarif_case(self, tmp_path: Path):
-        # The plan's sharpest single finding: a 2026-07-02 audit already
-        # recommended closing this exact item and nothing acted on it. This
-        # is the mechanical detector for that failure mode.
+    def test_closeable_goal_catches_the_forgotten_goal_case(self, tmp_path: Path):
+        # The plan's sharpest single finding: an audit already recommended
+        # closing this exact item and nothing acted on it. This is the
+        # mechanical detector for that failure mode.
         e = self._goal_with_children(tmp_path, ["done", "done"])
         assert e.lint()["closeable_goals"] == ["goal"]
 
@@ -419,7 +419,7 @@ class TestLint:
                "opened: 2026-07-01\nkanten:\n  gesucht:\n    - x\n"
                "  nutzt:\n    - services/foo.py::bar")
         e = WorkEngine.from_directory(tmp_path)
-        assert e.lint()["kanten_gebrochen"] is None
+        assert e.lint()["broken_reuse_refs"] is None
 
     def test_kanten_gebrochen_reports_only_unhealthy_states(self, tmp_path: Path):
         _write(tmp_path, "a.md",
@@ -430,18 +430,18 @@ class TestLint:
 
         def check(typ: str, ziel: str) -> tuple:
             werte = {
-                ("nutzt", "ok.py::vorhanden"): ("ok", None),
-                ("erweitert", "weg.py::verschwunden"): ("gebrochen", "weg"),
-                ("baut", "neu.py::kommt_noch"): ("geplant", None),
-                ("modul", "ein_modul"): ("ok", None),
+                ("uses", "ok.py::vorhanden"): ("ok", None),
+                ("extends", "weg.py::verschwunden"): ("gebrochen", "weg"),
+                ("creates", "neu.py::kommt_noch"): ("geplant", None),
+                ("modules", "ein_modul"): ("ok", None),
             }
             return werte[(typ, ziel)]
 
         e = WorkEngine.from_directory(tmp_path)
-        kg = e.lint(check)["kanten_gebrochen"]
+        kg = e.lint(check)["broken_reuse_refs"]
         # ok + geplant sind gesund und fehlen; nur gebrochen erscheint.
-        assert kg == {"a": [{"typ": "erweitert", "ziel": "weg.py::verschwunden",
-                              "zustand": "gebrochen", "hinweis": "weg"}]}
+        assert kg == {"a": [{"kind": "extends", "target": "weg.py::verschwunden",
+                              "state": "gebrochen", "hint": "weg"}]}
 
     def test_kanten_gebrochen_never_calls_check_for_gesucht(self, tmp_path: Path):
         # `gesucht` entries are search terms, not anchors, and cannot "break".
@@ -455,7 +455,7 @@ class TestLint:
             return "ok", None
 
         e = WorkEngine.from_directory(tmp_path)
-        assert e.lint(check)["kanten_gebrochen"] == {}
+        assert e.lint(check)["broken_reuse_refs"] == {}
         assert gesehen == []
 
     def test_kanten_gebrochen_empty_dict_when_run_and_clean(self, tmp_path: Path):
@@ -464,7 +464,7 @@ class TestLint:
                "opened: 2026-07-01\nkanten:\n  gesucht:\n    - x\n"
                "  nutzt:\n    - services/foo.py::bar")
         e = WorkEngine.from_directory(tmp_path)
-        assert e.lint(lambda _typ, _ziel: ("ok", None))["kanten_gebrochen"] == {}
+        assert e.lint(lambda _typ, _ziel: ("ok", None))["broken_reuse_refs"] == {}
 
 
 class TestKantenUndPlanPath:
@@ -510,19 +510,19 @@ class TestKantenUndPlanPath:
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
                "opened: 2026-01-01\nrequires_owner: true\nunblocked_by: b\nmigrated: true\n"
-               "reuse:\n  searched_for:\n    - 'anonymize PII'\n"
-               "  uses:\n    - services/privacy_filter.py::anonymize")
+               "reuse:\n  searched_for:\n    - 'retry with backoff'\n"
+               "  uses:\n    - services/http_client.py::retry")
         item = WorkEngine.from_directory(tmp_path).get("a")
         assert item is not None
         assert item.requires_owner is True
         assert item.unblocked_by == "b"
         assert item.migrated is True
         assert item.reuse is not None
-        assert item.reuse.searched_for == ["anonymize PII"]
-        assert item.reuse.uses == ["services/privacy_filter.py::anonymize"]
+        assert item.reuse.searched_for == ["retry with backoff"]
+        assert item.reuse.uses == ["services/http_client.py::retry"]
         # Alias properties work
         assert item.braucht_owner is True
-        assert item.kanten.nutzt == ["services/privacy_filter.py::anonymize"]
+        assert item.kanten.nutzt == ["services/http_client.py::retry"]
 
     def test_gesucht_ohne_treffer_zaehlt_als_geprueft(self, tmp_path: Path):
         """Der Kern: leere Listen sind ein ERGEBNIS, kein fehlender Eintrag."""
@@ -531,7 +531,7 @@ class TestKantenUndPlanPath:
                "opened: 2026-01-01\nkanten:\n  gesucht:\n    - 'nichts dergleichen'")
         e = WorkEngine.from_directory(tmp_path)
         assert e.get("a").kanten is not None
-        assert e.lint()["reuse_ungeprueft"] == []
+        assert e.lint()["reuse_not_checked"] == []
 
     def test_leerer_kanten_block_gilt_NICHT_als_geprueft(self, tmp_path: Path):
         """Sonst genuegte `kanten: {}` um das Gate zu umgehen."""
@@ -540,7 +540,7 @@ class TestKantenUndPlanPath:
                "opened: 2026-01-01\nkanten:\n  gesucht: []\n  nutzt: []")
         e = WorkEngine.from_directory(tmp_path)
         assert e.get("a").kanten is None
-        assert e.lint()["reuse_ungeprueft"] == ["a"]
+        assert e.lint()["reuse_not_checked"] == ["a"]
 
     def test_string_statt_liste_ist_ein_FEHLER_kein_gate_oeffner(self, tmp_path: Path):
         """Der teuerste Tippfehler: `gesucht: text` statt `gesucht:\n  - text`.
@@ -685,18 +685,18 @@ class TestKantenUndPlanPath:
         _write(tmp_path, "aktiv.md",
                "key: aktiv\ntitle: A\nkind: step\nstatus: active\ntheme: engine\n"
                "opened: 2026-01-01")
-        assert WorkEngine.from_directory(tmp_path).lint()["reuse_ungeprueft"] == ["aktiv"]
+        assert WorkEngine.from_directory(tmp_path).lint()["reuse_not_checked"] == ["aktiv"]
 
     @pytest.mark.parametrize("kind", ["decision", "changelog"])
     def test_reuse_ungeprueft_nimmt_decision_und_changelog_aus(self, tmp_path: Path, kind: str):
         """W8-Reviewer-Fund WARNING-4: `kanten` ist ein VORWAERTS-Feld — eine
         migrierte historische Tatsache hat vor ihrem eigenen Entstehen nichts
         gesucht. Ohne diese Ausnahme widerspraeche der Engine-Lint der in
-        talos-plan-keeper.md dokumentierten Gate-Ausnahme."""
+        der Migrations-Doku dokumentierten Gate-Ausnahme."""
         _write(tmp_path, "a.md",
                f"key: a\ntitle: A\nkind: {kind}\nstatus: active\ntheme: engine\n"
                "opened: 2026-01-01")
-        assert WorkEngine.from_directory(tmp_path).lint()["reuse_ungeprueft"] == []
+        assert WorkEngine.from_directory(tmp_path).lint()["reuse_not_checked"] == []
 
     def test_entblockt_durch_auf_unbekannten_key_wird_gemeldet(self, tmp_path: Path):
         """W8-Reviewer-Fund WARNING-2: ohne diese Pruefung hebt jeder truthy
@@ -763,6 +763,18 @@ class TestZustellungFuerDatei:
                "  nutzt:\n    - backend/app/services/x.py::foo")
         t = WorkEngine.from_directory(tmp_path).fuer_datei("backend/app/services/x.py")
         assert [i.key for i in t] == ["ka", "ev"]
+
+    def test_negative_limit_clamps_instead_of_reversing(self, tmp_path: Path):
+        # Same class of gap as recall()'s: `treffer[:limit]` treated a
+        # negative limit as a valid, reversed Python slice.
+        for i in range(5):
+            _write(tmp_path, f"a{i}.md",
+                   f"key: a{i}\ntitle: A{i}\nkind: step\nstatus: open\n"
+                   f"theme: engine\nopened: 2026-01-01\nevidence:\n  commits: []\n"
+                   f"  files:\n    - backend/app/services/x.py")
+        t = WorkEngine.from_directory(tmp_path).for_file(
+            "backend/app/services/x.py", limit=-1)
+        assert len(t) == 1
 
     def test_deckel_haelt(self, tmp_path: Path):
         """Eine Wand wird ueberblaettert, eine Handvoll gelesen."""
@@ -845,6 +857,31 @@ class TestRecall:
         e = WorkEngine.from_directory(tmp_path)
         assert e.recall("voellig unpassender begriff xyz") == []
 
+    def test_recall_clamps_negative_limit(self, tmp_path: Path):
+        # A bare `scored[:limit]` treats a negative limit as a valid,
+        # reversed Python slice — same gap docs.py's recall() had before
+        # it was clamped (see core.clamp_limit). Unclamped, `scored[:-1]`
+        # on 10 candidates drops only the last one (9 survive) regardless
+        # of individual scores — a loose `1 <= n <= 10` bound would pass
+        # either way, so this pins the exact count.
+        for i in range(10):
+            _write(tmp_path, f"i{i}.md",
+                   f"key: i{i}\ntitle: Gemeinsamer Suchbegriff {i}\nkind: goal\n"
+                   f"status: open\ntheme: engine\nopened: 2026-07-01")
+        e = WorkEngine.from_directory(tmp_path)
+        hits = e.recall("Gemeinsamer Suchbegriff", limit=-1)
+        assert len(hits) == 1
+
+    def test_recall_clamps_excessive_limit(self, tmp_path: Path):
+        # A single candidate proves "does not raise" but not "caps at 50" —
+        # a corpus over the ceiling is needed to actually pin the clamp.
+        for i in range(60):
+            _write(tmp_path, f"i{i}.md",
+                   f"key: i{i}\ntitle: Suchbegriff {i}\nkind: goal\n"
+                   f"status: open\ntheme: engine\nopened: 2026-07-01")
+        e = WorkEngine.from_directory(tmp_path)
+        assert len(e.recall("Suchbegriff", limit=10_000)) == 50
+
     def test_recall_is_symmetric_with_snake_case_query(self, tmp_path: Path):
         # Regression pin for the exact bug the shared core.split_token fixes:
         # a query for the compound must not double-count against a title
@@ -865,17 +902,17 @@ class TestRecall:
         VOR dem `limit`-Schnitt greifen, deshalb hier mit `limit=1` gegen
         einen Bestand, in dem die Changelog-Karte den staerkeren Treffer hat."""
         _write(tmp_path, "changelog_hit.md",
-               "key: changelog_hit\ntitle: Zolltarif Suche\nkind: changelog\n"
+               "key: changelog_hit\ntitle: Kumquat Suche\nkind: changelog\n"
                "status: done\ntheme: engine\nopened: 2026-01-01\nclosed: 2026-01-01")
         _write(tmp_path, "goal_hit.md",
                "key: goal_hit\ntitle: Sonstiges\nkind: goal\nstatus: open\n"
                "theme: engine\nopened: 2026-01-01",
-               body="Erwaehnt Zolltarif nur einmal beilaeufig im Fliesstext.")
+               body="Erwaehnt Kumquat nur einmal beilaeufig im Fliesstext.")
         e = WorkEngine.from_directory(tmp_path)
         # Ohne Filter gewinnt der Titel-Treffer (Changelog) den einzigen Platz.
-        assert [i.key for i in e.recall("zolltarif suche", limit=1)] == ["changelog_hit"]
+        assert [i.key for i in e.recall("kumquat suche", limit=1)] == ["changelog_hit"]
         # Mit Filter faellt die Changelog-Karte VOR dem limit=1-Schnitt raus,
         # der goal-Record bleibt uebrig statt einer leeren Liste.
-        gefiltert = e.recall("zolltarif suche", limit=1,
+        gefiltert = e.recall("kumquat suche", limit=1,
                              exclude_kinds=frozenset({"decision", "changelog"}))
         assert [i.key for i in gefiltert] == ["goal_hit"]

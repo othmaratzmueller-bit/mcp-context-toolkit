@@ -209,7 +209,10 @@ class WorkEdges(BaseModel):
     creates: list[str] = Field(default=[], validation_alias=AliasChoices("creates", "baut"))
     modules: list[str] = Field(default=[], validation_alias=AliasChoices("modules", "modul"))
 
-    # Abwärtskompatible Properties für deutsche Alt-Namen
+    # Backward-compatible properties for the old German attribute names.
+    # Deprecated: read `searched_for`/`found`/`conclusion`/`uses`/`extends`/
+    # `creates`/`modules` instead. Kept for existing Python callers only —
+    # never document these in new public examples.
     @property
     def gesucht(self) -> list[str]:
         return self.searched_for
@@ -238,10 +241,14 @@ class WorkEdges(BaseModel):
     def modul(self) -> list[str]:
         return self.modules
 
-    def gesucht_worden(self) -> bool:
+    def searched(self) -> bool:
         """Was a search recorded at all? An empty `reuse:` block is not one."""
         return bool(self.searched_for or self.found or self.uses
                     or self.extends or self.creates or self.modules)
+
+    def gesucht_worden(self) -> bool:
+        """Deprecated alias for `searched()` — kept for existing Python callers."""
+        return self.searched()
 
 
 class WorkItem(BaseModel):
@@ -273,7 +280,9 @@ class WorkItem(BaseModel):
     body: str = ""
     source_path: str | None = None
 
-    # Abwärtskompatible Properties für deutsche Alt-Namen
+    # Backward-compatible properties for the old German attribute names.
+    # Deprecated: read `reuse`/`requires_owner`/`unblocked_by`/`migrated`
+    # instead. Kept for existing Python callers only.
     @property
     def kanten(self) -> WorkEdges | None:
         return self.reuse

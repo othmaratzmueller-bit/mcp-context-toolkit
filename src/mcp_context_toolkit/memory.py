@@ -22,9 +22,11 @@ from pydantic import BaseModel
 
 from mcp_context_toolkit.core import LINK_RE as _LINK_RE
 from mcp_context_toolkit.core import (
+    MAX_RECALL_LIMIT,
     KnowledgeLoadError,
     bm25_scores,
     build_bm25_index,
+    clamp_limit,
     iter_files,
     parse_frontmatter,
     prefix_slice,
@@ -292,6 +294,7 @@ class MemoryEngine:
         self, query: str, limit: int = 8,
         boost: dict[str, float] | None = None,
         backlink_boost: dict[str, float] | None = None,
+        *, max_limit: int = MAX_RECALL_LIMIT,
     ) -> list[Memory]:
         """Rank memories by keyword overlap with the query across both tiers.
 
@@ -326,6 +329,19 @@ class MemoryEngine:
         ``_RECALL_FLOOR_RATIO`` of the top hit, so weak single-word near-misses
         do not surface behind the strong matches (relevant for the per-prompt
         hook's exclude-backfill across a same-topic thread).
+
+        ``limit`` is clamped via ``core.clamp_limit`` — an LLM-supplied tool
+        parameter is not trusted input, and a bare ``scored[:limit]`` treats
+        a negative ``limit`` as a valid, reversed Python slice (the same gap
+        docs.py's recall() had before it was clamped). ``max_limit`` raises
+        that ceiling for a caller with a legitimate reason to ask for more
+        than the tool-surface default — the CLI's per-prompt memory recall
+        deliberately over-fetches (``limit + len(exclude)``, where
+        ``exclude`` is the hook's already-injected set and can grow past 50
+        over a long session) so that filtering ``exclude`` back out still
+        leaves ``limit`` results; without this the default ceiling would
+        silently truncate the candidate pool BEFORE the exclude filter runs,
+        under-filling the response with no error.
         """
         boost = boost or {}
         backlink_boost = backlink_boost or {}
@@ -359,6 +375,7 @@ class MemoryEngine:
         if scored:
             floor = scored[0][0] * _RECALL_FLOOR_RATIO
             scored = [s for s in scored if s[0] >= floor]
+        limit = clamp_limit(limit, maximum=max_limit)
         return [m for _, _, m in scored[:limit]]
 
     def _bm25_index(self) -> dict:

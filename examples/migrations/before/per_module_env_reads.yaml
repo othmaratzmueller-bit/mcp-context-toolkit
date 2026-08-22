@@ -1,0 +1,9 @@
+title: Per-module environment reads
+date: 2026-01-01
+status: rejected
+applies_to:
+  files: []
+reason: |
+  Rejected alternative to layered_config: let each module read its own
+  os.environ keys directly. Superseded before it shipped — see
+  layered_config for the decision actually made.

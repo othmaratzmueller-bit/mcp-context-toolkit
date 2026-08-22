@@ -25,7 +25,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from mcp_context_toolkit.core import bm25_scores, build_bm25_index, iter_files
+from mcp_context_toolkit.core import bm25_scores, build_bm25_index, clamp_limit, iter_files
 
 # BM25F field weights — a heading hit counts more than a body hit, same
 # reasoning as memory.py's _W_NAME vs _W_BODY (a term in the label is a
@@ -34,10 +34,6 @@ _W_HEADING, _W_BODY = 2.0, 1.0
 # Same floor as memory.py/work.py — see their docstrings for why a fixed
 # ratio of the top score, not an absolute cutoff, drops weak near-misses.
 _RECALL_FLOOR_RATIO = 0.25
-# Upper clamp for `limit` (see recall()'s docstring for the incident this
-# closes) — generous enough that no real caller needs more in one call, far
-# below the "return most of the corpus" scale a bad/negative value hit.
-_MAX_LIMIT = 50
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
@@ -184,13 +180,12 @@ class DocsEngine:
         as memory.py/work.py (core.bm25_scores), so one query mechanic serves
         all four domains instead of a fifth independently-tunable copy.
 
-        ``limit`` is clamped to ``[1, _MAX_LIMIT]`` — W8-Reviewer-Fund
-        ERROR-1, Etappe F: an LLM-supplied tool parameter is not trusted
+        ``limit`` is clamped via ``core.clamp_limit`` — see that function's
+        docstring for why: an LLM-supplied tool parameter is not trusted
         input, and a bare ``scored[:limit]`` treats a negative ``limit`` as
         a valid (reversed, from-the-end) Python slice. Measured against the
         real corpus: ``limit=-1`` returned 1,954 sections (~1.44M tokens)
-        for a single tool call — clamping is the whole fix, no other code
-        path produces this."""
+        for a single tool call before this was clamped."""
         bases = bm25_scores(self._bm25_index(), query)
         if not bases:
             return []
@@ -200,7 +195,7 @@ class DocsEngine:
         if scored:
             floor = scored[0][0] * _RECALL_FLOOR_RATIO
             scored = [s for s in scored if s[0] >= floor]
-        limit = max(1, min(limit, _MAX_LIMIT))
+        limit = clamp_limit(limit)
         return [s for _, s in scored[:limit]]
 
     @staticmethod

@@ -1,21 +1,20 @@
 # Custom Domain Manifest for mcp-context-toolkit
-# Defines a custom domain named view / scope for code quality & security rules.
+# A named VIEW over this project's own rules store — no separate data,
+# just a filtered slice: security + code-quality rules at non_negotiable
+# or mandatory priority. See the "Domains" section in README.md.
 
-domain: code-quality
+id: code_quality
 title: "Code Quality & Security Guidelines"
-description: "Curated domain view combining mandatory security rules and code style standards."
+profile: rules
+source: rules   # view over the existing rules store, not a separate copy
 
-triggers:
-  - source: rules
-    filter:
-      types:
-        - security
-        - code_style
-      priorities:
-        - non_negotiable
-        - mandatory
+filter:
+  types:
+    - security
+    - code_quality
+  priorities:
+    - non_negotiable
+    - mandatory
 
 attributes:
   owner: "Architecture Team"
-  managed_by: "mcp-context-toolkit"
-  docs_url: "https://github.com/othmaratzmueller-bit/mcp-context-toolkit"

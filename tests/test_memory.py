@@ -62,6 +62,28 @@ class TestMemoryEngine:
         e = MemoryEngine.from_directory(tmp_path)
         assert e.recall("   ") == []
 
+    def test_recall_clamps_negative_limit(self, tmp_path: Path):
+        # A bare `scored[:limit]` treats a negative limit as a valid,
+        # reversed Python slice — same gap docs.py's recall() had before
+        # it was clamped (see core.clamp_limit). All 10 memories score
+        # identically here, so `scored[:-1]` (unclamped) would return 9,
+        # not 1 — a loose `1 <= n <= 10` bound would pass either way.
+        for i in range(10):
+            _write(tmp_path, f"m{i}.md", f"name: m{i}\ntype: feedback",
+                   "Gemeinsamer Suchbegriff wiederholt.")
+        e = MemoryEngine.from_directory(tmp_path)
+        hits = e.recall("Gemeinsamer Suchbegriff", limit=-1)
+        assert len(hits) == 1
+
+    def test_recall_clamps_excessive_limit(self, tmp_path: Path):
+        # A single candidate proves "does not raise" but not "caps at 50" —
+        # a corpus over the ceiling is needed to actually pin the clamp.
+        for i in range(60):
+            _write(tmp_path, f"m{i}.md", f"name: m{i}\ntype: feedback",
+                   "Suchbegriff wiederholt.")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert len(e.recall("Suchbegriff", limit=10_000)) == 50
+
     def test_recall_matches_word_start_not_substring(self, tmp_path: Path):
         # The matcher anchors a term to a word start: it follows forward-stems
         # and snake_case parts, but ignores incidental substrings.
@@ -511,6 +533,27 @@ class TestCliMemoryCommands:
         out = json.loads(capsys.readouterr().out)
         assert out["names"] == [] and out["markdown"] is None
 
+    def test_large_exclude_set_does_not_starve_the_result_below_limit(
+        self, tmp_path: Path, capsys, monkeypatch,
+    ):
+        # Regression for a latent contract break the shared 50-item recall
+        # ceiling introduced: a long session's `exclude` set (measured on
+        # real session-state files: up to 106 entries) makes
+        # `limit + len(exclude)` exceed 50. All 60 memories here score
+        # identically and tiebreak alphabetically (m00..m59); excluding the
+        # 50 that sort first would, without `max_limit`, clamp the
+        # candidate pool to exactly those 50 and filter every one of them
+        # out — an empty result despite 10 real, unexcluded candidates.
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        for i in range(60):
+            _write(tmp_path, f"m{i:02d}.md", f"name: m{i:02d}\ntier: project",
+                   "shared topic keyword")
+        excluded = {f"m{i:02d}" for i in range(50)}
+        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 6, excluded)
+        out = json.loads(capsys.readouterr().out)
+        assert out["count"] == 6
+        assert set(out["names"]) == {f"m{i:02d}" for i in range(50, 56)}
+
 
 class TestBacklinkBoostInRecall:
     """Tests for backlink_boost parameter in recall()."""
@@ -836,11 +879,11 @@ class TestBm25Ranking:
         """IDF: a word carried by almost every memory must not decide a ranking."""
         for i in range(12):
             _write(tmp_path, f"filler{i}.md", f"name: filler{i}", "the common word here")
-        # 'common' is everywhere, 'zolltarif' is unique to one memory.
-        _write(tmp_path, "rare.md", "name: rare_topic", "zolltarif specifics")
+        # 'common' is everywhere, 'kumquat' is unique to one memory.
+        _write(tmp_path, "rare.md", "name: rare_topic", "kumquat specifics")
         _write(tmp_path, "bulk.md", "name: bulk_note", "common common common common")
         e = MemoryEngine.from_directory(tmp_path)
-        assert e.recall("common zolltarif")[0].name == "rare_topic"
+        assert e.recall("common kumquat")[0].name == "rare_topic"
 
     def test_length_normalisation_favours_the_focused_note(self, tmp_path: Path):
         """A short note about X beats a long one that merely mentions X."""

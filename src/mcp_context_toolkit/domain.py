@@ -10,25 +10,33 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from mcp_context_toolkit.core import KnowledgeLoadError, store_conventions
+from mcp_context_toolkit.models import _StrengesModell
 
 DomainProfile = Literal["rules", "memory", "work", "docs"]
 
 
-class DomainTrigger(BaseModel):
+class DomainTrigger(_StrengesModell):
     keywords: list[str] = Field(default_factory=list)
     paths: list[str] = Field(default_factory=list)
 
 
-class DomainFilter(BaseModel):
+class DomainFilter(_StrengesModell):
+    # `themes`/`statuses` are the Work vocabulary (WorkItem.theme/.status).
+    # `types`/`priorities` are the Rules vocabulary (Rule.type/.priority).
+    # A filter only makes sense against the profile it targets; an unrelated
+    # pair simply stays empty and has no effect — no cross-profile validation
+    # here, same as the rest of this engine leaving shape checks to Pydantic.
     themes: list[str] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)
+    types: list[str] = Field(default_factory=list)
+    priorities: list[str] = Field(default_factory=list)
     paths: list[str] = Field(default_factory=list)
 
 
-class DomainManifest(BaseModel):
+class DomainManifest(_StrengesModell):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     title: str
     root: str | None = None
@@ -64,6 +72,21 @@ class DomainEngine:
 
     def __init__(self) -> None:
         self._manifests: dict[str, DomainManifest] = {}
+
+    @classmethod
+    def from_directory(cls, domains_dir: Path | str) -> DomainEngine:
+        """Load every ``<domains_dir>/<id>/domain.yaml`` directly, no walk-up.
+        Same `.from_directory()` shape as `WorkEngine`/`MemoryEngine`/
+        `DocsEngine` — for a caller that already resolved the directory
+        (e.g. the MCP server via `core.discover_domains_dir()`)."""
+        engine = cls()
+        for manifest_file in Path(domains_dir).glob("*/domain.yaml"):
+            try:
+                manifest = parse_domain_manifest(manifest_file)
+                engine._manifests[manifest.id] = manifest
+            except KnowledgeLoadError:
+                continue
+        return engine
 
     @classmethod
     def discover_domains(cls, root: Path | None = None) -> DomainEngine:

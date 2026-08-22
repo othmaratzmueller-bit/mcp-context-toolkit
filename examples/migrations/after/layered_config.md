@@ -1,0 +1,21 @@
+---
+key: layered_config
+title: 'Layered configuration over environment sniffing'
+kind: decision
+status: done
+theme: migrations
+opened: 2026-01-01
+closed: 2026-01-01
+evidence:
+  commits: []
+  files:
+    - src/config/**/*.py
+---
+
+Decision: Load configuration from explicit layered sources (defaults <- env file
+<- CLI flags), resolved once at startup. Never sniff the hostname or an
+environment variable at individual call sites.
+Why: Call-site environment checks scatter branching logic across the codebase and
+make behaviour depend on process state that tests can't easily control.
+Alternatives rejected: Per-module os.environ reads — no single source of truth,
+and every new switch multiplies the branches to test.

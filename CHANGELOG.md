@@ -61,6 +61,309 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
   load over one malformed decision file. Non-string keys are now reported like
   any other bad file.
 
+## [1.0.0] — 2026-08-21
+
+First stable release. Consolidates the work since rc9. The "Known gaps
+going into 1.x" section below is the authoritative list of what is still
+experimental or TALOS-tied — nothing else in this repo claims otherwise.
+
+### Added
+- **`context-toolkit-query --doctor`** — reports discovered store paths
+  (rules/memory/work/docs), loaded record counts, and load errors in one
+  call, without starting the MCP server. (This toolkit's CLI is
+  flag-based throughout, not subcommand-based — `--doctor`, not
+  `doctor`.)
+- **`context-toolkit-query --validate-all`** — validates rules, memory,
+  and work stores together with a single exit code, for CI use.
+- **`context-toolkit-query --migrate-decisions --from DIR --to DIR
+  [--dry-run]`** — migrates a legacy `.context/decisions/` store into the
+  Work Store (`kind: decision`). The underlying function existed since
+  rc9 but was never wired to argparse or tested — fixed together with a
+  real bug the new tests caught: `--dry-run` was still creating the
+  target directory (not writing files into it, but not a no-op either).
+- **English Work Store field aliases** (`models.py`, `AliasChoices`) —
+  `reuse`/`searched_for`/`found`/`conclusion`/`uses`/`extends`/`creates`/
+  `modules`/`requires_owner`/`unblocked_by`/`migrated` are now accepted
+  alongside the original German field names on read. Unknown keys are
+  still a load error either way.
+- **`WorkTheme` as a validated slug** instead of a fixed literal — any
+  syntactically valid theme is now accepted; a host may still constrain
+  the list via configuration.
+- **`examples/generic-project/`** — a complete, TALOS-free example
+  covering rules, memory, and work-store records.
+- **Local usage telemetry** (`usage.py::TelemetryStore`) — optional,
+  fail-soft JSONL event log (tool, latency, matched count, delivered
+  tokens, estimated token savings) under `.context/logs/`.
+- **Generic domain manifest parsing** (`domain.py::DomainManifest`,
+  `DomainEngine.discover_domains/list_domains/get_domain`) — reads
+  `.context/domains/<id>/domain.yaml` and can list/look up domains
+  programmatically.
+
+  **Now wired to real MCP tools** — `list_domains()`/`get_domain(id)`/
+  `query_domain(id, query, limit?)` (see README's "Domains" section).
+  `DomainFilter` gained `types`/`priorities` (the Rules vocabulary,
+  alongside the existing `themes`/`statuses` for Work) and, like the rest
+  of this engine's YAML models, now rejects unknown manifest keys instead
+  of silently dropping them. The shipped `examples/generic-project/`
+  domain manifest previously did not even parse against this model
+  (wrong field names entirely — `domain:`/`triggers:` instead of
+  `id:`/`trigger:`); it is now a real, tested `critical_security`-style
+  rules view. Current scope is Ausbaustufe 1 (manifest discovery + these
+  three tools) — no `domain` CLI subcommand yet, no automatic
+  path/prompt-based routing; a domain is always queried explicitly by id.
+
+### Changed
+- Decision loader failures are reported via the existing `load_errors`
+  channel (`[decision]` prefix) instead of being silently dropped.
+- **Public Python API and MCP responses are now English-first.**
+  `WorkEngine.for_file()` (was `fuer_datei()`), `WorkEdges.searched()`
+  (was `gesucht_worden()`), and the `WorkEngine.lint()` /
+  `work_lint` MCP tool result keys `reuse_not_checked` (was
+  `reuse_ungeprueft`) and `broken_reuse_refs` (was `kanten_gebrochen`,
+  whose per-entry fields are now `kind`/`target`/`state`/`hint` instead
+  of `typ`/`ziel`/`zustand`/`hinweis`) are the primary names. The old
+  German method/function names remain as thin deprecated wrappers for
+  existing Python callers; MCP tool responses use the English names
+  only — there is no transition alias at that layer, unlike the YAML
+  loader.
+- README's Work Store schema example and prose now show the English
+  field names as the reference; the old German names are called out
+  once as a documented read-only alias, not shown as the primary form.
+- **Formal host-adapter protocol** (`host_adapters.py`, new module) —
+  `HostAdapter` is a `typing.Protocol` with two methods (`resolve_symbol`,
+  `path_to_id`); the previously private, `mcp_server.py`-internal TALOS
+  resolver logic (`_kanten_check_factory`/`_path_to_id_factory`) is now
+  `TalosDiscoveryAdapter`, one formal implementation of that protocol —
+  still built in (not yet split out to `examples/host-profiles/talos/`,
+  see remaining gaps below), but callable and testable through the
+  Protocol instead of two private functions. `DemoAdapter` ships
+  alongside it as a minimal second implementation, proving the protocol
+  needs nothing TALOS-specific. `tests/host_adapters/test_talos_adapter.py`
+  now goes through `TalosDiscoveryAdapter.path_to_id` rather than
+  importing a private function from `mcp_server.py`.
+- **`mcp_server.py` split into `server/`** — one module per domain
+  (`app.py` wiring + `reloaders.py` + `serializers.py` + `discovery.py` +
+  `tools_rules.py`/`tools_memory.py`/`tools_work.py`/`tools_docs.py`/
+  `tools_domains.py`/`tools_baustein.py`/`tools_capability.py`), each
+  exposing a `register(tool_decorator, ...)` function `build_server()`
+  calls. A change to `tools_docs.py` now needs no edit to `tools_work.py`
+  or any other domain module. `mcp_server.py` itself becomes a thin
+  backward-compatible re-export — the `context-toolkit-mcp` console
+  script (`pyproject.toml`) still resolves `mcp_context_toolkit.
+  mcp_server:main`, and every existing `from mcp_context_toolkit.
+  mcp_server import ...` keeps working at the same import path. No
+  public MCP tool name, tool count, schema, or return value changed —
+  the full test suite (335 tests) passes byte-for-byte the same before
+  and after. 17 of 24 tool docstrings shifted by one indent level as a
+  mechanical side effect of moving each `@tool` out of `build_server()`
+  into its own module-level function; whitespace-normalized, all 17
+  are unchanged text.
+- **`--migrate-decisions` corrected against a real legacy store, not just
+  its own synthetic fixtures — twice.** First pass, checked against the
+  DoD from the plan (field mapping, conflict/overwrite reporting,
+  non-transferable-field reporting), found three bugs: the target Work
+  Card `key` was taken from the filename STEM, not the source's own
+  `key:` field; `status` was hard-coded to `done` for every card
+  regardless of the source's own
+  `draft/accepted/rejected/superseded/deprecated` value; `theme` was
+  hard-coded to `"engine"`. A fresh-context review of that first pass then
+  found the fix itself was incomplete: it sanitized only LEADING invalid
+  characters, so the single most common ADR filename shape
+  (`adr-007-cache`, no digit prefix to strip) still produced an
+  unloadable key while reporting `"ok": true` — the exact bug class the
+  etappe claimed to have closed — and a source-supplied `key:` field
+  passed through with no validation at all, the same hole from the other
+  side. Fixed for real: `_sanitize_key()` now replaces every character
+  outside `[a-z0-9_]` (not just a leading run), applied unconditionally
+  to BOTH the source `key:` field and the filename-stem fallback, with
+  a hard assertion against `WorkItem.key`'s own
+  `^[a-z][a-z0-9_]*$` pattern; `--theme` is validated at parse time
+  against `WorkTheme`'s own `_validate_theme_slug` (imported, not
+  re-derived as a second pattern that could quietly diverge from it) so
+  an invalid theme fails loud before any card is written instead of
+  writing successfully and failing to load later. A THIRD, fresh-context
+  review of that second pass then found two more real bugs, both proven
+  via `WorkEngine.lint()` against the round's own repro cases rather than
+  argued from reading: `supersedes` was written through verbatim while
+  every target `key` went through `_sanitize_key()` — a same-run
+  reference to a decision whose key needed sanitizing (`adr-001-old` →
+  `adr_001_old`) pointed at a key that no longer existed, `lint()`
+  reporting a `dangling_refs` entry the migration itself had just
+  created; and `closed:` was written unconditionally even after the
+  status-default fix started producing `open` cards, so a migrated draft
+  carried a closed-date on an open card, `lint()` reporting an
+  `unclosed_pairs` entry for exactly the input (drafts, typo'd statuses)
+  the earlier fix was built for. Fixed: `supersedes` now runs through
+  the same `_sanitize_key()` as the target key; `closed:` is only
+  written when the mapped status is one Work considers closed
+  (`done`/`dropped`/`superseded`, via `work.py`'s own `_CLOSED_STATUSES`,
+  not a hand-copied set). Also corrected in the same round: `migrated`/
+  `targets` now count distinct target keys instead of source files (a
+  same-run collision no longer inflates the count past what actually
+  landed on disk), and `overwritten` is computed from a snapshot of the
+  target directory taken BEFORE the run starts, so a same-run collision
+  is reported only under `conflicts`, never misreported as
+  "overwritten" (a claim that specifically means "existed before this
+  run") — `conflicts` itself is reported in `--dry-run` too, which
+  previously couldn't see a same-run collision at all since it only
+  checked "does the target already exist on disk"; an unrecognized
+  source status now defaults to `open` (not `done`) and is reported per
+  item under `unmapped_status`; a rejected/deprecated card keeps a
+  one-line "migrated from legacy status: …" note in its body so that
+  distinction survives the merge into Work's shared `dropped` state;
+  `supersedes` is mapped instead of reported as an unmappable dropped
+  field; a non-dict top-level YAML document is now skipped with a clear
+  stderr message instead of crashing the whole run.
+  Any source field with no Work Card equivalent (e.g.
+  `applies_to.modules`) is still reported per item under `dropped_fields`
+  rather than vanishing without a trace, and a repeated run still reports
+  which targets it `overwritten`. The worked example under
+  `examples/migrations/` (`before/` → `after/`) now includes a third
+  source (a draft decision `supersedes`-ing an already-migrated one
+  through a deliberately non-slug reference) so the corpus can actually
+  exercise both round-three fixes, not just load without error; the
+  drift-guard test asserts both `WorkEngine.from_directory(after,
+  strict=True)` loads cleanly AND `lint()` reports empty
+  `dangling_refs`/`unclosed_pairs` — a strict load alone missed both
+  round-three bugs, since a syntactically valid but dangling reference
+  and a half-closed card both still parse.
+- **Every `limit:` parameter across rules/memory/work/docs now shares one
+  clamp (`core.clamp_limit`) instead of four independent `[:limit]`
+  slices.** `docs.recall()` was the only one already guarded (an
+  unclamped negative value is a valid, reversed Python slice — measured
+  incident: `limit=-1` returned 1,954 sections, ~1.44M tokens, for a
+  single call). `memory.recall()`, `work.recall()`,
+  `WorkEngine.for_file()`/`fuer_datei()`, `query_domain()`'s rules/work
+  branches (which build their own local BM25 index and slice manually,
+  bypassing the engine `.recall()` methods), `memory_usage()`, and
+  `capability.Wissensindex.suche()` (`find_capability`'s backing index)
+  all had the identical gap — a second, third, fourth, fifth
+  independently-written copy of the same bug waiting to happen, not four
+  to six domain-specific concerns. Fixed by moving the clamp into
+  `core.py` (`MAX_RECALL_LIMIT = 50`, `clamp_limit()`) and having every
+  site call it; `docs.py`'s own local `_MAX_LIMIT` constant is removed in
+  favor of the shared one. A malformed type (e.g. a string) is rejected
+  by FastMCP's own schema validation before any tool body runs — that
+  layer was already correct and needed no change; this closes the
+  numeric-range gap FastMCP's type check does not cover. A fresh-context
+  review of this pass found a latent contract break it introduced: the
+  CLI's per-prompt memory recall deliberately over-fetches
+  (`limit + len(exclude)`, where `exclude` is the hook's growing
+  already-injected set — measured up to 106 entries on real session-state
+  files) so that filtering `exclude` back out still leaves `limit`
+  results; the new default 50-item ceiling would have silently truncated
+  the candidate pool before that filter ran once a session's `exclude`
+  set grew past it, under-filling the response with no error. Fixed:
+  `MemoryEngine.recall()` gained an explicit `max_limit` override (a
+  caller-specific ceiling, not a way around the tool-surface default),
+  and the CLI passes its own over-fetch target through it.
+- **`list_work` with no theme/status/kind filter returns a per-theme
+  topic overview instead of every item — for BOTH the plain default
+  call and `include_archived=True`.** This is the one call shape
+  `clamp_limit` cannot help with — it takes no `limit` at all — and it
+  had no natural size bound: measured against the real TALOS work store,
+  the plain default (live backlog, 1272 items) serialized to ~366K
+  characters (~91K tokens), and `include_archived=True` (5124 items) to
+  ~326K tokens — larger than the docs_recall incident that started this
+  whole etappe, and the plain default is the single most likely call
+  shape of the tool. A fresh-context review measured the 91K-token
+  default case and flagged that a decision against capping it had been
+  made without that number in front of it; scoping the fix to just
+  `include_archived=True` was reconsidered and widened to cover both.
+  The overview groups by `theme` — the same field a follow-up
+  `list_work(theme=<name>)` filters on — with a hint pointing at that
+  follow-up call. `include_archived` still controls whether the overview
+  itself counts the live backlog or the full archive; in the live-backlog
+  case (`include_archived=False`) the `done`/`dropped`/`superseded` keys
+  are OMITTED from each topic entirely rather than reported as `0` — a
+  second review pass measured every topic showing zeroes there even for
+  themes with hundreds of closed items (152 `done` items in one theme,
+  filtered out before counting), which reads as "no completed work exists" and is
+  false; omitting the keys makes the scope visible in the response shape
+  itself, not only in the tool's docstring. Measured on the real store:
+  365,825 to 2,329 characters for the plain default, 325,732 to 2,375
+  for `include_archived=True`.
+- **Every `list_work` item-list response (filtered or not) now shares one
+  response budget (`_LIST_WORK_MAX_CHARS = 60_000`), truncated with a
+  `truncated`/`omitted` marker once exceeded.** The claim above that "a
+  single theme/status/kind filter is naturally small" did not hold: a
+  third review pass measured `status="done"` alone at ~926K characters
+  (~231K tokens) on the real TALOS work store — bigger than either
+  unfiltered case this etappe already capped, and the single most
+  plausible way to route around the new topic-overview default (a
+  documented tool parameter, not an edge case). `kind`/`status` values
+  cut this store into a handful of large slices, not many small ones;
+  only `theme` narrows reliably, and even the largest theme
+  (272 items) sits at ~20K tokens. Modeled on
+  `_DOC_SNIPPET_CHARS`, which already bounds a single `docs_recall` hit
+  independent of its source section's size — this binds the response
+  independent of which filter (or none) produced it, current and future
+  alike, rather than special-casing each call shape a measurement
+  happens to find. Measured on the real store: `status="done"`
+  925,621 to 56,470 characters (3812 to 195 items, `omitted: 3617`) —
+  the shrink loop originally measured the unwrapped item array while
+  returning the wrapped `{items, truncated, omitted, hint}` object,
+  whose extra nesting and marker fields it never accounted for; a
+  fresh-context review measured four call shapes landing over the
+  60,000-character budget as a result (`kind="step"` at 63,389), fixed
+  by having the loop measure the actual wrapped response it returns.
+
+### Documentation
+
+- **README gained a `## Stability` section** classifying every surface
+  as `public`, `experimental`, or `host-specific` — the four built-in
+  domains, the CLI, and the MCP tool surface are `public` (a breaking
+  change gets a changelog entry and a version bump, never a silent
+  shape change); [Custom Domains](README.md#domains) are `experimental`
+  ("Ausbaustufe 1" — manifest shape and CLI scaffold may still change,
+  now stated where the feature itself is documented, not only in the
+  changelog); the `HostAdapter` Protocol is `public` but concrete
+  adapters (`TalosDiscoveryAdapter`) are `host-specific`.
+- **New `## Architecture` section** with a Mermaid diagram: Files →
+  Loader → Engines → Reloader → MCP Tools/CLI, with the content-write
+  boundary marked explicitly — a human or agent editing content
+  directly is the only content-write path; your rule/memory/work/docs
+  **content** is never created, edited, or deleted by the engine. A
+  fresh-context review caught the first draft's wording ("the engines
+  never write... the ONLY write path") as false and contradicting the
+  README's own existing [What it writes to disk](README.md#what-it-writes-to-disk)
+  section 500 lines below it: `RulesEngine.write_fallback_markdown`
+  writes on every server start with a project rules tier loaded
+  (`server/app.py`'s startup path), and the memory store's frecency
+  usage sidecar writes on every `recall` call (`usage.py`) — work/docs/
+  domains have no such sidecar (`work_recall`'s own docstring: "no
+  frecency/backlink boost, unlike memory"). The claim is now scoped to
+  content, matching the
+  qualifier that section already used correctly — and that section
+  gained the one row it was missing (`write_fallback_markdown`'s
+  target), an old gap the new diagram made acute by claiming
+  completeness next to it.
+- **New Glossary** (under [Work store](README.md#work-store)): Work
+  Store, Reuse Record, Evidence, Rollup — short definitions for terms
+  used throughout the README without a single reference point before
+  this.
+- **`CONTRIBUTING.md` gained a Release checklist**: fresh clone + fresh
+  venv, `ruff`/`pytest` clean with zero TALOS-conditioned skips, build
+  both wheel and sdist and install from a throwaway venv, walk the
+  README's own examples without TALOS context, cross-check
+  `pyproject.toml`'s version against the CHANGELOG's newest entry and
+  the git tag before creating it. The same review found step 1's plain
+  `pip install -e ".[dev]"` insufficient — the `dev` extra
+  (`pyproject.toml`) omits `ruff` and `build`, which steps 2 and 3 both
+  need; CI (`ci.yml`) installs them separately and pins `ruff==0.16.0`
+  on purpose (a linter defines by version what counts as an error).
+  Step 1 now installs the exact line CI uses instead of a narrower one
+  that cannot run the checklist's own next two steps.
+
+### Known gaps going into 1.x (tracked, not yet closed)
+- No `profiles/generic.yaml` / `profiles/talos.yaml` split — TALOS
+  conventions are not yet isolated behind an explicit profile.
+- `TalosDiscoveryAdapter` still ships inside the core package rather
+  than moving to `examples/host-profiles/talos/` — doing so needs a way
+  for a running TALOS session to point the server at an external
+  adapter file, which is a separate, riskier change than the protocol
+  extraction itself (see `host_adapters.py`'s module docstring).
+
 ## [1.0.0-rc9] — 2026-08-11
 
 ### Added

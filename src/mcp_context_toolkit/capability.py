@@ -39,6 +39,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from mcp_context_toolkit.core import clamp_limit
+
 # How strongly a document's structural weight (how often its module is imported)
 # lifts its score. Deliberately small: importance is a tiebreaker between
 # comparable matches, never a reason to surface an unrelated one.
@@ -110,7 +112,13 @@ class Wissensindex:
 
         Returns ``{treffer, weggelassen, begriffe}``. Each hit carries the
         reason it surfaced — a term match, or proximity to one.
+
+        ``limit`` is clamped via ``core.clamp_limit`` — an unclamped
+        negative value is a valid, reversed Python slice, and would also
+        make ``weggelassen`` (which subtracts ``limit``) report more
+        omitted candidates than actually exist.
         """
+        limit = clamp_limit(limit)
         terme = self.tokenize(frage)
         roh = self._bm25(terme)
         if not roh:

@@ -137,22 +137,27 @@ class TestDocsEngine:
         assert "strong.md" in paths
 
     def test_recall_clamps_negative_limit(self, tmp_path: Path):
-        # W8-Reviewer-Fund ERROR-1, Etappe F: an LLM-supplied `limit=-1` is a
-        # valid Python slice (from-the-end) — measured 1,954 sections
-        # (~1.44M tokens) returned for a single call against the real
-        # corpus before this clamp existed.
+        # An LLM-supplied `limit=-1` is a valid Python slice (from-the-end)
+        # — measured 1,954 sections (~1.44M tokens) returned for a single
+        # call against the real corpus before this clamp existed. All 10
+        # sections score identically here, so `scored[:-1]` (unclamped)
+        # would return 9, not 1 — a loose `1 <= n <= 10` bound would pass
+        # either way (see core.clamp_limit and its sibling tests in
+        # test_memory.py/test_work.py).
         for i in range(10):
             _write_doc(tmp_path, f"doc{i}.md", f"# Thema {i}\n\nGemeinsamer Suchbegriff wiederholt.\n")
         e = DocsEngine.from_directory(tmp_path)
         hits = e.recall("Gemeinsamer Suchbegriff", limit=-1)
-        assert len(hits) >= 1
-        assert len(hits) <= 10
+        assert len(hits) == 1
 
     def test_recall_clamps_excessive_limit(self, tmp_path: Path):
-        _write_doc(tmp_path, "a.md", "# Thema\n\nSuchbegriff.\n")
+        # A single candidate proves "does not raise" but not "caps at 50" —
+        # a corpus over the ceiling is needed to actually pin the clamp.
+        for i in range(60):
+            _write_doc(tmp_path, f"doc{i}.md", f"# Thema {i}\n\nSuchbegriff wiederholt.\n")
         e = DocsEngine.from_directory(tmp_path)
-        # Must not raise, must not silently claim more than exists.
-        assert len(e.recall("Suchbegriff", limit=10_000)) == 1
+        # Must not raise, must not silently claim more than the ceiling.
+        assert len(e.recall("Suchbegriff", limit=10_000)) == 50
 
     def test_load_directory_skips_dated_snapshot_directories(self, tmp_path: Path):
         # W8-Reviewer-Fund WARNING-2, Etappe F: a frozen audit snapshot

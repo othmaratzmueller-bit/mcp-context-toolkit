@@ -1,0 +1,7 @@
+title: Draft caching layer (never finished)
+date: 2026-01-02
+status: draft
+supersedes: per-module-env-reads
+reason: |
+  An early, unfinished sketch that assumed per-module env reads would
+  ship — abandoned as a draft once layered_config was adopted instead.
