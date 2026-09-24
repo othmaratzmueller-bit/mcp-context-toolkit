@@ -4,19 +4,26 @@ from __future__ import annotations
 
 import datetime
 import json
-import math
 
 from mcp_context_toolkit.core import clamp_limit
+from mcp_context_toolkit.memory import memory_recall_hits
 
 from .serializers import _memory_summary
 
 
-def register(mcp_tool, memory_reloader, usage=None) -> None:
+def register(mcp_tool, memory_reloader, usage=None, event_log=None) -> None:
     """Register the memory-domain tools. Only called when a memory store was
-    found — `usage` (frecency sidecar) is independently optional."""
+    found — `usage` (frecency sidecar) and `event_log` (Etappe 0 recall
+    observability, `RecallEventLog`) are independently optional."""
 
     @mcp_tool("memory")
-    def recall(query: str, limit: int = 8) -> str:
+    def recall(
+        query: str,
+        limit: int = 8,
+        bausteine: list[str] | None = None,
+        themen: list[str] | None = None,
+        taetigkeiten: list[str] | None = None,
+    ) -> str:
         """Recall the most relevant memories for a query, ranked across BOTH
         tiers (project + user). Keyword-based, deterministic, hot/cold-aware.
 
@@ -32,28 +39,17 @@ def register(mcp_tool, memory_reloader, usage=None) -> None:
         a memory with 10 inbound links gets ~+0.24 to its score, so
         structurally important knowledge surfaces without explicit usage
         while the boost never dominates the base relevance.
+
+        ``bausteine``, ``themen`` and ``taetigkeiten`` are optional curated
+        context axes; values within an axis are OR alternatives. Context can
+        add at most two candidates into otherwise unused slots, never replace
+        a keyword hit, and shares recall's global result limit.
         """
-        boosts = usage.boosts() if usage is not None else {}
-        # ONE engine snapshot for both the graph and the ranking: calling
-        # current() twice could straddle a reload, scoring hits from one
-        # store against link counts from another.
         engine = memory_reloader.current()
-        # Backlink boost from graph: {name: log1p(inbound_count) * 0.1}
-        # log1p dampens the effect for highly-cited memories, keeps it
-        # proportional but bounded.
-        backlink_boosts = {}
-        inbound: dict[str, int] = {}
-        for _src, tgt in engine.edges():
-            inbound[tgt] = inbound.get(tgt, 0) + 1
-        for name, count in inbound.items():
-            # log1p(x) * 0.1 → 1 link ≈ +0.07, 10 ≈ +0.24, 100 ≈ +0.46:
-            # grows sub-linearly, never dominates the base relevance score.
-            backlink_boosts[name] = math.log1p(count) * 0.1
-        hits = engine.recall(
-            query, limit=limit, boost=boosts, backlink_boost=backlink_boosts
+        hits = memory_recall_hits(
+            engine, query, limit=limit, usage=usage, event_log=event_log,
+            bausteine=bausteine, themen=themen, taetigkeiten=taetigkeiten,
         )
-        if usage is not None:
-            usage.record_recall([m.name for m in hits])
         return json.dumps(
             [_memory_summary(m) for m in hits], indent=2, ensure_ascii=False
         )
@@ -72,6 +68,8 @@ def register(mcp_tool, memory_reloader, usage=None) -> None:
             return json.dumps({"error": f"memory not found: {name}"})
         if usage is not None:
             usage.record_open(name)
+        if event_log is not None:
+            event_log.log_opened(name)
         payload = m.model_dump(mode="json")
         # Inbound edges: which memories link here (the reverse of `links`).
         # Resolved to the canonical name, so a link via a bundled member slug
@@ -79,6 +77,148 @@ def register(mcp_tool, memory_reloader, usage=None) -> None:
         # navigation + orphan-spotting without a separate memory_lint call.
         payload["cited_by"] = engine.backlinks(m.name)
         return json.dumps(payload, indent=2, ensure_ascii=False)
+
+    @mcp_tool("memory")
+    def memory_context_candidates(
+        bausteine: list[str] | None = None,
+        themen: list[str] | None = None,
+        taetigkeiten: list[str] | None = None,
+    ) -> str:
+        """Show curated context candidates without changing recall ranking.
+
+        Values within an axis are alternatives. The response records every
+        matching axis/value so a caller can inspect a future recall lane before
+        it is allowed to influence an injected result.
+        """
+        engine = memory_reloader.current()
+        matches = engine.context_candidates(
+            bausteine=bausteine, themen=themen, taetigkeiten=taetigkeiten,
+        )
+        return json.dumps(
+            [{**_memory_summary(memory), "matches": axes} for memory, axes in matches],
+            indent=2, ensure_ascii=False,
+        )
+
+    @mcp_tool("memory")
+    def memory_recall_explain(
+        query: str,
+        limit: int = 8,
+        bausteine: list[str] | None = None,
+        themen: list[str] | None = None,
+        taetigkeiten: list[str] | None = None,
+    ) -> str:
+        """Explain keyword and curated-context candidates without warming them."""
+        engine = memory_reloader.current()
+
+        class _ReadOnlyUsage:
+            def boosts(self):
+                return usage.boosts() if usage is not None else {}
+
+            def record_recall(self, names):
+                return None
+
+        read_only_usage = _ReadOnlyUsage()
+        baseline = memory_recall_hits(engine, query, limit=limit, usage=read_only_usage)
+        final = memory_recall_hits(
+            engine, query, limit=limit, usage=read_only_usage,
+            bausteine=bausteine, themen=themen, taetigkeiten=taetigkeiten,
+        )
+        context_by_name = {
+            memory.name: axes for memory, axes in engine.context_candidates(
+                bausteine=bausteine, themen=themen, taetigkeiten=taetigkeiten,
+            )
+        }
+        baseline_names = {memory.name for memory in baseline}
+        rows = []
+        for memory in final:
+            sources = ["keyword"] if memory.name in baseline_names else []
+            if memory.name in context_by_name:
+                sources.append("context")
+            rows.append({**_memory_summary(memory), "sources": sources,
+                         "context_matches": context_by_name.get(memory.name, {})})
+        return json.dumps({"query": query, "baseline": [m.name for m in baseline],
+                           "candidates": rows}, indent=2, ensure_ascii=False)
+
+    @mcp_tool("memory")
+    def learn_recall_gap(
+        query: str,
+        target_name: str,
+        bridge_terms: list[str],
+        scout_names: list[str],
+        mechanical_names: list[str] | None = None,
+        limit: int = 6,
+        turn: int | None = None,
+    ) -> str:
+        """Teach the mechanical recall a gap a scout found — the ONLY memory
+        tool that writes.
+
+        Call after a scout (a small model searching with its own vocabulary)
+        found ``target_name`` for ``query`` where recall did not. The engine
+        recomputes the ranking (no session dedupe), requires the target to be
+        a real miss and named by the scout, requires every bridge term to
+        reach the query, replays the terms as extra ``learned_tags`` through
+        the same ranking, and writes only the minimal subset that lifts the
+        target into the top ``limit`` into ``learned_tags`` (ranked like
+        ``tags``, never touching them). Returns JSON with ``status``
+        (accepted/noop/rejected), ``reason`` and before/after evidence. Starts
+        no model and no subprocess."""
+        from mcp_context_toolkit.recall_learning import learn_recall_gap as _learn
+
+        result = _learn(
+            memory_reloader.current(), query=query, target_name=target_name,
+            bridge_terms=bridge_terms, scout_names=scout_names,
+            mechanical_names=mechanical_names, limit=limit,
+            boosts=usage.boosts() if usage is not None else {},
+            event_log=event_log, turn=turn,
+        )
+        return json.dumps(result.model_dump(), indent=2, ensure_ascii=False)
+
+    @mcp_tool("memory")
+    def complete_scout_comparison(
+        query: str,
+        turn: int,
+        limit: int,
+        mechanical_names: list[str],
+        scout_hits: list[dict],
+        duration_ms: int = 0,
+    ) -> str:
+        """Atomically finish the learning from one scout comparison.
+
+        Supply every scout hit as ``{"target_name": ..., "bridge_terms": [...]}``
+        in this ONE call after the small model searched the same query. The
+        core records a resumable per-session/turn transaction, validates every
+        hit before it can write, and deduplicates retries. Use this instead of
+        separately logging a comparison and calling ``learn_recall_gap`` per
+        target; the latter remains available for diagnosis and compatibility.
+        """
+        from mcp_context_toolkit.recall_learning import complete_scout_comparison as _complete
+
+        result = _complete(
+            memory_reloader.current(), query=query, turn=turn, limit=limit,
+            mechanical_names=mechanical_names, scout_hits=scout_hits,
+            duration_ms=duration_ms, boosts=usage.boosts() if usage is not None else {},
+            event_log=event_log,
+        )
+        return json.dumps(result.model_dump(), indent=2, ensure_ascii=False)
+
+    @mcp_tool("memory")
+    def preview_learned_tag_ablation() -> str:
+        """Read-only maintenance evidence for every learned recall tag.
+
+        Replays only queries from accepted, durably claimed scout comparisons,
+        first with the current tag set and then with each learned tag removed.
+        `necessary` means a recorded replay would miss its original limit;
+        `candidate` means every available replay still meets it; and
+        `not_decidable` means the evidence is absent or the current state no
+        longer reproduces it. The tool never edits a memory file.
+        """
+        from mcp_context_toolkit.recall_learning import preview_learned_tag_ablation as _preview
+
+        result = _preview(
+            memory_reloader.current(), event_log=event_log,
+            boosts=usage.boosts() if usage is not None else {},
+        )
+        return json.dumps(result.model_dump(), indent=2, ensure_ascii=False)
 
     @mcp_tool("memory")
     def list_memories(type: str | None = None, tier: str | None = None) -> str:

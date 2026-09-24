@@ -14,6 +14,7 @@ auto-derivable from frontmatter, so it is NOT regenerated destructively here.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from mcp_context_toolkit.memory import MemoryEngine
@@ -28,6 +29,7 @@ _HEADER = [
 ]
 
 DESCRIPTIONS_FILENAME = "_descriptions.md"
+MEMBER_CATALOG_FILENAME = "_MEMBER_CATALOG.md"
 
 
 def build_descriptions(
@@ -91,12 +93,19 @@ def build_memory_md(packages: list[dict], title: str = "Memory — Index") -> st
 
 def build_member_catalog(packages: list[dict], engine: MemoryEngine) -> dict:
     """Flat catalog mapping every MEMBER (slug) → its package, with the member's
-    description. Built from the ORIGINAL atomic store (run BEFORE bundling).
-    Returns {content, line_index, count}. The middle layer of the read model."""
+    description. Returns {content, line_index, count}. The middle layer of the
+    read model.
+
+    Works at BOTH moments: before bundling the description comes from the member's
+    own file, after bundling from the `## <slug>` section inside the package body
+    (a folded member is no longer a file, so `by_slug` cannot find it). The member
+    LIST always comes from the bundle map — never from scanning `##` headings,
+    which cannot tell a member apart from a heading inside a member's own body."""
     by_slug = {
         (Path(m.source_path).stem if m.source_path else m.name): m
         for m in engine.memories
     }
+    by_file = {Path(m.source_path).name: m for m in engine.memories if m.source_path}
     lines = [
         "# Memory Member Catalog (auto-generated — DO NOT EDIT)",
         "",
@@ -108,7 +117,13 @@ def build_member_catalog(packages: list[dict], engine: MemoryEngine) -> dict:
     for pkg in sorted(packages, key=lambda x: x["file"]):
         for slug in pkg["members"]:
             m = by_slug.get(slug)
-            desc = " ".join((m.description or "").split()) if m else ""
+            if m is not None:
+                desc = " ".join((m.description or "").split())
+            else:
+                # Already bundled: the member is not a file any more, so its
+                # description only survives inside the package body, as the italic
+                # line under `## <slug>` that render_package wrote.
+                desc = _member_desc_from_body(by_file.get(Path(pkg["file"]).name), slug)
             lines.append(f"- **{slug}** — {desc} → {pkg['file']}")
             line_index[slug] = len(lines)
     return {
@@ -133,3 +148,43 @@ def write_descriptions(
         "count": result["count"],
         "line_index": result["line_index"],
     }
+
+
+def _member_desc_from_body(package, slug: str) -> str:
+    """The italic description line under `## <slug>` in a bundled package body.
+
+    Anchored on a word boundary, not on end-of-line: a section heading may carry a
+    suffix (`## some_slug (2026-07-19)`), and those must still resolve."""
+    if package is None:
+        return ""
+    hit = re.search(
+        rf"^## {re.escape(slug)}\b[^\n]*\n(?:\*(.+?)\*\n)?",
+        package.body, re.M,
+    )
+    return " ".join((hit.group(1) or "").split()) if hit and hit.group(1) else ""
+
+
+def write_member_catalog(
+    memory_dir: str | Path, engine: MemoryEngine | None = None
+) -> dict:
+    """Generate + write `_MEMBER_CATALOG.md` into the memory dir. Returns
+    ``{path, count}``. Same `_`-prefix rationale as `write_descriptions`.
+
+    Derives the bundle map from the store itself: a package contributes its
+    `members`, an un-bundled file represents itself (same "1 member row" shape
+    `--export-studio` already uses), so every memory stays findable by name — which
+    is the whole point of this layer once bundling has removed the files."""
+    eng = engine or MemoryEngine.from_directory(memory_dir)
+    packages = [
+        {
+            "file": Path(m.source_path).name if m.source_path else m.name,
+            "members": list(m.members) or [
+                Path(m.source_path).stem if m.source_path else m.name
+            ],
+        }
+        for m in eng.memories
+    ]
+    result = build_member_catalog(packages, eng)
+    target = Path(memory_dir) / MEMBER_CATALOG_FILENAME
+    target.write_text(result["content"], encoding="utf-8")
+    return {"path": str(target), "count": result["count"]}

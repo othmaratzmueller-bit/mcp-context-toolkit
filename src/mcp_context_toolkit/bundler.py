@@ -27,12 +27,42 @@ def _slug(m: Memory) -> str:
     return Path(m.source_path).stem if m.source_path else m.name
 
 
-def render_package(pkg: dict, members: list[Memory]) -> str:
+def _dedupe(values) -> list[str]:
+    """Case-insensitive dedupe, first-seen order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value.casefold() not in seen:
+            seen.add(value.casefold())
+            out.append(value)
+    return out
+
+
+def _package_tags(members: list[Memory], existing: Memory | None) -> tuple[list[str], list[str]]:
+    """``(tags, learned_tags)`` for a package.
+
+    ``tags`` is rebuilt from the CURRENT members every time — a member that
+    left takes its tags with it. ``learned_tags`` (written only by recall
+    learning) is carried over from the existing package and joined by the
+    members' own, so nothing learned is lost on a re-bundle. Both go into the
+    frontmatter because the recall tag field is the one without length
+    normalisation; left in the body only, they would be diluted by the whole
+    package."""
+    tags = _dedupe(t for m in members for t in m.tags)
+    learned = _dedupe([*(existing.learned_tags if existing else []),
+                       *(t for m in members for t in m.learned_tags)])
+    return tags, learned
+
+
+def render_package(pkg: dict, members: list[Memory], existing: Memory | None = None) -> str:
     """Render one package file: frontmatter + a `## slug` section per member,
-    description italicised, body verbatim. Lossless by construction."""
+    description italicised, body verbatim. Lossless by construction.
+    ``existing`` is the package already in the store under this name, if
+    any — its learned tags are carried over (see ``_package_tags``)."""
     name = Path(pkg["file"]).stem
     title = pkg.get("title") or name
     tier = pkg.get("tier", "project")
+    tags, learned = _package_tags(members, existing)
     head = [
         "---",
         f"name: {name}",
@@ -42,6 +72,9 @@ def render_package(pkg: dict, members: list[Memory]) -> str:
         # "My Topic: Subtitle" which would otherwise break the frontmatter).
         f"description: {json.dumps(title, ensure_ascii=False)}",
         "members: [" + ", ".join(_slug(m) for m in members) + "]",
+        # A JSON array is a valid YAML flow sequence, quoting included.
+        *([f"tags: {json.dumps(tags, ensure_ascii=False)}"] if tags else []),
+        *([f"learned_tags: {json.dumps(learned, ensure_ascii=False)}"] if learned else []),
         "---",
         "",
         f"# {title}",
@@ -54,6 +87,8 @@ def render_package(pkg: dict, members: list[Memory]) -> str:
             parts.append(f"*{m.description.strip()}*")
         if m.tags:
             parts.append(f"tags: {', '.join(m.tags)}")
+        if m.bausteine:
+            parts.append(f"bausteine: {', '.join(m.bausteine)}")
         parts.append("")
         parts.append(m.body.rstrip())
         parts.append("")
@@ -102,7 +137,8 @@ def write_bundle(
     rendered: dict[str, str] = {}
     for pkg in packages:
         members = [by_slug[mn] for mn in pkg["members"] if mn in by_slug]
-        rendered[pkg["file"]] = render_package(pkg, members)
+        existing = next((m for m in eng.memories if m.name == Path(pkg["file"]).stem), None)
+        rendered[pkg["file"]] = render_package(pkg, members, existing)
 
     for rel, content in rendered.items():
         target = out / rel

@@ -29,11 +29,21 @@ imports the Protocol path, not a `_`-prefixed function.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 from mcp_context_toolkit.core import store_conventions
+
+# Die zwei Cache-Schluessel-Typen von `TalosDiscoveryAdapter`. Benannt statt
+# inline, weil sie an vier Stellen gebraucht werden (Feld-Annotation, zwei
+# Getter-Rueckgabetypen, ein `cast` nach dem `_UNSET`-Vergleich, den Pyright
+# nicht selbst verengen kann — `_UNSET` ist eine Instanz, kein Literal/None,
+# also bleibt der Feldtyp `object` ohne die explizite Annotation unten).
+_KantenCheckFn = Callable[[str, str], "tuple[str, str | None]"]
+_PathToIdFn = Callable[[str], "str | None"]
 
 
 @runtime_checkable
@@ -69,8 +79,10 @@ class HostAdapter(Protocol):
         when `has_symbol_index()` is `True`. Returns `(state, hint)` —
         `state` one of `"ok"` (resolves), `"geplant"` (module anchor,
         directory not built yet — the normal pre-build state, not a
-        break), or anything else (treated as broken, `hint` explains why).
-        Used by `WorkEngine.lint(symbol_check=...)`."""
+        break), `"ungeprueft"` (target file exists but its extension is a
+        language this index never parses — e.g. YAML/JSON/CSS/HTML/Makefile
+        — neither confirmed nor broken), or anything else (treated as
+        broken, `hint` explains why). Used by `WorkEngine.lint(symbol_check=...)`."""
         ...
 
     def path_to_id(self, path: str) -> str | None:
@@ -109,8 +121,8 @@ class TalosDiscoveryAdapter:
         # many anchors/paths get resolved through it. `_UNSET` vs. `None` are
         # distinct: `None` is a cached "not available" answer, `_UNSET` means
         # "haven't tried yet".
-        self._kanten_check_cache = self._UNSET
-        self._path_to_id_cache = self._UNSET
+        self._kanten_check_cache: _KantenCheckFn | None | object = self._UNSET
+        self._path_to_id_cache: _PathToIdFn | None | object = self._UNSET
 
     def has_symbol_index(self) -> bool:
         return self._kanten_check() is not None
@@ -125,13 +137,17 @@ class TalosDiscoveryAdapter:
         resolver = self._path_to_id_fn()
         return resolver(path) if resolver is not None else None
 
-    def _kanten_check(self):
+    def _kanten_check(self) -> _KantenCheckFn | None:
         if self._kanten_check_cache is not self._UNSET:
-            return self._kanten_check_cache
+            # Pyright kann `is not self._UNSET` nicht auf den echten Typ
+            # verengen (`_UNSET` ist eine Instanz, kein Literal/None) —
+            # der `cast` traegt nach, was der Kommentar in `__init__` schon
+            # sagt: alles ausser `_UNSET` ist hier `_KantenCheckFn | None`.
+            return cast("_KantenCheckFn | None", self._kanten_check_cache)
         self._kanten_check_cache = self._build_kanten_check()
         return self._kanten_check_cache
 
-    def _build_kanten_check(self):
+    def _build_kanten_check(self) -> _KantenCheckFn | None:
         if self._work_dir is None:
             return None
         projekt = self._work_dir.resolve().parent.parent
@@ -155,22 +171,48 @@ class TalosDiscoveryAdapter:
                   f"({plan_graph_pfad}): {e}", file=sys.stderr)
             return None
 
+        # Mixin-Aufloesung (2026-09-06): optional, weil ein aelterer/fremder
+        # plan_graph.py `basis_karte()` noch nicht kennen muss — dann bleibt
+        # `_zustand()` beim urspruenglichen 4-Parameter-Aufruf, kein Bruch.
+        basis_karte_fn = getattr(modul, "basis_karte", None)
+        klassen_basen = basis_karte_fn(best) if basis_karte_fn is not None else None
+        # Existenzcheck fuer `ungeprueft` (2026-09-06, W8-Runde 1-Fund): auch
+        # optional per Signatur-Introspektion erkannt, aus demselben Grund wie
+        # `klassen_basen` — ein aelterer `_zustand()` kennt den Parameter nicht.
+        zustand_params = inspect.signature(modul._zustand).parameters
+        projekt_unterstuetzt = "projekt" in zustand_params
+
         def symbol_check(typ: str, ziel: str) -> tuple[str, str | None]:
             if typ == "modules":
                 if modul._modul_vorhanden(ziel, str(projekt)):
                     return "ok", None
                 return "geplant", None
-            return modul._zustand(typ, ziel, best, namen)
+            # WorkItem.reuse trägt englische Kantentypen (uses/extends/creates),
+            # plan_graph.py rechnet mit deutschen (nutzt/erweitert/baut). Nur
+            # `creates` ist hier scharf: `_zustand()` schaltet ausschließlich auf
+            # `typ == TYP_BAUT` von "gebrochen" auf "geplant" um (das "Symbol
+            # existiert noch nicht" ist der normale Vor-Bau-Zustand, keine
+            # kaputte Kante) — ohne diese Übersetzung sah JEDES `creates:`-Ziel,
+            # das noch nicht gebaut wurde, für diesen Adapter wie eine gebrochene
+            # Kante aus, egal wie viele andere `creates:`-Ziele bereits existieren.
+            if typ == "creates":
+                typ = modul.TYP_BAUT
+            kwargs: dict[str, object] = {}
+            if klassen_basen is not None:
+                kwargs["klassen_basen"] = klassen_basen
+            if projekt_unterstuetzt:
+                kwargs["projekt"] = str(projekt)
+            return modul._zustand(typ, ziel, best, namen, **kwargs)
 
         return symbol_check
 
-    def _path_to_id_fn(self):
+    def _path_to_id_fn(self) -> _PathToIdFn | None:
         if self._path_to_id_cache is not self._UNSET:
-            return self._path_to_id_cache
+            return cast("_PathToIdFn | None", self._path_to_id_cache)
         self._path_to_id_cache = self._build_path_to_id_fn()
         return self._path_to_id_cache
 
-    def _build_path_to_id_fn(self):
+    def _build_path_to_id_fn(self) -> _PathToIdFn | None:
         root = _find_project_root()
         if root is None:
             return None

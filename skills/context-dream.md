@@ -27,6 +27,11 @@ a run, `MEMORY.md` ≤ before.
 ## Pipeline (orchestrates the other skills)
 1. **`context-classify`** — route memories into thematic packages + tiers.
 2. **`context-prune`** — flag stale / superseded / redundant (never auto-delete).
+   Call `preview_learned_tag_ablation` and include its read-only evidence in
+   the report. Keep `necessary` tags; `not_decidable` means evidence is
+   missing or no longer reproducible. A `candidate` is a suggestion only,
+   and several candidates on one memory must pass the joint ablation before
+   they can be considered together. The preview never edits or removes tags.
 3. **`context-compact`** — compress verbose bodies + the index hooks.
 4. **Reindex** — regenerate `MEMORY.md` (lean package TOC) + `_descriptions.md`
    (member→package catalog) from the sources (build artifacts, never hand-edited).

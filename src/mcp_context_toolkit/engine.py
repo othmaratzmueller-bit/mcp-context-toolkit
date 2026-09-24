@@ -14,6 +14,8 @@ from mcp_context_toolkit.core import iter_files, parse_frontmatter
 from mcp_context_toolkit.models import Decision, Rule, RulePriority, RuleScope, RuleTier, RuleType
 
 from ._globs import compile_glob as _compile_glob
+from .server.serializers import _rule_summary
+from .work import WorkEngine
 
 # Etappe C (mcp_decisions_in_work_falten, 2026-08-19): the decision store folded
 # into the Work-Store as `kind: decision` cards — WorkStatus back to the narrower
@@ -686,3 +688,47 @@ class RulesEngine:
                         f"{r1.key} ({r1.priority}) vs {r2.key} ({r2.priority})"
                     )
         return {"conflicts": conflicts}
+
+
+def rules_for_file_payload(
+    engine: RulesEngine, file_path: str, work_engine: WorkEngine | None = None
+) -> dict:
+    """Aggregate rules + decisions + dependencies + cross-domain open work for
+    one file — the combined payload `query_rules_for_file` (the MCP tool) and
+    a second consumer (mct-Context-Studio-Vollausbau Etappe E's chat tool)
+    both need. Extracted (S8) so a second caller cannot silently diverge from
+    the tool's actual shape — the `work_engine is None` / lookup-raises
+    fail-soft behavior below is exactly the kind of detail a naive
+    reimplementation would drop.
+
+    `work_engine` is optional and fails soft: the rules/decisions/dependency
+    lookups are this function's core job and must never be taken down by a
+    problem in an unrelated domain, so any exception from `work_engine.for_file()`
+    (a store that failed to load, a schema drift) yields an empty
+    `offene_arbeit` list rather than propagating."""
+    matches = engine.query_for_file_tiered(file_path)
+    rules_out = [_rule_summary(r) for r in matches]
+
+    decisions = engine.query_decisions_for_file(file_path)
+    decisions_out = [d.model_dump(mode="json") for d in decisions]
+
+    deps = engine.query_dependencies(file_path)
+
+    arbeit_out: list[dict] = []
+    if work_engine is not None:
+        try:
+            for w in work_engine.for_file(file_path):
+                arbeit_out.append({
+                    "key": w.key, "title": w.title, "status": w.status,
+                    "theme": w.theme, "kind": w.kind,
+                    "reuse": w.reuse is not None,
+                })
+        except Exception:
+            arbeit_out = []
+
+    return {
+        "rules": rules_out,
+        "decisions": decisions_out,
+        "dependencies": deps,
+        "offene_arbeit": arbeit_out,
+    }

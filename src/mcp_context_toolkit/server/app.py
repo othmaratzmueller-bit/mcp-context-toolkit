@@ -18,7 +18,7 @@ from mcp_context_toolkit.docs import DocsEngine
 from mcp_context_toolkit.domain import DomainEngine
 from mcp_context_toolkit.engine import RulesEngine
 from mcp_context_toolkit.memory import MemoryEngine
-from mcp_context_toolkit.usage import UsageStore
+from mcp_context_toolkit.usage import RecallEventLog, UsageStore
 from mcp_context_toolkit.work import WorkEngine
 
 from . import (
@@ -59,6 +59,7 @@ def build_server(
     baustein_docs_file: Path | None = None,
     function_docs_file: Path | None = None,
     domain_reloader: _Reloader | None = None,
+    recall_event_log: RecallEventLog | None = None,
 ):
     from mcp.server.fastmcp import FastMCP
 
@@ -84,7 +85,7 @@ def build_server(
     tools_rules.register(_tool, rules_reloader, work_reloader)
 
     if memory_reloader is not None:
-        tools_memory.register(_tool, memory_reloader, usage)
+        tools_memory.register(_tool, memory_reloader, usage, recall_event_log)
 
     if work_reloader is not None:
         tools_work.register(_tool, work_reloader, work_dir)
@@ -276,6 +277,7 @@ def main() -> None:
     # rebundle from a parallel session refreshes this process at its next call.
     memory_reloader = None
     usage = None
+    recall_event_log = None
     mem_dir = _discover_memory_dir()                       # project tier (optional)
     agent_mem_dir = _discover_agent_memory_dir()           # agent-memory tree (optional)
     user_mem_dir = _optional_dir("CONTEXT_USER_MEMORY_DIR")  # user tier, cross-project (optional)
@@ -305,6 +307,7 @@ def main() -> None:
         # meaningful when a project tier is present.
         if mem_dir is not None:
             usage = UsageStore.for_memory_dir(mem_dir)
+            recall_event_log = RecallEventLog.for_memory_dir(mem_dir)
 
     memory_engine = memory_reloader.current() if memory_reloader is not None else None
 
@@ -368,7 +371,8 @@ def main() -> None:
     wissen = _discover_wissen()
     server = build_server(rules_reloader, memory_reloader, usage,
                           work_reloader, wissen, work_dir, docs_reloader,
-                          baustein_docs_file, function_docs_file, domain_reloader)
+                          baustein_docs_file, function_docs_file, domain_reloader,
+                          recall_event_log)
     _print_banner(
         engine, memory_engine,
         getattr(server, "context_toolkit_inventory", None), work_engine,

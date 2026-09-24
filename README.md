@@ -85,7 +85,9 @@ serves it over MCP so the client pulls only what's relevant:
   structure** — recall surfaces the most-used, most-recently-used, most-cited notes first.
 
 Both are just markdown with frontmatter. Git is the storage, history and backup. The
-engine is read-only; you (or a consolidation pass) own the writes.
+engine reads content by default. Explicit writes can append verified memory
+`learned_tags` after a scout comparison or save a validated Work-record update
+(see [Recall learning](#recall-learning--a-found-gap-becomes-a-tag)).
 
 ## The problem
 
@@ -164,6 +166,92 @@ memory. On top of frecency, recall adds a small **backlink boost** (`log1p(inbou
 to surface hot notes first. `memory_dream_status` tells you when such a consolidation
 pass is due (files changed since last dream + lint issues against configurable
 thresholds).
+
+### Curated context candidates
+
+A memory may also carry optional curated context alongside its normal prose:
+
+```yaml
+bausteine: [py:package.module]
+kontexte:
+  themen: [memory_recall]
+  taetigkeiten: [review, test]
+```
+
+`bausteine`, topics (`themen`), and activities (`taetigkeiten`) are deliberately
+outside the BM25 index. Callers can pass any of those axes to `recall`; values within
+one axis are alternatives. The normal keyword result remains first and unchanged;
+context can fill at most two otherwise unused result slots and never displace a keyword
+hit. This keeps curated links observable as a separate candidate lane rather than
+quietly changing text ranking. `memory_context_candidates` exposes all matching axes,
+and `memory_recall_explain` labels every delivered candidate as `keyword`, `context`,
+or both without warming frecency.
+
+An exact Baustein match is the most specific context signal. If supplied Bausteine
+match curated memories, only those module-bound memories may fill the bounded delivery
+lane; broad topic/activity-only matches remain inspectable through
+`memory_context_candidates`, but cannot crowd out the observed module. If no Baustein
+matches, topics and activities retain their normal fallback role.
+
+### Recall learning — a found gap becomes a tag
+
+Comparing recall against a scout (a small model searching the store with its own
+vocabulary) only measures; the next identical query misses again.
+`complete_scout_comparison` closes the whole comparison and learning loop in one
+resumable, idempotent call. It receives the original mechanical `limit`, its
+offered names, and structured scout hits (`target_name`, `bridge_terms`), records
+a durable per-session/turn claim before every possible write, and resumes only
+unfinished targets after a crash or retry. The legacy `learn_recall_gap` remains
+the single-target diagnostic primitive underneath that transaction:
+
+1. The target must resolve the way `get_memory` resolves it (exact name, or the
+   package that absorbed that member slug), the scout must have named it, and the
+   production ranking — recomputed without any session exclude set — must really miss
+   it within `limit`. An already-delivered target is `noop`, not a gap.
+2. One to five bridge terms, every word of which is literally (case-insensitively) a
+   word of the real query — checked on words, not ranker tokens, so text the tokenizer
+   cannot see (other scripts, punctuation, a word glued behind a query word) cannot
+   ride along into the file.
+3. **Shadow replay**: the terms are applied as extra `learned_tags` to a copy of the
+   target and ranked through the same path with the same frozen frecency snapshot and
+   backlink boost. Nothing is written unless the target then ranks within `limit`, and
+   only the minimal subset of terms that still achieves it.
+4. Under a store lock the file is re-read, only its `learned_tags` node is edited (top
+   level, else `metadata:`), the edit must re-parse to the old frontmatter plus exactly
+   the new tags with an identical body, then an atomic replace. Anything that does not
+   verify is rejected and nothing is written.
+
+Each completed comparison has exactly one `scout_comparison_completed` event; a retry
+of the same payload writes neither another comparison nor duplicate tags. A target
+whose process died after its atomic replace but before its result event is reconciled
+from its claim and replay evidence. `learned_tags` is indexed together with `tags` in the same BM25F tag field,
+so no second ranking signal exists; it is a separate list only so its provenance
+survives bundling (below). The tag field is the one indexed without length
+normalisation (BM25F per-field `b = 0`):
+normalised by the length of a large bundled package, a tag was worth almost nothing
+(measured: a bridge tag moved a 35-member package from rank 33 only to 29). Now a
+tag keeps its weight regardless of body length (about ten times the normalised value
+in a store of short notes). A long natural-language query can still keep the target
+out of `limit`; the replay gate then rejects the tag (`replay_no_effect`) rather than
+writing one that changes nothing.
+
+`preview_learned_tag_ablation` is the read-only maintenance companion. It replays
+only accepted comparisons that have a durable original claim, with each current
+`learned_tag` present and absent. A tag is `necessary` if its recorded gap again
+misses the original limit without it, a `candidate` only if all available replays
+still meet that limit, and `not_decidable` when history or the current replay is
+insufficient. It also marks a group only when those individually candidate tags
+remain redundant together. The preview never removes or changes a tag.
+
+Tokenisation is Unicode-aware (`\w+` on NFC-normalised, lowercased text): an umlaut
+no longer splits a word into fragments ("lügt" stays one term instead of `l` + `gt`),
+whether the text arrives composed or decomposed.
+
+When memories are bundled into a package, their tags become the package's own `tags`,
+so the unnormalised field keeps working after bundling instead of being diluted inside
+the package body. `tags` is rebuilt from the current members on every bundle — a
+member that leaves takes its tags with it — while `learned_tags` is carried over from
+the existing package and joined by the members' own, so nothing learned is lost.
 
 ## Work store
 
@@ -272,7 +360,7 @@ flowchart LR
         Human["Human / Agent<br/>edits content directly"]
     end
 
-    subgraph read["📖 Read side — your content is read-only"]
+    subgraph read["📖 Query side — read-mostly content"]
         Files["Markdown + YAML<br/>.context/rules, memory, work, docs"]
         Loader["Loader<br/>core.py: parse_frontmatter,<br/>iter_files, BM25 index"]
         Engines["Engines<br/>RulesEngine · MemoryEngine ·<br/>WorkEngine · DocsEngine"]
@@ -282,27 +370,26 @@ flowchart LR
         Files --> Loader --> Engines --> Reloader --> Tools
     end
 
-    Human -->|"edits content<br/>(the only content-write path)"| Files
+    Human -->|"edits content directly"| Files
+    Tools -->|"verified learned_tags or validated Work update"| Files
     Tools -->|serves| Client["MCP client<br/>Claude Code, etc."]
 ```
 
-Your rule/memory/work/docs **content** is never created, edited, or
-deleted by the engine — the only way it changes is a human or an agent
-editing it directly; the Reloader picks that up on the next tool call
-(see "Freshness / reloading" above), it never writes it back. This is
-deliberate, not an oversight: the store format IS the file format
-(plain markdown + YAML frontmatter, see "Store format" below), so
-"write" is just "edit a file" — no second API, no drift between what a
-file says and what the tool returns.
+Humans or agents edit rule, memory, work and docs files directly. The
+Reloader picks those edits up on the next tool call (see "Freshness /
+reloading" above). Memory content changes only through an explicit
+`complete_scout_comparison` (or diagnostic `learn_recall_gap`): it appends
+replay-proven query terms to `learned_tags` after locking, re-reading and
+validating the file. Callers can use `WorkEngine.apply_update` for a
+non-writing preview; `save_update` revalidates and atomically writes an
+existing Work record. Any confirmation policy belongs to the caller.
+The engine never creates or deletes a content record, and
+`preview_learned_tag_ablation` is read-only.
 
-This is narrower than "the engines never write" — they do write a small
-set of their OWN sidecar files (never your content): a frecency usage
-sidecar on every `recall`, a lock file alongside it, `RulesEngine`'s
-fallback-markdown snapshot on every server start, and `--export-studio`'s
-opt-in viewer export. All of them are listed in full, with exactly when
-each fires, under [What it writes to disk](#what-it-writes-to-disk) —
-this diagram is about the content boundary, that section is the
-complete inventory.
+The engine also writes its own frecency and recall-event sidecars, lock
+companions, a fallback-markdown snapshot on server start, and an opt-in
+viewer export. Their paths and triggers are listed under
+[What it writes to disk](#what-it-writes-to-disk).
 
 ## Tools
 
@@ -320,9 +407,14 @@ complete inventory.
 
 | Tool | Purpose |
 | --- | --- |
-| `recall(query, limit?)` | top memories across both tiers — frecency- and backlink-ranked |
+| `recall(query, limit?, bausteine?, themen?, taetigkeiten?)` | top memories across both tiers — frecency- and backlink-ranked, with an optional bounded curated-context lane |
 | `get_memory(name)` | full body + metadata of one memory, plus `cited_by` (inbound `[[links]]`) |
 | `list_memories(type?, tier?)` | enumerate, filterable |
+| `memory_context_candidates(bausteine?, themen?, taetigkeiten?)` | inspect curated context matches and their matching axes, without invoking recall |
+| `memory_recall_explain(query, limit?, bausteine?, themen?, taetigkeiten?)` | show delivered candidates with their keyword/context provenance, without warming frecency |
+| `complete_scout_comparison(query, turn, limit, mechanical_names, scout_hits, duration_ms?)` | regular closed-loop path: record one scout comparison and replay-prove every structured gap as a resumable, idempotent transaction |
+| `learn_recall_gap(query, target_name, bridge_terms, scout_names, mechanical_names?, limit?, turn?)` | diagnostic single-target writer for replay-proven bridge terms; the closed comparison above is the regular path (see *Recall learning*) |
+| `preview_learned_tag_ablation()` | read-only replay evidence for retaining learned tags; distinguishes necessary, candidate, and not-decidable tags, including joint redundancy |
 | `memory_dream_status(files_threshold?, lint_threshold?)` | consolidation trigger: changed files + lint issues → "dream fällig?" |
 | `memory_lint()` | hygiene: broken `[[links]]`, index orphans, stale pointers |
 | `memory_usage(limit?)` | hot→cold usage report (opens, recalls, heat) |
@@ -556,6 +648,19 @@ them back as `--exclude`):
 context-toolkit-query --recall "$PROMPT" --limit 6 --exclude "$ALREADY_INJECTED"
 # -> {names, markdown}: inject .markdown, then add .names to your session set
 ```
+
+The same CLI path accepts repeatable explicit context observations:
+
+```bash
+context-toolkit-query --recall "$PROMPT" --limit 6 \
+  --baustein py:package.module --taetigkeit implement
+```
+
+The engine treats those values as opaque, curated IDs/labels; it does not infer a
+module from a file path or a topic from a tool call. A consuming host that has a
+trusted code graph may map an edited path to a validated Baustein ID and retain it only
+for the next prompt. Such host-specific mapping and validation stay outside this
+generic package.
 
 **4. Memory — re-index on write** (PostToolUse on Edit/Write). When a memory file is
 written, regenerate the flat catalog so a freshly-added note is catalogued **immediately** —
@@ -794,20 +899,24 @@ become your real rule set.
 
 ## What it writes to disk
 
-The engine treats your content as read-only. It writes only a frecency sidecar (plus its
-lock companion), and one opt-in export:
+The engine reads content by default. It writes memory tags after verified
+recall learning and can save validated Work-record edits through an
+explicit `save_update` call. It also writes sidecars and an opt-in export:
 
 | Path | When | What |
 | --- | --- | --- |
 | `<memory-dir>/_usage.json` | on every `recall` / `get_memory` | the frecency sidecar (hit counts). Atomic temp-file write, best-effort — a failure never breaks recall. Per-machine, gitignore it. |
-| `<memory-dir>/_usage.json.lock` | during a `recall` / `get_memory` write | a zero-byte `fcntl` lock file that serializes concurrent writers (parallel MCP processes sharing one store). POSIX only; absent on Windows. Gitignore it too. |
+| `<memory-dir>/_usage.json.lock` | during a `recall` / `get_memory` write | a zero-byte `fcntl` lock file that serializes concurrent writers (parallel MCP processes sharing one store). On platforms without `fcntl`, this optional frecency write remains best-effort; curated `learned_tags` writes fail closed. Gitignore it too. |
 | `<out-dir>/{index.html,cytoscape.min.js,rules.json,memory.json}` | only on `--export-studio OUT_DIR` | the offline Context Studio viewer (+ vendored Cytoscape for the Graph tab) + a metadata snapshot. Opt-in; nothing is written unless you run it. |
 | `<out-dir>/{pending.md,diff.json}` | only on `--export-studio OUT_DIR`, and only if found | copied from `_DREAM_PENDING.md` / the canonical `_PENDING_DIFF.json` in the memory dir, so an embedding host (e.g. an editor extension) can auto-load them into the viewer. |
 | `<rules-dir>/_meta/fallback_rules.md` | on every server start, if a project rules tier is loaded | a plain-markdown dump of `non_negotiable`/`mandatory` rules (`RulesEngine.write_fallback_markdown`), for the MCP-outage case — a static reference readable without the running server. Regenerated every start; silent on failure (nice-to-have, never blocks startup). |
+| a memory file's `learned_tags` node | only on `complete_scout_comparison` (or the diagnostic `learn_recall_gap`) whose shadow replay proved the tags effective | the added bridge terms. Atomic replace after a re-parse check; body and all other metadata unchanged. Serialized by `<memory-dir>/../.session_state/recall_learning.lock`. |
+| an existing Work-record file | when a caller invokes `WorkEngine.save_update` | revalidated field update; atomic replacement. `apply_update` offers an optional non-writing preview. |
+| `<memory-dir>/../.session_state/<session>.recall_events.jsonl` | on recall / `get_memory` / comparison / learning calls | the append-only recall event log (`offered`, `opened`, `haiku_compare`, `recall_learning`, `scout_comparison_*`). Gitignore the directory. |
 
-Your rule and memory **content** is never created, edited, or deleted by the engine —
-writes are owned by you (or a separate consolidation pass). No network access, no
-telemetry.
+Rule and memory records are never created or deleted by the engine. Memory
+content changes only through replay-proven `learned_tags`; existing Work records
+can also be updated through the validated write path. No network access, no telemetry.
 
 ## Security & trust model
 
@@ -828,8 +937,14 @@ Read this before pointing it at a shared or sensitive store.
 - **Bounded injection.** Recall returns a capped top-N of summaries; the
   always-loaded user-tier dump truncates each body (`_MAX_BODY_CHARS`, full text via
   `get_memory(name)`) so a single large `.md` can't blow up the context window.
-- **Deterministic & read-only.** Keyword + frecency only, no LLM in the loop; the
-  sole self-write is the `_usage.json` frecency sidecar.
+- **Deterministic, read-mostly.** Keyword + frecency only, no LLM in the loop. Self-
+  writes are the `_usage.json` frecency sidecar, the recall event log, and — only on an
+  explicit `complete_scout_comparison` call (or the diagnostic
+  `learn_recall_gap`) — replay-proven terms appended to one memory's
+  `learned_tags`. Validated Work-record updates are a separate explicit write
+  path. Every word of those terms must be a word of the query passed to
+  that call, so a caller can only teach a memory the words of its own logged
+  query. The comparison records a durable claim before any tag write.
 
 ## Working method (always-on)
 
@@ -848,8 +963,10 @@ the coherent working-method framing helps your models, skip it if your rules alr
 
 ## Design principles
 
-- **Read-only on your content.** It loads and ranks; the only self-write is the
-  `_usage.json` frecency sidecar (see above).
+- **Read-mostly content.** It loads and ranks. An explicit, replay-verified
+  scout comparison can append `learned_tags` to a memory; an explicit
+  `save_update` call can revalidate and atomically update an existing Work
+  record. Usage and recall events are stored in sidecars (see above).
 - **Deterministic.** Keyword + frecency scoring, no LLM in the loop — same inputs, same order.
 - **Degrade, don't crash.** A malformed file is skipped, not fatal; a missing/corrupt
   usage sidecar resets to empty.

@@ -13,6 +13,6 @@ Test this sample project using `context-toolkit-query`:
 
 ```bash
 cd examples/generic-project
-context-toolkit-query doctor
-context-toolkit-query validate --all
+context-toolkit-query --doctor
+context-toolkit-query --validate-all
 ```

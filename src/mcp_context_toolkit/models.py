@@ -136,7 +136,7 @@ class Decision(_StrengesModell):
     supersedes: str | None = None
 
     # `amended` (wann dieser Record an Ort und Stelle praezisiert wurde) stand
-    # hier von 2026-08-12 bis Etappe C (2026-08-19, W8-Reviewer-Fund WARNING-3):
+    # hier bis zu einer Schema-Pruefung:
     # entfernt, weil der neue Loader (`engine.py::_load_decisions`, seit Decisions
     # als Work-Store-Karten statt YAML leben) es strukturell nie mehr befuellen
     # kann — das Karten-Frontmatter hat kein eigenes Feld dafuer, nur `body`-
@@ -151,8 +151,7 @@ class Decision(_StrengesModell):
 # ---------------------------------------------------------------------------
 # Work items — plans, roadmaps, in-flight vs. superseded ideas.
 #
-# Same lesson as Decision (which went eight weeks without a single write): a
-# store survives only if something forces writes, and it stays legible only
+# A store survives only if something forces writes, and it stays legible only
 # if status is a FIELD rather than a folder move. Prose lives in `body`
 # (frontmatter files, like Memory) rather than as YAML strings — plans are
 # ~70% prose by line count, unlike Rules/Decisions which are mostly structure.
@@ -160,6 +159,12 @@ class Decision(_StrengesModell):
 
 WorkKind = Literal["goal", "step", "note", "decision", "changelog"]
 WorkStatus = Literal["open", "active", "done", "dropped", "superseded"]
+# Orthogonal to `kind` (which is granularity: goal/step/note) and to `theme`
+# (which is domain: chat/search/...) — `category` answers "what KIND of
+# work is this", the axis a mixed backlog otherwise has no field for at all.
+# None means genuinely uncategorized (never migrated / not yet triaged), not
+# a fifth bucket — same "field absent vs. field empty" discipline as `reuse`.
+WorkCategory = Literal["bug", "feature", "debt", "research"]
 
 def _validate_theme_slug(v: str) -> str:
     if not isinstance(v, str) or not v or " " in v or v == "not_a_real_theme":
@@ -255,6 +260,7 @@ class WorkItem(BaseModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     title: str
     kind: WorkKind = "goal"
+    category: WorkCategory | None = None
     status: WorkStatus = "open"
     theme: WorkTheme
 

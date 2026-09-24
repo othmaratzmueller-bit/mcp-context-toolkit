@@ -17,7 +17,8 @@ import bisect
 import math
 import os
 import re
-from collections.abc import Iterator
+import unicodedata
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import yaml
@@ -125,7 +126,7 @@ def discover_shared_rules_dir() -> Path | None:
     return p if p.is_dir() else None
 
 
-def discover_work_dir() -> Path | None:
+def discover_work_dir(*, env_only: bool = False) -> Path | None:
     """Locate the PROJECT work-item store. Env ``CONTEXT_WORK_DIR`` wins, else
     walk up for ``<convention>/work``. Returns ``None`` when absent — the work
     tools and the per-file delivery are then simply not offered.
@@ -142,11 +143,22 @@ def discover_work_dir() -> Path | None:
     `.resolve()` is deliberate: callers derive sibling paths from this
     (``lint()`` walks two levels up to find the repo root), and a relative store
     path made that computation report every `plan_path` as broken.
-    """
+
+    ``env_only=True`` skips the walk-up fallback — only an explicit
+    ``CONTEXT_WORK_DIR`` counts, cwd is never inspected. Every read-only
+    caller (MCP server, query tools) wants the convenience walk-up; a WRITE
+    command that dumps this store's content into a caller-chosen output
+    directory does not get to guess a path that directory might then expose
+    — ``--export-studio`` passes this (`cli.py`, 2026-08-22): a host embedding
+    the export under a public web root previously got `work.json` written
+    there from cwd auto-discovery even with no env var set, silently
+    defeating the one guard (omit the env var) meant to opt out."""
     env = os.environ.get("CONTEXT_WORK_DIR")
     if env:
         p = Path(env).expanduser().resolve()
         return p if p.is_dir() else None
+    if env_only:
+        return None
     cwd = Path.cwd()
     for candidate in [cwd, *cwd.parents]:
         for conv in store_conventions():
@@ -170,6 +182,39 @@ def discover_domains_dir() -> Path | None:
             doms = candidate / conv / "domains"
             if doms.is_dir():
                 return doms.resolve()
+    return None
+
+
+def discover_docs_dir(*, env_only: bool = False) -> Path | None:
+    """Locate the PROJECT ``docs/`` tree (prose documentation). Env
+    ``CONTEXT_DOCS_DIR`` wins, else the project root's ``docs/`` sibling.
+    Returns ``None`` when absent — same optional-store gating shape as
+    ``discover_work_dir``.
+
+    Promoted here from ``server/discovery.py`` (2026-08-22) for the same
+    reason ``discover_work_dir`` already lives here: the CLI's
+    ``--export-studio`` needs it too, and a third independent copy is
+    exactly the duplication ``discover_work_dir``'s own docstring warns
+    about. ``server/discovery.py`` keeps a thin re-export so existing
+    imports (``_discover_docs_dir``) are unaffected.
+
+    Walk-up loop inlined rather than calling ``host_adapters._find_project_
+    root`` — that module imports ``store_conventions`` from here, so a
+    module-level import back would be circular.
+
+    ``env_only=True``: same rationale and same caller as
+    ``discover_work_dir``'s — a WRITE command never gets the cwd walk-up."""
+    env = os.environ.get("CONTEXT_DOCS_DIR")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_dir() else None
+    if env_only:
+        return None
+    for candidate in [Path.cwd(), *Path.cwd().parents]:
+        for conv in store_conventions():
+            if (candidate / conv).is_dir():
+                docs = candidate / "docs"
+                return docs if docs.is_dir() else None
     return None
 
 
@@ -199,7 +244,12 @@ def warn_if_example_rules(rules_dir: Path) -> None:
 # TWICE, silently, in two files that drift independently.
 # ---------------------------------------------------------------------------
 
-_WORD_RE = re.compile(r"[a-z0-9_]+")
+# Unicode word characters (letters, digits, underscore — Python's ``\w`` on
+# str), applied to NFC text (see ``normalise_text``). The earlier ASCII class
+# ``[a-z0-9_]+`` split every German word at its umlaut: "lügt" became {l, gt},
+# "übersetzen" became {bersetzen}, so the store's own language was indexed as
+# fragments.
+_WORD_RE = re.compile(r"\w+")
 
 # BM25 parameters (Robertson/Sparck-Jones defaults).
 #   k1 — term-frequency saturation: the 10th occurrence of a word adds far less
@@ -249,37 +299,72 @@ def split_token(token: str) -> list[str]:
     return parts or [token]
 
 
-def build_bm25_index(fields_by_key: dict[str, list[tuple[str, float]]]) -> dict:
+def normalise_text(text: str) -> str:
+    """NFC + lowercase — the one form both index and query are tokenised in.
+    ``\\w`` does not match a combining mark, so decomposed (NFD) text — e.g.
+    from a macOS file name or a pasted PDF — split "lügt" into ``lu`` + ``gt``
+    while the composed form stayed whole: the same word, two token sets."""
+    return unicodedata.normalize("NFC", text).lower()
+
+
+def query_terms(text: str) -> set[str]:
+    """The exact term set ``bm25_scores`` ranks ``text`` by — normalised,
+    word-split, snake_case parts. Public so a caller that must reason about
+    what a query can reach (recall learning's "does this bridge term occur in
+    the query at all" gate) uses the ranker's own tokenizer, not a copy that
+    could disagree with it."""
+    return {part for raw in _WORD_RE.findall(normalise_text(text)) for part in split_token(raw)}
+
+
+def build_bm25_index(
+    fields_by_key: Mapping[str, Sequence[tuple[str, float] | tuple[str, float, bool]]],
+) -> dict:
     """Build an inverted BM25F index from ``{key: [(text, field_weight), ...]}``.
 
     Shape returned::
 
-        {"postings": {token: {key: weighted_tf}},
-         "tokens":   [sorted vocabulary],
-         "lengths":  {key: weighted_length},
-         "avg_len":  float}
+        {"postings":      {token: {key: weighted_tf}},
+         "flat_postings": {token: {key: weighted_tf}},
+         "tokens":        [sorted vocabulary],
+         "lengths":       {key: weighted_length},
+         "avg_len":       float}
 
     ``weighted_tf`` already carries the field weight (a hit in a 3x-weighted
     field counts 3x), which is what makes this BM25**F** rather than plain
     BM25 — field emphasis is preserved as term frequency, not a separate score
     component. The vocabulary is kept sorted so a query term can be resolved
     to every token it PREFIXES via binary search (see ``prefix_slice``).
+
+    A field may carry a third element ``length_normalised`` (default True).
+    ``False`` is BM25F's per-field ``b = 0``: the field's hits land in
+    ``flat_postings``, are not divided by the record's length, and do not add
+    to it. Meant for short curated fields (memory ``tags``) whose whole point
+    is to name what a record is about — normalising them by the length of a
+    35-member package made a tag nearly worthless there (measured on a real
+    store: a bridge tag moved a package from rank 33 to 29, not into the top
+    six).
     """
     postings: dict[str, dict[str, float]] = {}
+    flat_postings: dict[str, dict[str, float]] = {}
     lengths: dict[str, float] = {}
     for key, fields in fields_by_key.items():
         total = 0.0
-        for text, weight in fields:
-            for token in _WORD_RE.findall(text.lower()):
+        for field in fields:
+            text, weight = field[0], field[1]
+            normalised = field[2] if len(field) > 2 else True
+            target = postings if normalised else flat_postings
+            for token in _WORD_RE.findall(normalise_text(text)):
                 for part in split_token(token):
-                    postings.setdefault(part, {})
-                    postings[part][key] = postings[part].get(key, 0.0) + weight
-                    total += weight
+                    target.setdefault(part, {})
+                    target[part][key] = target[part].get(key, 0.0) + weight
+                    if normalised:
+                        total += weight
         lengths[key] = total
     n = len(lengths)
     return {
         "postings": postings,
-        "tokens": sorted(postings),
+        "flat_postings": flat_postings,
+        "tokens": sorted(postings.keys() | flat_postings.keys()),
         "lengths": lengths,
         "avg_len": (sum(lengths.values()) / n) if n else 0.0,
     }
@@ -296,9 +381,9 @@ def prefix_slice(tokens: list[str], term: str, min_len: int = PREFIX_MIN_LEN) ->
         return [term] if lo < len(tokens) and tokens[lo] == term else []
     # Bound the slice by binary search too, so the work is proportional to the
     # number of MATCHES, not to the vocabulary tail behind them. The sentinel
-    # is safe because the vocabulary is built from [a-z0-9_] only (max
-    # codepoint 122), well below U+FFFD.
-    hi = bisect.bisect_right(tokens, term + "�")
+    # is the highest code point, so it sorts after every continuation of
+    # ``term`` the Unicode vocabulary can hold.
+    hi = bisect.bisect_right(tokens, term + chr(0x10FFFF))
     return tokens[lo:hi]
 
 
@@ -315,11 +400,12 @@ def bm25_scores(
     parts that were actually indexed rather than against a compound that is
     not there.
     """
-    terms = {part for raw in _WORD_RE.findall(query.lower()) for part in split_token(raw)}
+    terms = query_terms(query)
     if not terms:
         return {}
 
     postings, vocab = index["postings"], index["tokens"]
+    flat_postings = index.get("flat_postings", {})
     lengths, avg_len = index["lengths"], index["avg_len"]
     total_docs = len(lengths)
 
@@ -335,16 +421,31 @@ def bm25_scores(
         # Document frequency of the CONCEPT, not of one spelling: a record
         # that holds several matching tokens must still be counted once.
         hits: dict[str, float] = {}
+        flat_hits: dict[str, float] = {}
         for token in matches:
-            for key, tf in postings[token].items():
+            for key, tf in postings.get(token, {}).items():
                 hits[key] = hits.get(key, 0.0) + tf
+            for key, tf in flat_postings.get(token, {}).items():
+                flat_hits[key] = flat_hits.get(key, 0.0) + tf
         # Robertson/Sparck-Jones IDF. A term carried by nearly every record
         # ("der", "wie") lands near zero, so filler words in a natural-language
         # question stop competing with the words that carry the topic.
-        idf = math.log(1 + (total_docs - len(hits) + 0.5) / (len(hits) + 0.5))
-        for key, tf in hits.items():
-            norm = 1 - b + b * (lengths[key] / avg_len)
-            bases[key] = bases.get(key, 0.0) + idf * (tf * (k1 + 1) / (tf + k1 * norm))
+        df = len(hits.keys() | flat_hits.keys())
+        idf = math.log(1 + (total_docs - df + 0.5) / (df + 0.5))
+        # A dict, not a set: result order must stay the postings' order, not
+        # PYTHONHASHSEED's (callers without a tie-breaker, tools_domains).
+        for key in {**hits, **flat_hits}:
+            tf, flat = hits.get(key, 0.0), flat_hits.get(key, 0.0)
+            norm = 1 - b + b * (lengths[key] / avg_len) if avg_len else 1.0
+            if not flat:
+                # Unchanged expression, so a record without flat hits ranks
+                # bit-for-bit as before.
+                bases[key] = bases.get(key, 0.0) + idf * (tf * (k1 + 1) / (tf + k1 * norm))
+            else:
+                # BM25F pseudo term frequency: each field normalised on its
+                # own (flat fields: b = 0), then saturated once.
+                pseudo = tf / norm + flat
+                bases[key] = bases.get(key, 0.0) + idf * (pseudo * (k1 + 1) / (pseudo + k1))
     return bases
 
 

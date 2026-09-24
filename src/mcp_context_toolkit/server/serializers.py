@@ -54,5 +54,5 @@ def _work_summary(w: Any) -> dict:
     # field it had to fetch each record individually via get_work — a check
     # that is expensive gets skipped.
     return {"key": w.key, "title": w.title, "kind": w.kind,
-            "status": w.status, "theme": w.theme, "part_of": w.part_of,
-            "reuse": w.reuse is not None}
+            "category": w.category, "status": w.status, "theme": w.theme,
+            "part_of": w.part_of, "reuse": w.reuse is not None}

@@ -721,6 +721,56 @@ class TestListWorkTopicOverview:
         assert len(serialized) <= _LIST_WORK_MAX_CHARS * 1.15  # shrink-step slack
 
 
+class TestListWorkCategoryFilter:
+    """`category` (bug/feature/debt/research) end to end through the MCP
+    tool layer — the axis this whole change adds, so a real caller like
+    `list_work(category="bug")` must actually reach it."""
+
+    def _server(self, tmp_path: Path):
+        from mcp_context_toolkit.mcp_server import build_server
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True)
+        items = [
+            ("e1", "engine", "bug"), ("e2", "engine", "feature"),
+            ("c1", "chat", "bug"), ("c2", "chat", None),
+        ]
+        for key, theme, category in items:
+            cat_line = f"\ncategory: {category}" if category else ""
+            (work_dir / f"{key}.md").write_text(
+                f"---\nkey: {key}\ntitle: {key}\nkind: goal\nstatus: open\n"
+                f"theme: {theme}{cat_line}\nopened: 2026-07-01\n---\n\nx\n",
+                encoding="utf-8",
+            )
+        rules = _Reloader(lambda: None, [])
+        work = _Reloader(lambda: WorkEngine.from_directory(work_dir), [work_dir])
+        return build_server(rules, None, None, work)
+
+    def _call(self, server, tool, args):
+        import asyncio
+        import json
+
+        result = asyncio.run(server.call_tool(tool, args))
+        return json.loads(result[0][0].text)
+
+    def test_category_filter_reaches_the_engine(self, tmp_path: Path):
+        server = self._server(tmp_path)
+        data = self._call(server, "list_work", {"category": "bug"})
+        assert {row["key"] for row in data} == {"e1", "c1"}
+
+    def test_category_filter_combines_with_theme(self, tmp_path: Path):
+        server = self._server(tmp_path)
+        data = self._call(server, "list_work",
+                          {"category": "bug", "theme": "engine"})
+        assert {row["key"] for row in data} == {"e1"}
+
+    def test_row_carries_category_including_none(self, tmp_path: Path):
+        server = self._server(tmp_path)
+        data = self._call(server, "list_work", {"theme": "chat"})
+        by_key = {row["key"]: row["category"] for row in data}
+        assert by_key == {"c1": "bug", "c2": None}
+
+
 def _write_domain(d: Path, domain_id: str, yaml_body: str) -> None:
     dom_dir = d / domain_id
     dom_dir.mkdir(parents=True, exist_ok=True)
@@ -751,6 +801,111 @@ created: 2026-07-08
 """,
         encoding="utf-8",
     )
+
+
+class TestLearnRecallGapTool:
+    """`learn_recall_gap` via real `call_tool`: the MCP adapter runs the same
+    core as the CLI, writes the tag, and recall then delivers the target."""
+
+    def test_tool_learns_and_recall_follows(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import build_server
+
+        mem_dir = tmp_path / "memory"
+        _write_mem(mem_dir, "honesty_rule", body="Never claim what you did not verify.")
+        for i in range(3):
+            _write_mem(mem_dir, f"agent_note_{i}", body=f"agent result agent result {i}")
+        rules_dir = tmp_path / "rules"
+        _write_rule(rules_dir, "r1")
+        memory = _Reloader(lambda: MemoryEngine.from_directory(mem_dir), [mem_dir])
+        server = build_server(
+            _Reloader(lambda: RulesEngine.from_directory(rules_dir), [rules_dir]), memory,
+        )
+
+        def call(tool, args):
+            return json.loads(asyncio.run(server.call_tool(tool, args))[0][0].text)
+
+        query = "agent fabricated result"
+        assert "honesty_rule" not in [m["name"] for m in call("recall", {"query": query, "limit": 2})]
+        result = call("learn_recall_gap", {
+            "query": query, "target_name": "honesty_rule",
+            "bridge_terms": ["fabricated"], "scout_names": ["honesty_rule"], "limit": 2,
+        })
+        assert (result["status"], result["added_tags"]) == ("accepted", ["fabricated"])
+        _bump(mem_dir / "honesty_rule.md")
+        assert "honesty_rule" in [m["name"] for m in call("recall", {"query": query, "limit": 2})]
+
+    def test_closed_comparison_tool_is_idempotent(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import build_server
+
+        mem_dir = tmp_path / "memory"
+        _write_mem(mem_dir, "honesty_rule", body="Never claim what you did not verify.")
+        for i in range(3):
+            _write_mem(mem_dir, f"agent_note_{i}", body=f"agent result agent result {i}")
+        rules_dir = tmp_path / "rules"
+        _write_rule(rules_dir, "r1")
+        server = build_server(
+            _Reloader(lambda: RulesEngine.from_directory(rules_dir), [rules_dir]),
+            _Reloader(lambda: MemoryEngine.from_directory(mem_dir), [mem_dir]),
+        )
+
+        def call(tool, args):
+            return json.loads(asyncio.run(server.call_tool(tool, args))[0][0].text)
+
+        payload = {"query": "agent fabricated result", "turn": 7, "limit": 2,
+                   "mechanical_names": ["agent_note_0"],
+                   "scout_hits": [{"target_name": "honesty_rule", "bridge_terms": ["fabricated"]}]}
+        first = call("complete_scout_comparison", payload)
+        second = call("complete_scout_comparison", payload)
+        assert (first["results"][0]["status"], second["resumed"]) == ("accepted", True)
+
+    def test_ablation_preview_uses_the_closed_comparison_evidence(self, tmp_path: Path):
+        import asyncio
+        import json
+
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import build_server
+        from mcp_context_toolkit.usage import RecallEventLog
+
+        mem_dir = tmp_path / "memory"
+        _write_mem(mem_dir, "honesty_rule", body="Never claim what you did not verify.")
+        for i in range(3):
+            _write_mem(mem_dir, f"agent_note_{i}", body=f"agent result agent result {i}")
+        rules_dir = tmp_path / "rules"
+        _write_rule(rules_dir, "r1")
+        old_log = RecallEventLog.for_memory_dir(mem_dir, session_id="old-session")
+        server = build_server(
+            _Reloader(lambda: RulesEngine.from_directory(rules_dir), [rules_dir]),
+            _Reloader(lambda: MemoryEngine.from_directory(mem_dir), [mem_dir]),
+            recall_event_log=old_log,
+        )
+
+        def call(tool, args):
+            return json.loads(asyncio.run(server.call_tool(tool, args))[0][0].text)
+
+        call("complete_scout_comparison", {
+            "query": "agent fabricated result", "turn": 7, "limit": 2,
+            "mechanical_names": ["agent_note_0"],
+            "scout_hits": [{"target_name": "honesty_rule", "bridge_terms": ["fabricated"]}],
+        })
+        _bump(mem_dir / "honesty_rule.md")
+        server = build_server(
+            _Reloader(lambda: RulesEngine.from_directory(rules_dir), [rules_dir]),
+            _Reloader(lambda: MemoryEngine.from_directory(mem_dir), [mem_dir]),
+            recall_event_log=RecallEventLog(old_log.session_dir, "new-session"),
+        )
+        preview = call("preview_learned_tag_ablation", {})
+
+        assert [(item["tag"], item["status"]) for item in preview["tags"]] == [
+            ("fabricated", "necessary"),
+        ]
 
 
 class TestDomainTools:

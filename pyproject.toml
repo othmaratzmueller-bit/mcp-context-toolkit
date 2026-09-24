@@ -1,6 +1,6 @@
 [project]
 name = "mcp-context-toolkit"
-version = "1.0.0"
+version = "2.0.0"
 description = "Feed any AI agent the right context on demand — file-scoped rules, frecency-ranked memory, a work-item tracker, and section-indexed docs search, from plain markdown/YAML stores (OKF-compatible)"
 readme = "README.md"
 license = { text = "MIT" }

@@ -1,32 +1,10 @@
-"""Work items — plans, roadmaps, in-flight vs. superseded ideas.
+"""Work items as validated Markdown records with a typed relationship graph.
 
-Same on-disk shape as memory (a directory of frontmatter+markdown files),
-different relationships: memory is recalled by relevance and links freely
-in prose; work items form a small typed graph (`part_of` / `amends` /
-`supersedes` / `blocked_by`) that a lint pass can walk mechanically. Read-only
-— this engine never writes; a migration agent or a human does.
-
-Built after two failures observed in the pre-existing stores this replaces:
-
-- `.claude/decisions/` (395 records) went eight weeks without a single write.
-  It had a read path (`query_decisions_for_file`, engine.py) and nothing that
-  forced a write. `supersedes` exists on the model and was used exactly ONCE —
-  everywhere else someone wrote "ACHTUNG — AMENDMENT, bitte VOR dem Rest
-  lesen" as prose into `reason` instead of using the field.
-- `.todo.json` (126 items) grew a single item to 21,758 characters — 13
-  chronological "NACHTRAG" paragraphs stacked in one string field — DESPITE
-  already linking to a 902-line plan file that covered the same ground.
-  Measured across the whole file: 96 of 126 items already name a plan file,
-  and 21 of those still carry >3,000 characters of duplicated prose next to
-  it. Two places claiming the same truth drift; that duplication is exactly
-  where the store's "todo says open, code says built" contradictions came
-  from.
-
-Hierarchy is NOT three fixed levels (master file -> sub file -> item): the
-median work item measured on the real backlog has ZERO sub-points, while a
-handful have 30-60+. Fixed levels would force ~126 near-empty "master files"
-for items that will only ever be one record. Instead hierarchy is a relation
-(`part_of`) that a small item simply never uses.
+Recall and lint read frontmatter files. Editing through ``apply_update`` or
+``save_update`` validates the complete record before an atomic replacement and
+refuses files with YAML comments, which a plain YAML round-trip would discard.
+Work-item links resolve within the work store; hierarchy uses ``part_of``
+rather than fixed levels.
 """
 
 from __future__ import annotations
@@ -34,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import yaml
 from pydantic import ValidationError
 
 from mcp_context_toolkit.core import LINK_RE as _LINK_RE
@@ -72,16 +51,25 @@ _W_TITLE, _W_BODY = 3.0, 1.0
 # grows past a handful of items.
 _RECALL_FLOOR_RATIO = 0.25
 
+# Public (no leading underscore — cross-module import) because it must stay
+# the SINGLE source of truth for "what work_recall excludes by default":
+# `server/tools_work.py`'s `work_recall` MCP tool AND any second consumer
+# (the Context Studio chat tool) call
+# `WorkEngine.recall(..., exclude_kinds=RECALL_DEFAULT_EXCLUDED_KINDS)` —
+# a changelog line is never "an existing item to reuse": changelog entries
+# can crowd out the goal/step/note records this search exists to find. `decision` stays
+# IN the pool on purpose — it answers exactly the W20/S8 "was this already
+# considered?" question. A second copy of this literal in a second file
+# would silently diverge the day one of them changes.
+RECALL_DEFAULT_EXCLUDED_KINDS: frozenset[str] = frozenset({"changelog"})
+
 # `_LINK_RE`/`_norm_link` (imported from core.py above) parse a [[name]] in a
 # WORK item's prose exactly like memory.py's own links — same syntax, same
 # normalization (padding/`.md`-suffix/kebab-case). What differs is the
 # RESOLUTION target: a work-item [[name]] must resolve to a work KEY, never
-# to a memory name (Owner-decision 2026-08-16, work-record
-# work_lint_prueft_prosa_links_nicht — a Prosa-[[...]] pointing at a memory
-# read exactly like a dangling work reference and neither `dangling_refs`
-# above nor memory.py's `broken_links` ever checked it, because each store
-# only walks its own tree). A memory reference in work-item prose is written
-# out in plain text instead.
+# to a memory name (a prose [[...]] link to a memory would otherwise
+# look like a dangling work reference because the stores are checked
+# separately). A memory reference in work-item prose is written in plain text.
 
 
 def _meta_get(meta: dict, key: str):
@@ -164,7 +152,7 @@ def _parse_work_item(path: Path) -> WorkItem:
     # Modellzugehoerigkeit: ein Frontmatter-`body:` waere kein Echo des
     # echten Inhalts wie bei `source_path`, sondern ERSETZTE ihn lautlos —
     # exakt die 108-Dateien-Klasse aus v1.4.314 (`body: |` als YAML-Key
-    # statt als Markdown-Text nach dem schliessenden `---`, W8-Reviewer-Fund).
+    # statt als Markdown-Text nach dem schliessenden `---`, regression review).
     # `metadata` ist der Container fuer den zweiten Frontmatter-Stil (siehe
     # `_meta_get`), kein WorkItem-Feld.
     LEGACY_TOP_ALIASES = {"kanten", "braucht_owner", "entblockt_durch", "aus_migration"}
@@ -238,6 +226,7 @@ def _parse_work_item(path: Path) -> WorkItem:
             key=str(_meta_get(meta, "key") or path.stem),
             title=str(_meta_get(meta, "title") or "").strip(),
             kind=_meta_get(meta, "kind") or "goal",
+            category=_meta_get(meta, "category"),
             status=_meta_get(meta, "status") or "open",
             theme=theme_wert,
             opened=opened_wert,
@@ -268,10 +257,172 @@ def _parse_work_item(path: Path) -> WorkItem:
         raise KnowledgeLoadError(path, str(e)) from e
 
 
+class FrontmatterWriteError(Exception):
+    """A work-item write cannot proceed safely: either the update fails
+    WorkItem validation, or the source file's frontmatter carries a YAML
+    comment that a plain `yaml.safe_dump` round-trip would silently drop
+    (see `WorkEngine.apply_update`'s docstring)."""
+
+
+# Canonical on-disk frontmatter field order for a WRITE — mirrors
+# WorkItem.model_fields, English names only. A hand-authored file may use
+# the German legacy aliases (`kanten`/`braucht_owner`/...) that `_meta_get`
+# still reads (see `_parse_work_item`); a write through this path
+# normalizes those away on save. That is a visible, not a silent, tradeoff
+# — the diff preview (`apply_update`'s `old_text`/`new_text`) shows exactly
+# this normalization before anyone confirms a save.
+_FRONTMATTER_FIELD_ORDER = (
+    "key", "title", "kind", "category", "status", "theme", "opened", "closed",
+    "part_of", "amends", "supersedes", "blocked_by",
+    "evidence", "reuse", "plan_path",
+    "requires_owner", "unblocked_by", "migrated",
+)
+
+
+def _work_item_frontmatter_dict(item: WorkItem) -> dict:
+    """Ordered dict of `item`'s frontmatter fields (everything except
+    `body`/`source_path`, which are not frontmatter — `body` is the text
+    after the closing `---`, `source_path` is derived from the real file
+    path, never read from or written to disk)."""
+    d: dict = {}
+    for field in _FRONTMATTER_FIELD_ORDER:
+        value = getattr(item, field)
+        if field == "evidence":
+            value = {"commits": list(value.commits), "files": list(value.files)}
+        elif field == "reuse" and value is not None:
+            value = {
+                "searched_for": list(value.searched_for), "found": list(value.found),
+                "conclusion": value.conclusion, "uses": list(value.uses),
+                "extends": list(value.extends), "creates": list(value.creates),
+                "modules": list(value.modules),
+            }
+        d[field] = value
+    return d
+
+
+def render_work_item_text(item: WorkItem) -> str:
+    """Full markdown text (frontmatter + body) for `item` — what
+    `WorkEngine.save_update` puts on disk. Pure function, no I/O: callers
+    use this to build a diff preview before ever touching the filesystem."""
+    fm = yaml.safe_dump(
+        _work_item_frontmatter_dict(item), sort_keys=False, allow_unicode=True,
+        default_flow_style=False,
+    )
+    return f"---\n{fm}---\n\n{item.body.rstrip()}\n"
+
+
+def _raw_frontmatter_block(text: str) -> str | None:
+    """The raw text BETWEEN the `---` delimiters, before any YAML parsing —
+    same delimiter rule as `core.parse_frontmatter` (a closing line must
+    `strip()` to exactly `---`), kept as a tiny local duplicate rather than
+    changing that function's return shape for every other caller (memory.py
+    included) just to hand back a second value only this write path needs."""
+    if not text.startswith("---"):
+        return None
+    lines = text.splitlines()
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return None
+    return "\n".join(lines[1:end])
+
+
+def _has_frontmatter_comment(raw_frontmatter_text: str) -> bool:
+    """True if the raw frontmatter contains a `#` YAML comment marker
+    outside a quoted string. Deliberately conservative: a false positive
+    only means the write is refused (safe, and the record stays editable
+    by hand); a false negative would silently drop a real comment on save.
+    Four refinements over a first, simpler draft, each caught by an
+    independent ground-truth run against the real store (2026-08-22,
+    `ruamel.yaml`'s own comment-attachment tracking, checked recursively
+    over the whole loaded structure — not just the top-level mapping):
+
+    1. A quote character only OPENS tracking at the start of a value
+       (right after `key:`, after `- `, or as the first non-space
+       character of a line) — a mid-word apostrophe like "Owner's
+       decision" must NOT be mistaken for the start of a quoted scalar,
+       or a real `#` comment later on that same line would wrongly read
+       as "inside a quote" and never fire (a regression review —
+       0 occurrences in the real store today, but latent).
+    2. Quote state persists ACROSS lines, not reset per line — resetting
+       per line flagged real files as a false positive: continuation
+       lines of a genuinely multi-line quoted title, where the quote
+       opened on an earlier line and a bare `#` inside that still-open
+       string is not a comment at all.
+    3. A `#` only starts a comment if it is the first character of the
+       line or immediately preceded by whitespace, per the YAML spec — a
+       `#` embedded in a word (`Backend#1`, `Lock-#1-Liefergrenze`) is a
+       literal character, not a comment marker (regression review
+       "Hinweis" — 3 real titles were needlessly refused without this).
+    4. `''` inside a single-quoted scalar is YAML's escape for one literal
+       `'`, NOT the end of the string — a doubled quote must be consumed
+       as a pair and NEVER close `in_quote`. Without this, the first `'`
+       of the pair closed tracking, the second could not reopen it
+       (`at_value_start` stays `False` right after a close), and the
+       scanner ran the REST of that multi-line scalar believing it was
+       outside any quote — a later `#` in ordinary prose text (e.g.
+       "Transition #4") then misread as a comment start. A regression case with a multi-line `searched_for` entry containing
+       `''Status-Read''` exposed this false positive.
+
+    Measured on the real store (2026-08-22, before refinement 4) after the
+    first three: 15 of 5159 files carry a real comment that a plain
+    `yaml.safe_load`/`dump` round-trip would drop — 0 false positives, 0
+    false negatives against the ground-truth run. Roughly half are an
+    `evidence.commits` entry explaining an intentionally-empty hash, the
+    rest a commented-out S8 candidate list."""
+    in_quote = None
+    at_value_start = True
+    prev_was_space = True  # start-of-text counts as "preceded by whitespace"
+    n = len(raw_frontmatter_text)
+    i = 0
+    while i < n:
+        ch = raw_frontmatter_text[i]
+        if ch == "\n":
+            if in_quote is None:
+                at_value_start = True
+            prev_was_space = True
+            i += 1
+            continue
+        if in_quote:
+            if ch == in_quote:
+                # `''` inside a single-quoted scalar is one literal quote,
+                # not the closing delimiter — consume the pair, stay open.
+                if in_quote == "'" and i + 1 < n and raw_frontmatter_text[i + 1] == "'":
+                    i += 2
+                    prev_was_space = False
+                    continue
+                in_quote = None
+            prev_was_space = False
+            i += 1
+            continue
+        if ch in ("'", '"') and at_value_start:
+            in_quote = ch
+            at_value_start = False
+            prev_was_space = False
+            i += 1
+            continue
+        # A `#` only STARTS a comment per the YAML spec if it is the first
+        # character of the line or immediately preceded by whitespace — a
+        # `#` embedded in a word (`Backend#1`) is a literal character.
+        # Without this check, titles containing an embedded # were needlessly
+        # refused even though YAML treats that character as literal text when
+        # it is not preceded by whitespace.
+        if ch == "#" and prev_was_space:
+            return True
+        if ch in (" ", "\t"):
+            prev_was_space = True
+            i += 1
+            continue
+        prev_was_space = False
+        at_value_start = ch in (":", "-")
+        i += 1
+    return False
+
+
 class WorkEngine:
     """Loads work-item frontmatter files from one root and answers
-    get/list/children/rollup/lint. Read-only, single-tier (unlike Memory's
-    project/user/core split) — work items are project-scoped by nature; a
+    get/list/children/rollup/lint/apply_update/save_update. Single-tier
+    (unlike Memory's project/user/core split) — work items are
+    project-scoped by nature; a
     cross-project "how do I generally plan" tier was not asked for and would
     be pure speculation (see W20 — ask before inventing)."""
 
@@ -366,6 +517,72 @@ class WorkEngine:
     def get(self, key: str) -> WorkItem | None:
         return self._by_key().get(key)
 
+    def apply_update(self, key: str, updates: dict) -> tuple[str, str, WorkItem]:
+        """Validate an update to work item `key` WITHOUT writing anything.
+        Returns `(old_text, new_text, the validated WorkItem)` — a caller
+        builds a diff preview from the first two, or hands the third to
+        `save_update` once a human confirms. Raises `KeyError` if `key`
+        doesn't exist, `ValueError` if `updates` tries to change `key` or
+        `source_path` (identity is immutable — a rename is a filesystem
+        operation, out of this write path's scope; `source_path` is WORSE
+        than immutable, it is the thing `save_update` writes TO — accepting
+        it from `updates` would be a path-traversal write primitive, since
+        `WorkItem`, unlike the rules/decisions models, is plain `BaseModel`
+        with `extra="ignore"` rather than `_StrengesModell`'s `extra="forbid"`
+        and would otherwise silently accept it), `ValueError` if `updates`
+        names a field that is not a real `WorkItem` field (same "unknown
+        key must be LOUD, not silently ignored" discipline `_parse_work_item`
+        already applies to the read path, for the same reason — Pydantic's
+        default `extra="ignore"` would otherwise swallow a typo'd field name
+        without a trace), and `FrontmatterWriteError` if the merged fields
+        fail WorkItem validation OR the source file's frontmatter carries a
+        YAML comment this round-trip would silently drop."""
+        if "key" in updates or "source_path" in updates:
+            raise ValueError(
+                "`key`/`source_path` cannot be set via updates — "
+                "key via filesystem rename, source_path is derived, never user input"
+            )
+        unbekannt = sorted(set(updates) - set(WorkItem.model_fields))
+        if unbekannt:
+            raise ValueError(f"unknown field(s) in updates: {', '.join(unbekannt)}")
+        current = self.get(key)
+        if current is None:
+            raise KeyError(key)
+        path = Path(current.source_path)
+        old_text = path.read_text(encoding="utf-8")
+        raw_fm = _raw_frontmatter_block(old_text)
+        if raw_fm is not None and _has_frontmatter_comment(raw_fm):
+            raise FrontmatterWriteError(
+                f"{key}: frontmatter carries a YAML comment this write path "
+                f"cannot preserve — edit the file directly instead"
+            )
+        merged = current.model_dump()
+        merged.update(updates)
+        try:
+            new_item = WorkItem(**merged)
+        except ValidationError as e:
+            raise FrontmatterWriteError(f"{key}: {e}") from e
+        new_text = render_work_item_text(new_item)
+        return old_text, new_text, new_item
+
+    def save_update(self, key: str, updates: dict) -> WorkItem:
+        """`apply_update` + an ATOMIC write (temp file + rename — a crash
+        mid-write leaves either the old file or the new one, never a
+        half-written one) + keeps this engine's in-memory state consistent
+        with disk so a caller does not need to reload the whole directory
+        after a single-item save."""
+        _old_text, new_text, new_item = self.apply_update(key, updates)
+        path = Path(new_item.source_path)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        tmp.replace(path)
+        idx = next(i for i, it in enumerate(self._items) if it.key == key)
+        self._items[idx] = new_item
+        self._by_key_cache = None
+        self._children_cache = None
+        self._bm25_cache = None
+        return new_item
+
     def recall(
         self, query: str, limit: int = 8,
         exclude_kinds: frozenset[str] = frozenset(),
@@ -386,7 +603,7 @@ class WorkEngine:
 
         `exclude_kinds` drops matching items from the CANDIDATE POOL, before
         the floor-ratio cut and the `limit` slice — not a post-hoc filter on
-        the returned top-N. Etappe D (W8-Reviewer-Fund ERROR-2, 2026-08-20):
+        the returned top-N. A regression review found that
         `work_recall` is the tool reuse-search and planning agents use
         to find an EXISTING capability before building a new one; after the
         changelog backfill (2377 new `kind: changelog` cards), a query for
@@ -437,6 +654,7 @@ class WorkEngine:
         theme: str | None = None,
         status: str | None = None,
         kind: str | None = None,
+        category: str | None = None,
         include_archived: bool = False,
     ) -> list[WorkItem]:
         """Default view is the LIVE backlog — `done`/`dropped`/`superseded`
@@ -455,6 +673,8 @@ class WorkEngine:
             result = [i for i in result if i.status not in _CLOSED_STATUSES]
         if kind is not None:
             result = [i for i in result if i.kind == kind]
+        if category is not None:
+            result = [i for i in result if i.category == category]
         return sorted(result, key=lambda i: i.key)
 
     def _children_map(self) -> dict[str, list[str]]:
@@ -477,8 +697,8 @@ class WorkEngine:
         """x/y summary for one goal, computed from its children's status —
         NEVER stored, so it cannot drift from what the children actually say.
         This is the direct fix for the measured duplication: a goal's progress
-        used to be re-typed as prose into .todo.json next to an existing plan
-        file; here it is counted.
+        used to be re-typed as prose into a legacy task JSON file next to
+        an existing plan file; here it is counted.
 
         Returns {total, open, active, done, dropped, superseded} — every
         status gets its own count, none collapsed into another. `active` used
@@ -572,25 +792,25 @@ class WorkEngine:
           "empfohlen zu schliessen, niemand tat es" failure mode.
         - missing_evidence: keys with status=done and no commits/files in
           evidence — a closed item that asserts rather than shows. Excludes
-          kind decision/changelog (Etappe D, W8-Reviewer-Fund WARNING-4): a
+          kind decision/changelog (a regression review): a
           migrated historical fact has no commit to point at by construction
           (the "evidence" concept describes work just claimed done, not a
           changelog line already true when it was written) — without the
           exclusion the 2377-card backfill buried the 78 real cases the
           counter exists to surface under 29x noise, the same reasoning
-          already applied to `reuse_ungeprueft` in Etappe B.
+          already applied to `reuse_ungeprueft` in the work-status integration.
         - unclosed_pairs: keys where `closed` is set but status is not a
           closed one, or vice versa — a half-closed record.
         - plan_path_broken: {key: plan_path} where the referenced plan file
           does not exist. This is the ONLY link between the two stores, and
           nothing checked it — measured 2026-08-04: 8 records pointed at
-          `plans/todo/...` files that the plan-keeper had moved to
+          `plans/todo/...` files that a migration helper had moved to
           `plans/begonnen/`, while this very lint reported `dangling_refs: 0`.
           `dangling_refs` above deliberately only covers WORK KEYS; a filesystem
           path is a different kind of reference and simply had no checker.
         - reuse_not_checked: keys with status=active that carry no `reuse`
           block — work that is being done RIGHT NOW without a recorded
-          reuse search. Excludes kind decision/changelog (Etappe B):
+          reuse search. Excludes kind decision/changelog (the work-status integration):
           `reuse` is a FORWARD field, a migrated historical fact never
           searched before its own existence. Only `active`, not `open`: an
           open item has not reached the moment where the question changes
@@ -609,7 +829,7 @@ class WorkEngine:
           checked by nobody — not this lint's own structured-field pass, and
           not memory.py's `broken_links` either (that walks the memory tree
           only). Two real cases surfaced this (2026-08-15/16, work-record
-          `work_lint_prueft_prosa_links_nicht`): both were `[[name]]` links
+          `work-link-check`): both were `[[name]]` links
           that actually pointed at a MEMORY, not a work item. Owner decision
           (2026-08-16): a work-item body `[[...]]` may only resolve to
           another work key — a memory reference belongs in the prose as
@@ -617,7 +837,7 @@ class WorkEngine:
           case to special-case and simply treats every non-resolving link as
           broken. Excludes kind decision/changelog (Etappe E): their body is
           VERBATIM migrated text, never written under this convention — a
-          quoted `[[TALOS_THOUGHT]]` placeholder or `` `[[link]]` `` mention
+          quoted `[[DRAFT_NOTE]]` placeholder or `` `[[link]]` `` mention
           from an old changelog line reads like a cross-record reference but
           is prose about code, same reasoning as the missing_evidence/
           reuse_ungeprueft exclusions above.
@@ -629,23 +849,18 @@ class WorkEngine:
           distinguishable, same reasoning as `searched_for` set vs. no
           `reuse` block at all (never let "not checked" read as "checked,
           clean").
-          This engine stays project-agnostic (no `scripts/`, no TALOS
-          knowledge) by construction, so the actual anchor lookup is
-          INJECTED, never imported here — same pattern as the tokenizer in
-          capability.py. `symbol_check(typ, ziel) -> (zustand, hinweis)`;
-          the caller closes over its own symbol inventory (in TALOS:
-          `scripts/symbol_inventory.py` + `scripts/plan_graph.py::_zustand`)
-          and decides how expensive building it is — this lint pass itself
-          does zero I/O for it. `gesucht` entries are never checked: they
-          are search terms, not anchors, and cannot "break" (Work-Record
-          `work_kanten_ohne_ankerpruefung`).
+          This engine stays project-agnostic: the actual anchor lookup is
+          INJECTED, never imported here. `symbol_check(typ, ziel) ->
+          (zustand, hinweis)` lets the caller provide its own symbol
+          inventory and control its cost; this lint pass does no I/O for
+          it. `gesucht` entries are search terms, not anchors, so they
+          are never checked for breakage.
         """
         by_key = self._by_key()
         dangling: dict[str, list[str]] = {}
         for i in self._items:
-            # `entblockt_durch` gehoert hier dazu (Etappe B, W8-Reviewer-Fund
-            # WARNING-2): es ist der Key eines Records, der einen
-            # `plan_vorbehalt` aufhebt (siehe scripts/naechste_arbeit.py) —
+            # `entblockt_durch` gehoert hier dazu: es ist der Key eines Records,
+            # der einen `plan_vorbehalt` aufhebt —
             # ohne diese Pruefung hebt JEDER truthy String, auch ein
             # Tippfehler, den Owner-Riegel lautlos auf. Dieselbe Fehlerklasse,
             # fuer die `plan_path_broken` unten gebaut wurde.
@@ -692,7 +907,7 @@ class WorkEngine:
                 if i.plan_path and not (projekt / i.plan_path).is_file():
                     plan_path_broken[i.key] = i.plan_path
 
-        # `decision`/`changelog` ausgenommen (Etappe B, W8-Reviewer-Fund
+        # `decision`/`changelog` ausgenommen (the work-status integration, regression review
         # WARNING-4): `kanten` ist ein VORWAERTS-Feld, eine migrierte
         # historische Tatsache hat vor ihrem eigenen Entstehen nichts gesucht.
         # Dieselbe Ausnahme steht bereits in der Migrations-Doku fuer die
@@ -720,7 +935,7 @@ class WorkEngine:
         # `decision`/`changelog` ausgenommen (Etappe E, gefunden beim ersten
         # Lauf gegen den frisch geflossenen Changelog-Backfill): ihr Body ist
         # VERBATIM migrierter Alttext, nie unter der `[[name]]`-Konvention
-        # geschrieben. Ein "[[TALOS_THOUGHT]]"-Platzhalter oder ein
+        # geschrieben. Ein "[[DRAFT_NOTE]]"-Platzhalter oder ein
         # "`[[link]]`-Kanten" in Anfuehrungszeichen aus dem Original-Changelog
         # sieht syntaktisch wie ein Cross-Record-Verweis aus, ist aber Prosa
         # ueber Code, kein Work-Store-Bezug. Gleiche Ausnahme-Logik wie
@@ -752,7 +967,7 @@ class WorkEngine:
                 ):
                     for ziel in ziele:
                         zustand, hinweis = symbol_check(typ, ziel)
-                        if zustand not in ("ok", "geplant"):
+                        if zustand not in ("ok", "geplant", "ungeprueft"):
                             funde.append({
                                 "kind": typ, "target": ziel,
                                 "state": zustand, "hint": hinweis,
@@ -772,3 +987,53 @@ class WorkEngine:
             "broken_reuse_refs": broken_reuse_refs,
             "load_errors": list(self._errors),
         }
+
+
+def work_status_payload(lint: dict) -> dict:
+    """Turn a `WorkEngine.lint()` result into the `work_status` counts +
+    plain-language recommendation. Pulled out of `server/tools_work.py`'s
+    `work_status()` closure so another consumer can reuse the
+    exact same recommendation logic instead of re-deriving it — the S8
+    lesson from the initial integration (a reimplementation of `_work_payload` drifted on 8
+    of 13 edge cases) generalizes past just the payload-building functions.
+
+    `load_errors` gets top billing in the recommendation, not just a tally:
+    a dropped record can make an UNRELATED goal look falsely closeable (its
+    only still-open child never made it into the tree), so "records were
+    dropped" is at least as urgent as "goals are closeable" — arguably
+    more, since it can be the CAUSE of a wrong `closeable_goals` reading."""
+    closeable = len(lint["closeable_goals"])
+    dangling = len(lint["dangling_refs"])
+    no_evidence = len(lint["missing_evidence"])
+    half_closed = len(lint["unclosed_pairs"])
+    dropped = len(lint["load_errors"])
+    # Die zwei juengeren Pruefungen MUSSEN mitzaehlen. Sonst stand
+    # `reuse_not_checked: 130` neben der Empfehlung "kleine Reste" —
+    # genau die Zahl, fuer die der Store umgebaut wurde, fehlte in
+    # seinem eigenen Statusbericht (Reviewer-Fund 2026-08-04).
+    plan_tot = len(lint.get("plan_path_broken", {}))
+    ungeprueft = len(lint.get("reuse_not_checked", []))
+    total_issues = (closeable + dangling + no_evidence + half_closed
+                    + dropped + plan_tot + ungeprueft)
+    if dropped:
+        recommendation = "🚨 Records wurden beim Laden verworfen — Zahlen oben ggf. unvollstaendig"
+    elif closeable or dangling or plan_tot:
+        recommendation = "🧹 Aufraeumen faellig"
+    elif ungeprueft:
+        recommendation = (f"🔎 {ungeprueft} Records arbeiten ohne aufgezeichnete "
+                          f"Reuse-Suche (`reuse:` fehlt)")
+    elif total_issues:
+        recommendation = "💡 kleine Reste"
+    else:
+        recommendation = "✅ kein dringender Bedarf"
+    return {
+        "total_items": lint["total"],
+        "closeable_goals": closeable,
+        "dangling_refs": dangling,
+        "missing_evidence": no_evidence,
+        "unclosed_pairs": half_closed,
+        "plan_path_broken": plan_tot,
+        "reuse_not_checked": ungeprueft,
+        "load_errors": dropped,
+        "recommendation": recommendation,
+    }

@@ -6,6 +6,24 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-09-24
+
+### Added — recall-learning evidence lifecycle
+
+- **Closed scout comparison and maintenance preview.**
+  `complete_scout_comparison` records an idempotent, resumable comparison
+  transaction and learns only bridge terms that pass the production-ranking
+  replay. Its durable claim lets a retry reconcile an interrupted target
+  without duplicate tags. `preview_learned_tag_ablation` then reads those
+  accepted, claimed comparisons and replays each current `learned_tag` with
+  and without the tag. It reports `necessary`, `candidate`, or
+  `not_decidable`, and marks a group only when the individually candidate tags
+  also remain redundant together. The preview never changes a memory file.
+
+- **Fail-closed required learning lock.** A curated recall-learning write now
+  rejects the target when the platform cannot provide the required exclusive
+  file lock; optional usage telemetry keeps its best-effort behaviour.
+
 ### Changed — BREAKING for rule and decision authors
 
 - **Unknown keys in a rule or decision YAML are now a load error**
@@ -43,7 +61,93 @@ Notable changes to **mcp-context-toolkit**. Format loosely follows
   the store down — it is now lenient *and* loud. Callers that render
   `load_errors` should no longer label the count "rule file(s)".
 
+### Changed — recall ranking
+
+- **Unicode tokenizer.** `core._WORD_RE` is now `\w+` instead of
+  `[a-z0-9_]+`, for memory, work, docs and domain search alike. The ASCII
+  class indexed German as fragments ("lügt" → `l` + `gt`, "übersetzen" →
+  `bersetzen`). This reshuffles rankings well beyond umlaut queries, because
+  record lengths and IDF shift with it: on 150 real logged recall queries
+  against the memory store at measurement time (~130 records), 29 kept an
+  identical top-6, 50 the same top-6 set, and the mean Jaccard overlap was
+  0.74. Against the only reference available (six scout-found memories from
+  logged comparison runs), top-6 coverage went from 5/6 to 6/6. Work and
+  docs search change as well; the same 150 queries (memory prompts, so only
+  a proxy for real work/docs lookups) kept an identical top-6 in 69 (work) /
+  57 (docs, compared per file) cases, the same top-6 set in 85 / 74, mean
+  Jaccard 0.79 for both. Domain search was not measured.
+  `prefix_slice` now uses U+10FFFF as its upper sentinel (U+FFFD cut off
+  letters beyond the BMP).
+- **NFC normalisation** (`core.normalise_text`) before tokenising, for index
+  and query alike: `\w` does not match a combining mark, so decomposed text
+  (macOS file names, some PDF extracts) split "lügt" into `lu` + `gt`.
+  Recall-learning bridge terms are compared and written in NFC as well.
+- **Bundler: member tags become package `tags`.** `render_package` now writes
+  the case-insensitive union of its members' tags into the package
+  frontmatter — the unnormalised recall field — instead of only into the
+  body, where a large package's length diluted them (measured: a 3000-word
+  package fell below the relevance floor with the tag in the body only, and
+  is recalled with it as a package tag). `tags` is rebuilt from the current
+  members on every bundle, so a departed member's tags leave with it;
+  `learned_tags` is carried over from the existing package (plus the
+  members' own), so nothing learned is lost.
+- **`build_bm25_index` accepts a third field element `length_normalised`**
+  (default True). `False` is BM25F's per-field `b = 0`: hits go to
+  `flat_postings`, are not divided by record length and do not add to it.
+  Memory `tags` use it. A record without such hits is scored by the unchanged
+  expression, so an index without flat fields ranks bit for bit as before;
+  in the memory store all scores still move, because tags no longer count
+  toward record length and document frequency now includes tag hits.
+
 ### Added
+
+- **Recall learning (`learn_recall_gap`, MCP tool + `--learn-recall-gap` CLI).**
+  A scout-found recall gap is persisted as bridge terms in the target memory's
+  `learned_tags` — a new frontmatter list, indexed together with `tags` in the
+  same BM25F tag field and kept apart only so its provenance survives
+  bundling — but only after a shadow replay through the production
+  ranking (same frozen frecency snapshot, same backlink boost, no session
+  exclude) proves the target then ranks within `limit`, and only the minimal
+  effective subset. Member slugs resolve to their package, as in `get_memory`.
+  Writes are locked, re-read under the lock, edit only the `learned_tags` node, and
+  are verified by re-parse before an atomic replace; anything else is rejected
+  fail-closed. Every outcome logs a `recall_learning` event;
+  `RecallEventLog.SCHEMA_VERSION` is now 4. CLI exit 0 accepted/noop, 2 rejected.
+  New public helpers: `core.query_terms`, `MemoryEngine.with_memory`,
+  `usage.exclusive_file_lock` (UsageStore's lock now uses it).
+
+  Before the tag field was made length-independent, a replay over a real
+  132-record store rejected three member-slug gaps in large packages as
+  ineffective. The gate correctly rejected those attempted writes; the
+  later tag-field change addresses that package-length dilution.
+
+  Trust boundary: every word of a bridge term must literally be a word of the
+  query (checked on whitespace words rather than ranker tokens), and the
+  file is re-read right before the replace so an unlocked host edit during
+  the replays is never overwritten.
+
+- **Curated memory-context candidate lane.** Memory frontmatter may now carry
+  optional `kontexte.themen` and `kontexte.taetigkeiten` alongside existing
+  `bausteine`. The `recall` MCP tool accepts all three axes as optional OR-sets:
+  they can fill at most two unused result slots but never alter text ranking or
+  replace a keyword hit. A matching observed Baustein is more specific than a
+  topic/activity label and therefore exclusively selects the delivery candidates
+  for this lane; the broad matches remain inspectable. The CLI now delegates to
+  the same path as MCP (including exclusion backfill and read-only frecency
+  boosts) via repeatable `--baustein`, `--thema`, and `--taetigkeit` flags —
+  this also applies the backlink boost the CLI's own prior scorer omitted, so
+  the CLI/prompt-hook lane's keyword ranking can shift slightly from its
+  pre-merge behaviour, independent of any context axis being supplied.
+  `memory_context_candidates` exposes the raw matches, while
+  `memory_recall_explain` returns each delivered candidate's keyword and/or
+  context provenance without warming frecency; the normal `recall` delivery
+  path does warm frecency for a context-delivered memory exactly as for a
+  keyword hit — "delivered" is "used" there, matching the existing recall
+  contract, not an oversight. Per-session recall events now
+  preserve that provenance and the uncapped context-candidate denominator. A
+  versioned, SHA-256-fingerprinted Golden corpus replays owner prompt forms
+  through the real engine and CLI adapters, checks their equality, and fails on
+  corpus drift.
 
 - **`Decision.amended`** (`date | None`) — when a decision was refined IN
   PLACE, as opposed to `supersedes`, which points at a different record that

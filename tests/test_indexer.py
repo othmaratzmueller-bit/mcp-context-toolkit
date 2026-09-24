@@ -2,10 +2,12 @@ from pathlib import Path
 
 from mcp_context_toolkit.indexer import (
     DESCRIPTIONS_FILENAME,
+    MEMBER_CATALOG_FILENAME,
     build_descriptions,
     build_member_catalog,
     build_memory_md,
     write_descriptions,
+    write_member_catalog,
 )
 from mcp_context_toolkit.memory import MemoryEngine
 
@@ -89,3 +91,71 @@ class TestWriteDescriptions:
         # the generated artifact must NOT be picked up as a memory itself:
         e = MemoryEngine.from_directory(tmp_path)
         assert [m.name for m in e.memories] == ["aaa"]
+
+
+class TestMemberCatalogAfterBundling:
+    """`build_member_catalog` at the AFTER-bundling moment: the member list comes
+    from the bundle map, the description from the package body."""
+
+    def _bundled(self, d: Path) -> None:
+        _write(
+            d, "pkg.md",
+            "name: pkg\ntype: project\ndescription: A package\nmembers: [one, two]",
+            "# A package\n\n## one\n*first member*\n\nbody one\n\n"
+            "## Status\n\nnot a member, just a heading inside one\n\n"
+            "## two\n*second member*\n\nbody two",
+        )
+
+    def test_description_read_back_from_package_body(self, tmp_path: Path):
+        self._bundled(tmp_path)
+        r = write_member_catalog(tmp_path)
+        content = (tmp_path / MEMBER_CATALOG_FILENAME).read_text(encoding="utf-8")
+        assert r["count"] == 2
+        assert "- **one** — first member → pkg.md" in content
+        assert "- **two** — second member → pkg.md" in content
+
+    def test_plain_heading_inside_a_body_is_not_a_member(self, tmp_path: Path):
+        """The regression this guards: scanning `##` headings cannot tell a member
+        apart from a heading inside a member's own body — `## Status` is not a
+        memory. The bundle map can."""
+        self._bundled(tmp_path)
+        content = write_member_catalog(tmp_path) and (
+            tmp_path / MEMBER_CATALOG_FILENAME
+        ).read_text(encoding="utf-8")
+        assert "**Status**" not in content
+
+    def test_heading_with_suffix_still_resolves(self, tmp_path: Path):
+        """Sections may carry a suffix (`## slug (2026-07-19)`) — the description
+        must still be found, so the slug match is a word boundary, not a line end."""
+        _write(
+            tmp_path, "pkg.md",
+            "name: pkg\ntype: project\ndescription: P\nmembers: [dated_one]",
+            "# P\n\n## dated_one (2026-07-19)\n*still described*\n\nbody",
+        )
+        write_member_catalog(tmp_path)
+        content = (tmp_path / MEMBER_CATALOG_FILENAME).read_text(encoding="utf-8")
+        assert "- **dated_one** — still described → pkg.md" in content
+
+    def test_unbundled_file_represents_itself(self, tmp_path: Path):
+        """A loose memory must stay findable by name too, or bundling would make
+        the catalog inconsistent about what it lists."""
+        _write(tmp_path, "loose.md", "name: loose\ntype: feedback\ndescription: L", "b")
+        assert write_member_catalog(tmp_path)["count"] == 1
+        content = (tmp_path / MEMBER_CATALOG_FILENAME).read_text(encoding="utf-8")
+        assert "- **loose** — L → loose.md" in content
+
+    def test_member_without_description_still_listed(self, tmp_path: Path):
+        _write(
+            tmp_path, "pkg.md",
+            "name: pkg\ntype: project\ndescription: P\nmembers: [bare]",
+            "# P\n\n## bare\n\njust a body",
+        )
+        write_member_catalog(tmp_path)
+        content = (tmp_path / MEMBER_CATALOG_FILENAME).read_text(encoding="utf-8")
+        assert "- **bare** —  → pkg.md" in content
+
+    def test_artifact_stays_out_of_the_store(self, tmp_path: Path):
+        self._bundled(tmp_path)
+        write_member_catalog(tmp_path)
+        assert (tmp_path / MEMBER_CATALOG_FILENAME).name.startswith("_")
+        assert len(MemoryEngine.from_directory(tmp_path).memories) == 1

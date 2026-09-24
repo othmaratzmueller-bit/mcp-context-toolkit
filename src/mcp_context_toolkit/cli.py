@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 
 from mcp_context_toolkit.core import (
+    discover_docs_dir,
     discover_shared_rules_dir,
     discover_work_dir,
     store_conventions,
@@ -320,7 +321,10 @@ def _cmd_migrate_decisions(
             dropped_fields[key] = extra
 
         decision_status = data.get("status")
-        status_val = _DECISION_TO_WORK_STATUS.get(decision_status, "open")
+        status_val = (
+            _DECISION_TO_WORK_STATUS.get(decision_status, "open")
+            if isinstance(decision_status, str) else "open"
+        )
         if decision_status is not None and decision_status not in _DECISION_TO_WORK_STATUS:
             unmapped_status[key] = decision_status
 
@@ -616,6 +620,7 @@ def _memory_payload(memory_dir: Path) -> dict:
             "member_count": len(members),
             "members": members,
             "links": list(m.links),
+            "bausteine": list(m.bausteine),
             "heat": float(u.get("heat", 0.0)),
             "opens": int(u.get("opens", 0)),
             "recalls": int(u.get("recalls", 0)),
@@ -638,13 +643,87 @@ def _memory_payload(memory_dir: Path) -> dict:
     }
 
 
+def _work_payload(work_dir: Path) -> dict:
+    """Snapshot the work store (all items, archived included — the viewer
+    filters client-side) for the Browse tab. Mirrors `_memory_payload`'s
+    shape (`stats`/`packages`-equivalent list); no frecency here, the work
+    store has no usage sidecar (that's memory-only, see `usage.py`)."""
+    from mcp_context_toolkit.work import WorkEngine
+
+    engine = WorkEngine.from_directory(work_dir, strict=False)
+    by_theme: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    items = []
+    for i in engine.list(include_archived=True):
+        by_theme[i.theme] = by_theme.get(i.theme, 0) + 1
+        by_status[i.status] = by_status.get(i.status, 0) + 1
+        by_kind[i.kind] = by_kind.get(i.kind, 0) + 1
+        items.append({
+            "key": i.key,
+            "title": i.title,
+            "kind": i.kind,
+            "status": i.status,
+            "theme": i.theme,
+            "opened": i.opened.isoformat(),
+            "closed": i.closed.isoformat() if i.closed else None,
+            "part_of": i.part_of,
+            "blocked_by": list(i.blocked_by),
+            "has_evidence": bool(i.evidence.commits or i.evidence.files),
+            "has_reuse": i.reuse is not None,
+            "bytes": len(i.body.encode("utf-8")),
+        })
+    items.sort(key=lambda p: (p["theme"], p["key"]))
+    # part_of is the hierarchy (see work.py's WorkItem docstring) — same
+    # source -> target edge shape as _memory_payload's link graph, so the
+    # Graph tab can reuse one rendering path for both domains.
+    edges = [{"source": i["key"], "target": i["part_of"]}
+             for i in items if i["part_of"]]
+    return {
+        "kind": "context-studio/work",
+        "stats": {
+            "items": len(items), "by_theme": by_theme,
+            "by_status": by_status, "by_kind": by_kind, "edges": len(edges),
+        },
+        "items": items,
+        "edges": edges,
+        "load_errors": engine.errors,
+    }
+
+
+def _docs_payload(docs_dir: Path) -> dict:
+    """Snapshot the docs store (section index) for the Browse tab. One row
+    per heading-delimited section, same granularity `docs_recall` searches
+    over — a viewer hit links to a real citable unit, not a whole file."""
+    from mcp_context_toolkit.docs import DocsEngine
+
+    engine = DocsEngine.from_directory(docs_dir)
+    by_path: dict[str, int] = {}
+    sections = []
+    for s in engine.sections:
+        by_path[s.path] = by_path.get(s.path, 0) + 1
+        sections.append({
+            "path": s.path, "heading": s.heading, "line": s.line,
+            "bytes": len(s.text.encode("utf-8")),
+        })
+    return {
+        "kind": "context-studio/docs",
+        "stats": {"sections": len(sections), "files": len(by_path)},
+        "sections": sections,
+    }
+
+
 _PENDING_FILENAME = "_DREAM_PENDING.md"  # the /dream consolidation's human-decision ledger
 _PENDING_DIFF_FILENAME = "_PENDING_DIFF.json"  # canonical preview-gate output, all curation skills
 
 
-def _cmd_export_studio(rules_dir: Path | None, memory_dir: Path | None, out_dir: Path) -> int:
-    """Write rules.json (+ memory.json/pending.md/diff.json if found) and copy the
-    bundled Context Studio viewer into out_dir. Self-contained: open out_dir/index.html."""
+def _cmd_export_studio(
+    rules_dir: Path | None, memory_dir: Path | None, out_dir: Path,
+    work_dir: Path | None = None, docs_dir: Path | None = None,
+) -> int:
+    """Write rules.json (+ memory.json/pending.md/diff.json/work.json/docs.json
+    if found) and copy the bundled Context Studio viewer into out_dir.
+    Self-contained: open out_dir/index.html."""
     from importlib import resources
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -676,6 +755,20 @@ def _cmd_export_studio(rules_dir: Path | None, memory_dir: Path | None, out_dir:
             )
             written.append("diff.json")
 
+    if work_dir is not None and work_dir.is_dir():
+        (out_dir / "work.json").write_text(
+            json.dumps(_work_payload(work_dir), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        written.append("work.json")
+
+    if docs_dir is not None and docs_dir.is_dir():
+        (out_dir / "docs.json").write_text(
+            json.dumps(_docs_payload(docs_dir), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        written.append("docs.json")
+
     # Copy the packaged viewer so out_dir is openable on its own. cytoscape.min.js
     # (MIT, vendored) powers the Graph tab — copied as bytes; if it is missing the
     # tab just shows a hint, so its absence is non-fatal.
@@ -700,13 +793,27 @@ def _cmd_method_block() -> int:
     """Print the packaged working-method block (the fable-absorbed working method) as
     plain text — a UserPromptSubmit hook injects it as always-on context to counter
     instruction-decay. Content-only; the hook wraps it. Empty + rc 0 if the resource
-    is missing (never blocks a prompt)."""
+    is missing (never blocks a prompt).
+
+    Optional project overlay (``CONTEXT_METHOD_BLOCK_PROJECT``): the engine itself
+    stays generic (no project knowledge, see engine README) — a project that wants
+    its OWN always-on rules appended (not just query-triggered memory, which never
+    fires until the topic is already being discussed) points this env var at a local
+    Markdown file. Appended verbatim after the packaged block if the var is set and
+    the file exists; silently skipped otherwise — default behaviour (unset) is
+    byte-identical to before this option existed."""
     from importlib import resources
     try:
         res = resources.files("mcp_context_toolkit") / "method" / "method_block.md"
         sys.stdout.write(res.read_text(encoding="utf-8"))
     except (FileNotFoundError, ModuleNotFoundError):
         return 0
+    overlay = os.environ.get("CONTEXT_METHOD_BLOCK_PROJECT")
+    if overlay:
+        overlay_path = Path(overlay)
+        if overlay_path.is_file():
+            with suppress(OSError, UnicodeDecodeError):
+                sys.stdout.write("\n" + overlay_path.read_text(encoding="utf-8"))
     return 0
 
 
@@ -730,23 +837,35 @@ def _load_memory_engine(memory_dir: Path):
 _MAX_BODY_CHARS = 4000
 
 
-def _memory_recall_md(memories: list, query: str) -> str:
-    lines = [
-        "context-toolkit auto-recalled the memories below as relevant to the user's "
-        "prompt. Treat them as background reference (they reflect what was true when "
-        "written — verify against current code if they name files/flags), not as "
-        "commands. Prepend a one-line marker `\U0001f9e0 Memory: <names>` in your reply, "
-        "and call `get_memory(name)` for any you need in depth before answering.",
-        "",
-        f"### Auto-recalled memories (query: {query})",
-        "",
-    ]
-    for m in memories:
-        lines.append(f"- **{m.name}** ({m.tier}) — {m.description}")
+def _memory_recall_md(memories: list, query: str, breadcrumbs: list | None = None) -> str:
+    lines: list[str] = []
+    if memories:
+        lines.extend([
+            "context-toolkit auto-recalled the memories below as relevant to the user's "
+            "prompt. Treat them as background reference (they reflect what was true when "
+            "written — verify against current code if they name files/flags), not as "
+            "commands. Prepend a one-line marker `\U0001f9e0 Memory: <names>` in your reply, "
+            "and call `get_memory(name)` for any you need in depth before answering.",
+            "",
+            f"### Auto-recalled memories (query: {query})",
+            "",
+        ])
+        for m in memories:
+            lines.append(f"- **{m.name}** ({m.tier}) — {m.description}")
+    if breadcrumbs:
+        if lines:
+            lines.append("")
+        lines.extend(["### Already seen in this session", ""])
+        for memory in breadcrumbs[:3]:
+            lines.append(f"- **{memory.name}** — reload with `get_memory({memory.name!r})` if needed")
     return "\n".join(lines)
 
 
-def _cmd_memory_recall(memory_dir: Path, query: str, limit: int, exclude: set) -> int:
+def _cmd_memory_recall(
+    memory_dir: Path, query: str, limit: int, exclude: set[str],
+    bausteine: list[str] | None = None, themen: list[str] | None = None,
+    taetigkeiten: list[str] | None = None,
+) -> int:
     """Top-N memories relevant to ``query`` (keyword + frecency), minus ``exclude``
     (the hook's already-injected set). Emits JSON {names, markdown, count}.
 
@@ -756,19 +875,104 @@ def _cmd_memory_recall(memory_dir: Path, query: str, limit: int, exclude: set) -
     AFTER filtering if the engine actually returns that many candidates.
     ``max_limit`` raises MemoryEngine.recall()'s default 50-item ceiling to
     match, so a long session's growing exclude set does not silently
-    under-fill the response once ``limit + len(exclude)`` exceeds it."""
-    from mcp_context_toolkit.usage import UsageStore
+    under-fill the response once ``limit + len(exclude)`` exceeds it.
+
+    Logs an ``offered`` event (Etappe 0 of the "Sumpf+Baum" memory concept)
+    via ``RecallEventLog`` — fail-soft, never blocks the response even if
+    the log write fails."""
+    from mcp_context_toolkit.memory import memory_recall_hits
+    from mcp_context_toolkit.usage import RecallEventLog, UsageStore
     engine = _load_memory_engine(memory_dir)
-    boosts = UsageStore.for_memory_dir(memory_dir).boosts()
-    want = limit + len(exclude)
-    ranked = engine.recall(query, limit=want, boost=boosts, max_limit=want)
-    hits = [m for m in ranked if m.name not in exclude][:limit]
+    event_log = RecallEventLog.for_memory_dir(memory_dir)
+    breadcrumbs: list = []
+    hits = memory_recall_hits(
+        engine, query, limit=limit, exclude=exclude,
+        boosts=UsageStore.for_memory_dir(memory_dir).boosts(),
+        event_log=event_log,
+        bausteine=bausteine, themen=themen, taetigkeiten=taetigkeiten,
+        breadcrumbs=breadcrumbs,
+    )
     out = {
         "names": [m.name for m in hits],
-        "markdown": _memory_recall_md(hits, query) if hits else None,
+        "markdown": _memory_recall_md(hits, query, breadcrumbs) if hits or breadcrumbs else None,
         "count": len(hits),
+        "breadcrumbs": [memory.name for memory in breadcrumbs[:3]],
+        # Best-effort read of the turn `memory_recall_hits()` just logged
+        # internally (see RecallEventLog.current_turn docstring) — lets a
+        # caller attach a later async comparison sample to this exact turn
+        # without memory_recall_hits() itself changing its return type.
+        "turn": event_log.current_turn(),
     }
     print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def _cmd_log_haiku_compare(
+    memory_dir: Path, turn: int, query: str, mechanical_names: list[str],
+    haiku_names: list[str], duration_ms: int,
+) -> int:
+    """Writes a ``haiku_compare`` event (Work-Record
+    ``memory_haiku_vs_mechanisch_vergleichslauf``) — the async counterpart to
+    --recall's ``turn``. Names arrive as repeated ``--haiku-mechanical``/
+    ``--haiku-names`` flags, not a comma-joined string — a memory name could
+    in principle contain a comma (W8-Reviewer-Fund). Called from whatever
+    triggered the comparison (an in-session Agent call, not a hook — a raw
+    hook-spawned ``claude`` process in this same project directory re-fires
+    its own UserPromptSubmit hook and risks recursion, see the
+    ``hook_spawnt_claude_erbt_eigene_hooks_rekursionsgefahr`` memory). Always
+    exits 0 — a failed write here must never surface as an error to whatever
+    triggered it."""
+    from mcp_context_toolkit.usage import RecallEventLog
+    RecallEventLog.for_memory_dir(memory_dir).log_haiku_compare(
+        query, mechanical_names, haiku_names, duration_ms, turn,
+    )
+    return 0
+
+
+def _cmd_learn_recall_gap(
+    memory_dir: Path, target_name: str, query: str, terms: list[str],
+    scout_names: list[str], mechanical_names: list[str], limit: int,
+    turn: int | None,
+) -> int:
+    """CLI adapter for ``recall_learning.learn_recall_gap`` — the same core
+    the MCP ``learn_recall_gap`` tool calls. Prints the result as JSON.
+    Exit 0 for accepted/noop, 2 for a rejected (invalid or unproven)
+    proposal."""
+    from mcp_context_toolkit.recall_learning import learn_recall_gap
+    from mcp_context_toolkit.usage import RecallEventLog, UsageStore
+    result = learn_recall_gap(
+        _load_memory_engine(memory_dir), query=query, target_name=target_name,
+        bridge_terms=terms, scout_names=scout_names,
+        mechanical_names=mechanical_names, limit=limit,
+        boosts=UsageStore.for_memory_dir(memory_dir).boosts(),
+        event_log=RecallEventLog.for_memory_dir(memory_dir), turn=turn,
+    )
+    print(json.dumps(result.model_dump(), ensure_ascii=False))
+    return 2 if result.status == "rejected" else 0
+
+
+def _cmd_complete_scout_comparison(memory_dir: Path, payload: dict) -> int:
+    """CLI adapter for the one-call scout comparison transaction.
+
+    The payload is deliberately JSON from a file or stdin, so a caller can
+    pass a multi-target scout result without inventing a fragile family of
+    repeated positional flags.
+    """
+    from mcp_context_toolkit.recall_learning import complete_scout_comparison
+    from mcp_context_toolkit.usage import RecallEventLog, UsageStore
+    try:
+        result = complete_scout_comparison(
+            _load_memory_engine(memory_dir), query=payload["query"], turn=payload["turn"],
+            limit=payload["limit"], mechanical_names=payload["mechanical_names"],
+            scout_hits=payload["scout_hits"], duration_ms=payload.get("duration_ms", 0),
+            boosts=UsageStore.for_memory_dir(memory_dir).boosts(),
+            event_log=RecallEventLog.for_memory_dir(memory_dir),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        print(json.dumps({"status": "rejected", "reason": "invalid_comparison_payload",
+                          "detail": str(exc)}, ensure_ascii=False))
+        return 2
+    print(json.dumps(result.model_dump(), ensure_ascii=False))
     return 0
 
 
@@ -800,9 +1004,17 @@ def _memory_tier_md(memories: list, tier: str, with_bodies: bool) -> str:
 
 def _cmd_memory_tier(memory_dir: Path, tier: str, with_bodies: bool) -> int:
     """Dump all memories of ``tier`` (e.g. 'user') — for unconditional load at
-    session start. Emits JSON {names, markdown, count}."""
+    session start. Emits JSON {names, markdown, count}.
+
+    Logs a ``user_tier_event`` (Etappe 0) — separate from ``offered``,
+    since this is an unconditional dump (no query, no ranking, no floor),
+    not a ranked recall; an evaluation pass must never mistake one for the
+    other."""
+    from mcp_context_toolkit.usage import RecallEventLog
     engine = _load_memory_engine(memory_dir)
     mems = engine.list(tier=tier)  # type: ignore[arg-type]
+    if mems:
+        RecallEventLog.for_memory_dir(memory_dir).log_user_tier_event([m.name for m in mems])
     out = {
         "names": [m.name for m in mems],
         "markdown": _memory_tier_md(mems, tier, with_bodies) if mems else None,
@@ -818,9 +1030,15 @@ def _cmd_reindex(memory_dir: Path) -> int:
     catalog current on every memory write so a freshly-added note is catalogued
     immediately. The package hot-index (MEMORY.md) + bundling stay a /dream concern
     (they need curation judgment, not derivable at write-time)."""
-    from mcp_context_toolkit.indexer import write_descriptions
+    from mcp_context_toolkit.indexer import write_descriptions, write_member_catalog
     result = write_descriptions(memory_dir)
-    print(json.dumps({"reindexed": result["path"], "count": result["count"]}))
+    # Bundled members are no longer files, so the file-walking descriptions catalog
+    # cannot see them — the member catalog is the by-name lookup layer for those.
+    members = write_member_catalog(memory_dir)
+    print(json.dumps({
+        "reindexed": result["path"], "count": result["count"],
+        "member_catalog": members["path"], "member_count": members["count"],
+    }))
     return 0
 
 
@@ -983,6 +1201,70 @@ def main() -> None:
         help="Comma-separated memory names to exclude from --recall (the hook's dedup set).",
     )
     parser.add_argument(
+        "--baustein", action="append", default=[],
+        help="Observed Baustein ID for --recall; repeatable. The engine treats values as OR alternatives.",
+    )
+    parser.add_argument(
+        "--thema", action="append", default=[],
+        help="Curated topic signal for --recall; repeatable. Not inferred by the CLI.",
+    )
+    parser.add_argument(
+        "--taetigkeit", action="append", default=[],
+        help="Observed activity signal for --recall; repeatable.",
+    )
+    parser.add_argument(
+        "--log-haiku-compare", metavar="TURN", type=int, default=None,
+        help="Write a haiku_compare event for TURN (from --recall's own 'turn' "
+             "JSON field) into this session's RecallEventLog — pairs with "
+             "--haiku-query/--haiku-mechanical/--haiku-names/--haiku-duration-ms. "
+             "Caller is an in-session Agent call (never a hook-spawned standalone "
+             "claude process — that re-fires this project's own UserPromptSubmit "
+             "hook and risks recursion).",
+    )
+    parser.add_argument(
+        "--haiku-query", default="",
+        help="With --log-haiku-compare: the raw query text that was sent to Haiku.",
+    )
+    parser.add_argument(
+        "--haiku-mechanical", action="append", default=[],
+        help="With --log-haiku-compare: a memory name the mechanical lane offered "
+             "for the same turn (from --recall's own 'names' output); repeatable. "
+             "Not comma-joined — a memory name could in principle contain a comma.",
+    )
+    parser.add_argument(
+        "--haiku-names", action="append", default=[],
+        help="With --log-haiku-compare: a memory name Haiku picked; repeatable.",
+    )
+    parser.add_argument(
+        "--haiku-duration-ms", type=int, default=0,
+        help="With --log-haiku-compare: wall-clock duration of the Haiku call.",
+    )
+    parser.add_argument(
+        "--learn-recall-gap", metavar="NAME", default=None,
+        help="Teach recall a scout-found gap: validate that memory NAME is a real "
+             "miss for --learn-query, shadow-replay the --learn-term bridge terms "
+             "and write only the effective ones into its learned_tags. JSON output; exit 0 "
+             "accepted/noop, 2 rejected. Uses --limit (default 6).",
+    )
+    parser.add_argument("--learn-query", default=None,
+                        help="With --learn-recall-gap: the query recall missed NAME for.")
+    parser.add_argument("--learn-term", action="append", default=[],
+                        help="With --learn-recall-gap: a bridge term (1-5); repeatable.")
+    parser.add_argument("--learn-scout-name", action="append", default=[],
+                        help="With --learn-recall-gap: a memory name the scout found; repeatable.")
+    parser.add_argument("--learn-mechanical-name", action="append", default=[],
+                        help="With --learn-recall-gap: a name the mechanical lane offered; "
+                             "repeatable, logged for the comparison.")
+    parser.add_argument("--learn-turn", type=int, default=None,
+                        help="With --learn-recall-gap: the recall turn this belongs to "
+                             "(default: the session's current turn).")
+    parser.add_argument("--complete-scout-comparison", action="store_true",
+                        help="Complete all learning from one scout comparison. Reads a JSON "
+                             "payload from --scout-comparison-json (a file or '-' for stdin).")
+    parser.add_argument("--scout-comparison-json", default="-", metavar="PATH",
+                        help="JSON object for --complete-scout-comparison: query, turn, limit, "
+                             "mechanical_names, scout_hits and optional duration_ms. Default: stdin.")
+    parser.add_argument(
         "--reindex", action="store_true",
         help="Regenerate _descriptions.md from ALL memory files (incl. loose/un-bundled). Mechanical + deterministic — run on every memory write (PostToolUse hook).",
     )
@@ -1065,6 +1347,48 @@ def main() -> None:
     if args.method_block:
         sys.exit(_cmd_method_block())
 
+    if args.log_haiku_compare is not None:
+        memory_dir = _discover_memory_dir(args.memory_dir)
+        if memory_dir is None or not memory_dir.is_dir():
+            sys.exit(0)  # fail-soft, same contract as --recall on a missing store
+        sys.exit(_cmd_log_haiku_compare(
+            memory_dir, args.log_haiku_compare, args.haiku_query,
+            args.haiku_mechanical, args.haiku_names, args.haiku_duration_ms,
+        ))
+
+    if args.learn_recall_gap is not None:
+        if not args.learn_query:
+            print(json.dumps({"status": "rejected", "reason": "missing_query",
+                              "target": args.learn_recall_gap}))
+            sys.exit(2)
+        memory_dir = _discover_memory_dir(args.memory_dir)
+        if memory_dir is None or not memory_dir.is_dir():
+            print(json.dumps({"status": "rejected", "reason": "no_memory_store",
+                              "target": args.learn_recall_gap}))
+            sys.exit(2)
+        sys.exit(_cmd_learn_recall_gap(
+            memory_dir, args.learn_recall_gap, args.learn_query, args.learn_term,
+            args.learn_scout_name, args.learn_mechanical_name, args.limit,
+            args.learn_turn,
+        ))
+
+    if args.complete_scout_comparison:
+        memory_dir = _discover_memory_dir(args.memory_dir)
+        if memory_dir is None or not memory_dir.is_dir():
+            print(json.dumps({"status": "rejected", "reason": "no_memory_store"}))
+            sys.exit(2)
+        try:
+            if args.scout_comparison_json == "-":
+                payload = json.load(sys.stdin)
+            else:
+                with open(args.scout_comparison_json, encoding="utf-8") as source:
+                    payload = json.load(source)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(json.dumps({"status": "rejected", "reason": "invalid_comparison_payload",
+                              "detail": str(exc)}))
+            sys.exit(2)
+        sys.exit(_cmd_complete_scout_comparison(memory_dir, payload))
+
     # Memory subcommands (recall / tier-dump) — independent of the rules dir, used
     # by the auto-recall hooks. Resolve memory dir; emit empty bundle if none.
     if args.recall is not None or args.memory_tier is not None:
@@ -1074,7 +1398,11 @@ def main() -> None:
             sys.exit(0)
         if args.recall is not None:
             exclude = set(filter(None, (args.exclude or "").split(",")))
-            sys.exit(_cmd_memory_recall(memory_dir, args.recall, args.limit, exclude))
+            sys.exit(_cmd_memory_recall(
+                memory_dir, args.recall, args.limit, exclude,
+                bausteine=args.baustein, themen=args.thema,
+                taetigkeiten=args.taetigkeit,
+            ))
         sys.exit(_cmd_memory_tier(memory_dir, args.memory_tier, args.with_bodies))
 
     # Mechanical re-index of the flat catalog — keeps _descriptions.md current on
@@ -1108,11 +1436,19 @@ def main() -> None:
         target = None if args.write_fallback == "DEFAULT" else Path(args.write_fallback)
         sys.exit(_cmd_write_fallback(rules_dir, target))
 
-    # Export-studio subcommand (rules.json + memory.json + viewer)
+    # Export-studio subcommand (rules.json + memory.json + work.json + docs.json + viewer)
     if args.export_studio:
         memory_dir = _discover_memory_dir(args.memory_dir)
+        # env_only=True: this command WRITES work/docs content into a
+        # caller-chosen output directory that may be served publicly — the
+        # cwd walk-up convenience every read-only caller wants would silently
+        # re-discover the store even when the caller deliberately omitted
+        # CONTEXT_WORK_DIR/CONTEXT_DOCS_DIR to opt out (see discover_work_dir's
+        # docstring; found live in TALOS, 2026-08-22, when omitting the env
+        # var did not stop work.json from being written after all).
         sys.exit(_cmd_export_studio(
-            rules_dir, memory_dir, Path(args.export_studio).expanduser().resolve()
+            rules_dir, memory_dir, Path(args.export_studio).expanduser().resolve(),
+            work_dir=discover_work_dir(env_only=True), docs_dir=discover_docs_dir(env_only=True),
         ))
 
     # Bundle format is used by hooks — be lenient with broken YAMLs so a

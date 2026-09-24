@@ -10,8 +10,13 @@ import os
 from pathlib import Path
 
 from mcp_context_toolkit import capability
+
+# Re-export under the old private name — mcp_server.py and server/app.py still
+# import `_discover_docs_dir` from here (see core.discover_docs_dir's docstring
+# for why the implementation moved). noqa: this name is used by importers, not
+# within this module, so ruff's unused-import check can't see the real usage.
+from mcp_context_toolkit.core import discover_docs_dir as _discover_docs_dir  # noqa: F401
 from mcp_context_toolkit.core import store_conventions
-from mcp_context_toolkit.host_adapters import _find_project_root
 
 
 def _discover_rules_dir() -> Path | None:
@@ -63,23 +68,6 @@ def _discover_agent_memory_dir() -> Path | None:
             if mem.is_dir():
                 return mem
     return None
-
-
-def _discover_docs_dir() -> Path | None:
-    """Locate the PROJECT `docs/` tree (prose documentation, e.g. project
-    architecture/governance docs — Work-Record `doku_lesend_indexieren_statt_
-    zerreissen`). Env CONTEXT_DOCS_DIR wins, else the project root's `docs/`
-    sibling. Returns None if none found — the docs tools are then simply not
-    registered, same gating shape as memory/work."""
-    env = os.environ.get("CONTEXT_DOCS_DIR")
-    if env:
-        p = Path(env).expanduser()
-        return p if p.is_dir() else None
-    root = _find_project_root()
-    if root is None:
-        return None
-    docs = root / "docs"
-    return docs if docs.is_dir() else None
 
 
 def _discover_wissen() -> capability.CapabilityQuelle | None:

@@ -1,9 +1,16 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from mcp_context_toolkit.core import KnowledgeLoadError
-from mcp_context_toolkit.work import WorkEngine
+from mcp_context_toolkit.work import (
+    FrontmatterWriteError,
+    WorkEngine,
+    _has_frontmatter_comment,
+    render_work_item_text,
+    work_status_payload,
+)
 
 
 def _write(d: Path, name: str, fm: str, body: str = "") -> None:
@@ -101,7 +108,7 @@ class TestLoading:
 
 
 class TestWorkItemFrontmatterStrenge:
-    """Etappe B (2026-08-19) — dieselbe Bauart wie der `kanten`-Zweig, eine
+    """work-status integration (2026-08-19) — dieselbe Bauart wie der `kanten`-Zweig, eine
     Ebene hoeher: der Loader liest WorkItem-Felder NAMENTLICH, `extra="forbid"`
     am Model waere hier wirkungslos. Vorab gemessen (0 Treffer ueber ~1900
     Records): `source_path` steht bei 89 Alt-Records im Frontmatter (redundant,
@@ -161,8 +168,8 @@ class TestWorkItemFrontmatterStrenge:
         assert WorkEngine.from_directory(tmp_path).get("a").aus_migration is False
 
     def test_aus_migration_wird_gelesen(self, tmp_path: Path):
-        # Work-Record work_migrator_opened_stempel_traegt_das_gate: macht
-        # das plan-keeper-Reuse-Gate robust gegen die bisher unausgesprochene
+        # Das Migrationskennzeichen macht das Reuse-Gate robust gegen die
+        # bisher unausgesprochene
         # `opened`-Konvention, statt sich allein auf sie zu verlassen.
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
@@ -178,7 +185,7 @@ class TestWorkItemFrontmatterStrenge:
         assert WorkEngine.from_directory(tmp_path).get("a").kind == kind
 
     def test_body_im_frontmatter_ist_ein_fehler(self, tmp_path: Path):
-        """W8-Reviewer-Fund WARNING-3: `body` gehoert zu `WorkItem.model_fields`,
+        """a regression review: `body` gehoert zu `WorkItem.model_fields`,
         darf aber NICHT in der Allow-List stehen — anders als `source_path`
         waere ein Frontmatter-`body:` kein folgenloses Echo, sondern ERSETZTE
         den echten Markdown-Inhalt lautlos (die 108-Dateien-Klasse aus
@@ -231,6 +238,66 @@ class TestArchivedFiltering:
                "theme: chat\nopened: 2026-07-01")
         e = self._five_statuses(tmp_path)
         assert [i.key for i in e.list(theme="engine")] == ["i0", "i1"]
+
+
+class TestCategory:
+    """`category` (bug/feature/debt/research) is orthogonal to `kind`
+    (granularity) and `theme` (domain) — the axis a mixed backlog had no
+    field for at all until now."""
+
+    def test_absent_category_loads_as_none(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: goal\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.get("a").category is None
+
+    def test_valid_category_loads(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "category: bug\nopened: 2026-07-01")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.get("a").category == "bug"
+
+    def test_unknown_category_is_rejected_not_silently_dropped(self, tmp_path: Path):
+        # Same discipline as the theme-slug check above: a typo'd category
+        # must fail loudly, not vanish or silently become None.
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: goal\nstatus: open\ntheme: engine\n"
+               "category: enhancement\nopened: 2026-07-01")
+        with pytest.raises(KnowledgeLoadError):
+            WorkEngine.from_directory(tmp_path, strict=True)
+
+    def test_category_filter(self, tmp_path: Path):
+        for key, category in [("a", "bug"), ("b", "feature"), ("c", "bug")]:
+            _write(tmp_path, f"{key}.md",
+                   f"key: {key}\ntitle: {key}\nkind: goal\nstatus: open\n"
+                   f"theme: engine\ncategory: {category}\nopened: 2026-07-01")
+        _write(tmp_path, "d.md",
+               "key: d\ntitle: D\nkind: goal\nstatus: open\ntheme: engine\n"
+               "opened: 2026-07-01")  # kein category — darf beim Filter nicht auftauchen
+        e = WorkEngine.from_directory(tmp_path)
+        assert sorted(i.key for i in e.list(category="bug")) == ["a", "c"]
+
+    def test_category_filter_combines_with_theme(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: goal\nstatus: open\ntheme: engine\n"
+               "category: bug\nopened: 2026-07-01")
+        _write(tmp_path, "b.md",
+               "key: b\ntitle: B\nkind: goal\nstatus: open\ntheme: chat\n"
+               "category: bug\nopened: 2026-07-01")
+        e = WorkEngine.from_directory(tmp_path)
+        assert [i.key for i in e.list(category="bug", theme="engine")] == ["a"]
+
+    def test_category_survives_save_update_round_trip(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        assert e.get("a").category is None
+        e.save_update("a", {"category": "debt"})
+        reloaded = WorkEngine.from_directory(tmp_path)
+        assert reloaded.get("a").category == "debt"
 
 
 class TestHierarchyAndRollup:
@@ -318,11 +385,11 @@ class TestLint:
 
     @pytest.mark.parametrize("kind", ["decision", "changelog"])
     def test_missing_evidence_excludes_decision_and_changelog(self, tmp_path: Path, kind: str):
-        """W8-Reviewer-Fund WARNING-4 (Etappe D): eine migrierte historische
+        """a regression review (editing integration): eine migrierte historische
         Karte hat kein Commit, auf das evidence zeigen koennte — der Backfill
         (2377 Changelog-Karten) begrub sonst die 29 echten Faelle unter fast
         30-fachem Rauschen. Dieselbe Ausnahme wie bereits bei
-        reuse_ungeprueft (Etappe B)."""
+        reuse_ungeprueft (work-status integration)."""
         _write(tmp_path, "a.md",
                f"key: a\ntitle: A\nkind: {kind}\nstatus: done\ntheme: engine\n"
                "opened: 2026-07-01\nclosed: 2026-07-05")
@@ -341,7 +408,7 @@ class TestLint:
         assert set(e.lint()["unclosed_pairs"]) == {"a", "b"}
 
     def test_body_link_to_missing_key_is_flagged(self, tmp_path: Path):
-        # Owner-decision 2026-08-16 (work_lint_prueft_prosa_links_nicht):
+        # Owner-decision 2026-08-16 (work-link-check):
         # a [[...]] in a work item's body must resolve to another work key —
         # never a memory. This is the case that surfaced the whole record:
         # a Prosa-[[...]] pointing at a memory read exactly like a dangling
@@ -401,18 +468,18 @@ class TestLint:
     @pytest.mark.parametrize("kind", ["decision", "changelog"])
     def test_body_link_broken_excludes_decision_and_changelog(self, tmp_path: Path, kind: str):
         # Etappe E: a migrated changelog card's VERBATIM body can contain an
-        # incidental "[[TALOS_THOUGHT]]"-style placeholder mention that reads
+        # incidental "[[DRAFT_NOTE]]"-style placeholder mention that reads
         # like a cross-record link but is prose about code, not a real one.
         _write(tmp_path, "a.md",
                f"key: a\ntitle: A\nkind: {kind}\nstatus: done\ntheme: engine\n"
                "opened: 2026-01-01\nclosed: 2026-01-01",
-               body="Placeholder [[TALOS_THOUGHT]] wird eingesetzt.")
+               body="Placeholder [[DRAFT_NOTE]] wird eingesetzt.")
         e = WorkEngine.from_directory(tmp_path)
         assert e.lint()["body_link_broken"] == {}
 
     def test_kanten_gebrochen_is_none_without_symbol_check(self, tmp_path: Path):
-        # Not run vs. run-and-clean must stay distinguishable (Work-Record
-        # work_kanten_ohne_ankerpruefung) — the default, cheap lint() call
+        # Not run vs. run-and-clean must stay distinguishable: the default,
+        # cheap lint() call
         # never triggers the injected check.
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
@@ -467,12 +534,75 @@ class TestLint:
         assert e.lint(lambda _typ, _ziel: ("ok", None))["broken_reuse_refs"] == {}
 
 
+class TestWorkStatusPayload:
+    """`work_status_payload` was pulled out of `server/tools_work.py`'s
+    `work_status()` closure (Context Studio work-status integration) so the
+    backend KPI endpoint can share the exact recommendation logic instead
+    of re-deriving it. Hand-built `lint()`-shaped dicts, not a real
+    WorkEngine — this tests the pure counting/recommendation function in
+    isolation, `TestLint` above already covers `lint()` itself."""
+
+    def _lint(self, **overrides):
+        base = {
+            "total": 3, "closeable_goals": [], "dangling_refs": [],
+            "missing_evidence": [], "unclosed_pairs": [],
+            "plan_path_broken": {}, "reuse_not_checked": [],
+            "load_errors": [],
+        }
+        base.update(overrides)
+        return base
+
+    def test_load_errors_take_top_billing(self):
+        # dropped is true AND closeable is true — dropped must still win,
+        # per the docstring's "top billing" claim, not just be counted.
+        lint = self._lint(load_errors=["bad.md"], closeable_goals=["g"])
+        payload = work_status_payload(lint)
+        assert payload["recommendation"].startswith("🚨")
+
+    def test_closeable_or_dangling_or_plan_broken_means_aufraeumen(self):
+        assert work_status_payload(self._lint(closeable_goals=["g"]))["recommendation"].startswith("🧹")
+        assert work_status_payload(self._lint(dangling_refs=[("a", "b")]))["recommendation"].startswith("🧹")
+        assert work_status_payload(self._lint(plan_path_broken={"a": "x"}))["recommendation"].startswith("🧹")
+
+    def test_reuse_not_checked_alone_is_its_own_recommendation(self):
+        payload = work_status_payload(self._lint(reuse_not_checked=["a", "b"]))
+        assert payload["recommendation"].startswith("🔎")
+        assert "2" in payload["recommendation"]
+
+    def test_missing_evidence_alone_is_kleine_reste_not_aufraeumen(self):
+        # missing_evidence/unclosed_pairs are counted in total_issues but
+        # NOT in the "Aufraeumen faellig" branch's own condition — this is
+        # the one case that actually distinguishes the two branches.
+        payload = work_status_payload(self._lint(missing_evidence=["a"]))
+        assert payload["recommendation"] == "💡 kleine Reste"
+
+    def test_all_clean_is_kein_dringender_bedarf(self):
+        assert work_status_payload(self._lint())["recommendation"] == "✅ kein dringender Bedarf"
+
+    def test_counts_pass_through_unmodified(self):
+        lint = self._lint(
+            closeable_goals=["a", "b"], dangling_refs=[("x", "y")],
+            missing_evidence=["c"], unclosed_pairs=["d"],
+            plan_path_broken={"e": "f"}, reuse_not_checked=["g"],
+            load_errors=["h"],
+        )
+        payload = work_status_payload(lint)
+        assert payload["total_items"] == 3
+        assert payload["closeable_goals"] == 2
+        assert payload["dangling_refs"] == 1
+        assert payload["missing_evidence"] == 1
+        assert payload["unclosed_pairs"] == 1
+        assert payload["plan_path_broken"] == 1
+        assert payload["reuse_not_checked"] == 1
+        assert payload["load_errors"] == 1
+
+
 class TestKantenUndPlanPath:
     """Die zwei Pruefungen, die 2026-08-04 dazukamen — beide aus einem echten Fund.
 
     `plan_path` ist die EINZIGE Verbindung zwischen Plan-Dateien und Work-Store,
     und nichts prueft sie: gemessen zeigten 8 Records auf `plans/todo/...`-Dateien,
-    die der plan-keeper nach `plans/begonnen/` verschoben hatte — waehrend
+    die eine Migrationshilfe nach `plans/begonnen/` verschoben hatte — waehrend
     derselbe Lint-Lauf `dangling_refs: 0` meldete. `dangling_refs` deckt bewusst
     nur WORK-KEYS ab; ein Dateipfad hatte schlicht keinen Pruefer.
 
@@ -689,7 +819,7 @@ class TestKantenUndPlanPath:
 
     @pytest.mark.parametrize("kind", ["decision", "changelog"])
     def test_reuse_ungeprueft_nimmt_decision_und_changelog_aus(self, tmp_path: Path, kind: str):
-        """W8-Reviewer-Fund WARNING-4: `kanten` ist ein VORWAERTS-Feld — eine
+        """a regression review: `kanten` ist ein VORWAERTS-Feld — eine
         migrierte historische Tatsache hat vor ihrem eigenen Entstehen nichts
         gesucht. Ohne diese Ausnahme widerspraeche der Engine-Lint der in
         der Migrations-Doku dokumentierten Gate-Ausnahme."""
@@ -699,7 +829,7 @@ class TestKantenUndPlanPath:
         assert WorkEngine.from_directory(tmp_path).lint()["reuse_not_checked"] == []
 
     def test_entblockt_durch_auf_unbekannten_key_wird_gemeldet(self, tmp_path: Path):
-        """W8-Reviewer-Fund WARNING-2: ohne diese Pruefung hebt jeder truthy
+        """a regression review: ohne diese Pruefung hebt jeder truthy
         String — auch ein Tippfehler — einen Owner-Vorbehalt lautlos auf."""
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
@@ -730,16 +860,16 @@ class TestZustellungFuerDatei:
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
                "opened: 2026-01-01\nkanten:\n  gesucht:\n    - x\n"
-               "  nutzt:\n    - backend/app/services/x.py::foo")
-        t = WorkEngine.from_directory(tmp_path).fuer_datei("backend/app/services/x.py")
+               "  nutzt:\n    - src/services/x.py::foo")
+        t = WorkEngine.from_directory(tmp_path).fuer_datei("src/services/x.py")
         assert [i.key for i in t] == ["a"]
 
     def test_evidence_files_treffer(self, tmp_path: Path):
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
                "opened: 2026-01-01\nevidence:\n  commits: []\n"
-               "  files:\n    - backend/app/services/x.py")
-        t = WorkEngine.from_directory(tmp_path).fuer_datei("backend/app/services/x.py")
+               "  files:\n    - src/services/x.py")
+        t = WorkEngine.from_directory(tmp_path).fuer_datei("src/services/x.py")
         assert [i.key for i in t] == ["a"]
 
     def test_geschlossene_records_bleiben_draussen(self, tmp_path: Path):
@@ -747,21 +877,21 @@ class TestZustellungFuerDatei:
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: done\nclosed: 2026-01-02\n"
                "theme: engine\nopened: 2026-01-01\nevidence:\n  commits: [abc]\n"
-               "  files:\n    - backend/app/services/x.py")
+               "  files:\n    - src/services/x.py")
         assert WorkEngine.from_directory(tmp_path).fuer_datei(
-            "backend/app/services/x.py") == []
+            "src/services/x.py") == []
 
     def test_kanten_vor_evidence(self, tmp_path: Path):
         """Kanten sind praeziser (Symbol-Ebene) und ausdruecklich vorwaerts."""
         _write(tmp_path, "ev.md",
                "key: ev\ntitle: Ev\nkind: step\nstatus: open\ntheme: engine\n"
                "opened: 2026-01-01\nevidence:\n  commits: []\n"
-               "  files:\n    - backend/app/services/x.py")
+               "  files:\n    - src/services/x.py")
         _write(tmp_path, "ka.md",
                "key: ka\ntitle: Ka\nkind: step\nstatus: open\ntheme: engine\n"
                "opened: 2026-01-01\nkanten:\n  gesucht:\n    - x\n"
-               "  nutzt:\n    - backend/app/services/x.py::foo")
-        t = WorkEngine.from_directory(tmp_path).fuer_datei("backend/app/services/x.py")
+               "  nutzt:\n    - src/services/x.py::foo")
+        t = WorkEngine.from_directory(tmp_path).fuer_datei("src/services/x.py")
         assert [i.key for i in t] == ["ka", "ev"]
 
     def test_negative_limit_clamps_instead_of_reversing(self, tmp_path: Path):
@@ -771,9 +901,9 @@ class TestZustellungFuerDatei:
             _write(tmp_path, f"a{i}.md",
                    f"key: a{i}\ntitle: A{i}\nkind: step\nstatus: open\n"
                    f"theme: engine\nopened: 2026-01-01\nevidence:\n  commits: []\n"
-                   f"  files:\n    - backend/app/services/x.py")
+                   f"  files:\n    - src/services/x.py")
         t = WorkEngine.from_directory(tmp_path).for_file(
-            "backend/app/services/x.py", limit=-1)
+            "src/services/x.py", limit=-1)
         assert len(t) == 1
 
     def test_deckel_haelt(self, tmp_path: Path):
@@ -782,16 +912,16 @@ class TestZustellungFuerDatei:
             _write(tmp_path, f"r{n}.md",
                    f"key: r{n}\ntitle: R{n}\nkind: step\nstatus: open\n"
                    "theme: engine\nopened: 2026-01-01\nevidence:\n  commits: []\n"
-                   "  files:\n    - backend/app/services/x.py")
+                   "  files:\n    - src/services/x.py")
         t = WorkEngine.from_directory(tmp_path).fuer_datei(
-            "backend/app/services/x.py", limit=8)
+            "src/services/x.py", limit=8)
         assert len(t) == 8
 
     def test_fremde_datei_liefert_nichts(self, tmp_path: Path):
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
                "opened: 2026-01-01\nevidence:\n  commits: []\n"
-               "  files:\n    - backend/app/services/x.py")
+               "  files:\n    - src/services/x.py")
         assert WorkEngine.from_directory(tmp_path).fuer_datei("ganz/woanders.py") == []
 
     def test_fingerprint_aendert_sich_mit_der_arbeit(self, tmp_path: Path):
@@ -806,9 +936,9 @@ class TestZustellungFuerDatei:
         _write(tmp_path, "a.md",
                "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
                "opened: 2026-01-01\nevidence:\n  commits: []\n"
-               "  files:\n    - backend/app/services/x.py")
+               "  files:\n    - src/services/x.py")
         e = WorkEngine.from_directory(tmp_path)
-        arbeit = e.fuer_datei("backend/app/services/x.py")
+        arbeit = e.fuer_datei("src/services/x.py")
         ohne = fingerprint_rules([], None, None)
         mit = fingerprint_rules([], None, arbeit)
         assert ohne != mit, "Work-Items schlagen nicht auf den Fingerprint durch"
@@ -894,7 +1024,7 @@ class TestRecall:
         assert [i.key for i in results] == ["a"]
 
     def test_exclude_kinds_drops_candidates_before_the_limit_cut(self, tmp_path: Path):
-        """W8-Reviewer-Fund ERROR-2 (Etappe D): nach dem Changelog-Backfill
+        """a regression review (editing integration): nach dem Changelog-Backfill
         (2377 `kind: changelog`-Karten) verdraengten Changelog-Treffer echte
         goal/step-Records vollstaendig aus den Top-8 (gemessen: 8/8 bei einer
         Query). Ein Post-Hoc-Filter auf die bereits limitierten Top-N haette
@@ -916,3 +1046,245 @@ class TestRecall:
         gefiltert = e.recall("kumquat suche", limit=1,
                              exclude_kinds=frozenset({"decision", "changelog"}))
         assert [i.key for i in gefiltert] == ["goal_hit"]
+
+
+class TestWriteWorkItem:
+    """Context Studio editing integration — lifts the read-only boundary
+    stated in this module's own docstring since v1.4.312, for exactly one
+    new consumer (the Context Studio edit form), Owner-decision 2026-08-22.
+    Every test here checks the boundary that survives the lift: validated,
+    atomic, refuses rather than silently drops a comment."""
+
+    def test_apply_update_does_not_touch_the_file(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        path = tmp_path / "a.md"
+        before = path.read_bytes()
+        old_text, new_text, new_item = e.apply_update("a", {"status": "active"})
+        assert path.read_bytes() == before  # kein Byte auf Platte veraendert
+        assert old_text == before.decode("utf-8")
+        assert new_item.status == "active"
+        assert "status: active" in new_text
+        assert e.get("a").status == "open"  # in-memory ebenfalls unveraendert
+
+    def test_save_update_writes_and_updates_in_memory_state(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        saved = e.save_update("a", {"status": "done", "closed": "2026-08-22"})
+        assert saved.status == "done"
+        assert e.get("a").status == "done"  # kein Reload noetig
+        # Re-Load von Platte bestaetigt: geschrieben wurde etwas, das der
+        # Lesepfad selbst wieder korrekt interpretiert — nicht nur "irgendwas".
+        reloaded = WorkEngine.from_directory(tmp_path)
+        assert reloaded.get("a").status == "done"
+        assert str(reloaded.get("a").closed) == "2026-08-22"
+
+    def test_save_update_leaves_no_tmp_file_behind(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        e.save_update("a", {"status": "active"})
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["a.md"]
+
+    def test_a_crash_between_write_and_rename_never_touches_the_real_file(self, tmp_path: Path, monkeypatch):
+        # a regression review: an earlier "atomic write" mutation
+        # test only checked whether content ARRIVED in the file, not
+        # whether the rename step is what makes that safe — replacing the
+        # temp-file+rename with a bare `path.write_text(new_text)` broke
+        # ZERO of the then-existing tests, because both approaches produce
+        # an identical end state when nothing goes wrong. This test
+        # targets the property atomic writes actually buy: if the process
+        # dies BETWEEN writing the temp file and renaming it into place,
+        # the real file must stay exactly as it was — never partially
+        # written, never silently replaced by an incomplete one.
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        original = (tmp_path / "a.md").read_bytes()
+        e = WorkEngine.from_directory(tmp_path)
+
+        real_replace = Path.replace
+
+        def crashing_replace(self_path, target):
+            if str(self_path).endswith("a.md.tmp"):
+                raise OSError("simulated crash between write and rename")
+            return real_replace(self_path, target)
+
+        monkeypatch.setattr(Path, "replace", crashing_replace)
+
+        with pytest.raises(OSError):
+            e.save_update("a", {"status": "active"})
+
+        assert (tmp_path / "a.md").read_bytes() == original
+
+    def test_key_is_immutable(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        with pytest.raises(ValueError):
+            e.apply_update("a", {"key": "b"})
+
+    def test_unknown_key_raises_keyerror(self, tmp_path: Path):
+        e = WorkEngine.from_directory(tmp_path)
+        with pytest.raises(KeyError):
+            e.apply_update("nope", {"status": "active"})
+
+    def test_source_path_cannot_be_overridden_via_updates(self, tmp_path: Path):
+        # Sicherheitsrelevant: WorkItem ist plain BaseModel (extra="ignore"),
+        # nicht _StrengesModell (extra="forbid") — ohne diese explizite
+        # Sperre wuerde ein source_path in updates save_update dazu bringen,
+        # an einen beliebigen Pfad zu schreiben (Path-Traversal-Primitive).
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        outside = tmp_path.parent / "ausserhalb.md"
+        e = WorkEngine.from_directory(tmp_path)
+        with pytest.raises(ValueError):
+            e.apply_update("a", {"source_path": str(outside)})
+        assert not outside.exists()
+
+    def test_unknown_field_in_updates_raises_not_silently_ignored(self, tmp_path: Path):
+        # Pydantics extra="ignore" wuerde einen Tippfehler sonst spurlos
+        # verschlucken — dieselbe Disziplin wie _parse_work_item's
+        # unbekannt_top-Pruefung auf dem Lesepfad.
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        with pytest.raises(ValueError):
+            e.apply_update("a", {"staus": "active"})  # Tippfehler absichtlich
+
+    def test_invalid_field_value_raises_frontmatter_write_error(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        with pytest.raises(FrontmatterWriteError):
+            e.apply_update("a", {"status": "not_a_real_status"})
+        # Datei bleibt unveraendert, kein halb-geschriebener Zustand.
+        assert "status: open" in (tmp_path / "a.md").read_text(encoding="utf-8")
+
+    def test_frontmatter_comment_refuses_the_write(self, tmp_path: Path):
+        # Genau der 12-von-5159-Fall aus dem echten Bestand: ein Kommentar
+        # im evidence.commits-Block, der ein leeres `commits: []` erklaert.
+        text = (
+            "---\nkey: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+            "opened: 2026-01-01\nevidence:\n  commits: []  # noch nicht committet\n"
+            "---\n\nKoerper.\n"
+        )
+        (tmp_path / "a.md").write_text(text, encoding="utf-8")
+        e = WorkEngine.from_directory(tmp_path)
+        with pytest.raises(FrontmatterWriteError):
+            e.apply_update("a", {"status": "active"})
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == text
+
+    def test_comment_inside_a_quoted_string_does_not_false_positive(self, tmp_path: Path):
+        # Ein '#' innerhalb eines gequoteten Strings ist KEIN YAML-Kommentar
+        # — die Erkennung darf hier nicht faelschlich verweigern.
+        text = (
+            "---\nkey: a\ntitle: 'Ticket #123'\nkind: step\nstatus: open\n"
+            "theme: engine\nopened: 2026-01-01\n---\n\nKoerper.\n"
+        )
+        (tmp_path / "a.md").write_text(text, encoding="utf-8")
+        e = WorkEngine.from_directory(tmp_path)
+        _old_text, _new_text, new_item = e.apply_update("a", {"status": "active"})
+        assert new_item.status == "active"
+
+    def test_apostrophe_mid_word_does_not_hide_a_real_comment_after_it(self):
+        # a regression review: eine erste Fassung tolerierte einen
+        # Apostroph mitten im Wort ("Owner's decision") als Quote-Start —
+        # ein echter Kommentar SPAETER auf derselben Zeile las sich dann
+        # faelschlich als "innerhalb eines Strings" und wurde uebersehen.
+        assert _has_frontmatter_comment("title: Owner's decision  # echter Kommentar") is True
+        assert _has_frontmatter_comment("title: Don't stop  # echter Kommentar") is True
+
+    def test_quote_state_persists_across_lines_no_false_positive_on_multiline_title(self):
+        # Gegenprobe zu WARNING-4: ein GENUINE mehrzeiliger gequoteter
+        # Titel darf NICHT als Kommentar-Fund gelten, obwohl die erste
+        # Zeile ein ungeschlossenes Anfuehrungszeichen traegt — der Quote
+        # bleibt ueber den Zeilenumbruch hinweg offen.
+        multiline = "title: 'Ein langer\n  Titel der ueber\n  mehrere Zeilen geht'\ntheme: infra"
+        assert _has_frontmatter_comment(multiline) is False
+
+    def test_hash_embedded_in_a_word_is_not_a_comment_marker(self):
+        # Gegenprobe zu WARNING-4/dem "Hinweis": ein '#' MITTEN in einem
+        # Wort ("Backend#1") ist laut YAML-Spezifikation kein Kommentar —
+        # ein Kommentar beginnt nur am Zeilenanfang oder nach Whitespace.
+        assert _has_frontmatter_comment("title: Fork-Stability Backend#1 — aclose-Race") is False
+        assert _has_frontmatter_comment("title: Lock-#1-Liefergrenze fuer autonome Tasks") is False
+        # Aber ein '#' NACH Whitespace bleibt ein echter Kommentar.
+        assert _has_frontmatter_comment("title: Backend#1  # das hier ist ein Kommentar") is True
+
+    def test_doubled_single_quote_escape_does_not_break_quote_tracking(self):
+        # a regression review (Anker-Checker-Sprint, 2026-09-06): `''`
+        # innerhalb eines einfach-quotierten YAML-Skalars ist das Escape
+        # fuer EIN woertliches Anfuehrungszeichen, keine Schluss-Quote. Eine
+        # fruehere Fassung schloss die Quote beim ERSTEN `'` des Paars und
+        # konnte sie beim zweiten nicht wieder oeffnen (`at_value_start` war
+        # dann `False`) — der Rest des mehrzeiligen Skalars galt faelschlich
+        # als "ausserhalb jeder Quote", und ein spaeteres '#' in normaler
+        # Prosa ("Transition #4") wurde faelschlich als Kommentar gelesen.
+        # Regression case: a multi-line quoted scalar with an escaped quote.
+        text = (
+            "reuse:\n  searched_for:\n"
+            "  - 'review-guide.md Phase 2 ''Status-Read'' -- liest nur ''die "
+            "ersten 30 Zeilen''\n"
+            "    des Headers, nie den Body; Transition #4 (begonnen/ -> fertig/) "
+            "verschiebt allein\n"
+            "    auf Basis dieses Header-Markers'\n"
+        )
+        assert _has_frontmatter_comment(text) is False
+        # Gegenprobe: ein Escape-Paar am Stringende darf nicht crashen
+        # (Lookahead ueber das Stringende hinaus).
+        assert _has_frontmatter_comment("key: 'it''s'") is False
+        # Gegenprobe: ein echter Kommentar NACH einem escapten Paar auf
+        # derselben Zeile bleibt erkennbar.
+        assert _has_frontmatter_comment("key: 'it''s over'  # echter Kommentar") is True
+
+    def test_full_field_editing_round_trips_through_a_reload(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: Alt\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01\npart_of: parent_goal\nblocked_by: []")
+        _write(tmp_path, "parent_goal.md",
+               "key: parent_goal\ntitle: Parent\nkind: goal\nstatus: open\n"
+               "theme: engine\nopened: 2026-01-01")
+        e = WorkEngine.from_directory(tmp_path)
+        saved = e.save_update("a", {
+            "title": "Neu betitelt äöü",
+            "theme": "chat",
+            "evidence": {"commits": ["abc123"], "files": ["x.py"]},
+            "reuse": {"searched_for": ["foo"], "found": [], "conclusion": "nichts passendes"},
+        })
+        assert saved.title == "Neu betitelt äöü"
+        assert saved.theme == "chat"
+        assert saved.evidence.commits == ["abc123"]
+        assert saved.reuse.searched_for == ["foo"]
+        reloaded = WorkEngine.from_directory(tmp_path)
+        r = reloaded.get("a")
+        assert r.title == "Neu betitelt äöü"
+        assert r.theme == "chat"
+        assert r.evidence.files == ["x.py"]
+        assert r.reuse.conclusion == "nichts passendes"
+        assert r.part_of == "parent_goal"  # unveraenderte Felder bleiben erhalten
+
+    def test_render_work_item_text_produces_valid_reparseable_yaml(self, tmp_path: Path):
+        _write(tmp_path, "a.md",
+               "key: a\ntitle: A\nkind: step\nstatus: open\ntheme: engine\n"
+               "opened: 2026-01-01", body="Ein Fliesstext.\n\nZweiter Absatz.")
+        e = WorkEngine.from_directory(tmp_path)
+        item = e.get("a")
+        text = render_work_item_text(item)
+        assert text.startswith("---\n")
+        assert "Ein Fliesstext." in text
+        assert "Zweiter Absatz." in text
+        # Muss selbst wieder gueltiges YAML-Frontmatter sein.
+        end = text.index("\n---", 4)
+        parsed = yaml.safe_load(text[4:end])
+        assert parsed["key"] == "a"
+        assert parsed["title"] == "A"

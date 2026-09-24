@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from mcp_context_toolkit.cli import _cmd_doctor, _cmd_migrate_decisions, _cmd_validate_all, main
+from mcp_context_toolkit.cli import (
+    _cmd_doctor,
+    _cmd_export_studio,
+    _cmd_migrate_decisions,
+    _cmd_validate_all,
+    _docs_payload,
+    _work_payload,
+    main,
+)
 from mcp_context_toolkit.work import WorkEngine
 
 
@@ -343,3 +351,187 @@ class TestCLIDiagnostics:
         captured = capsys.readouterr().out
         data = json.loads(captured)
         assert data["ok"] is True
+
+
+def _write_work_item(d: Path, key: str, theme: str = "engine", status: str = "open",
+                     kind: str = "step", part_of: str | None = None) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    fm = (f"key: {key}\ntitle: Title {key}\nkind: {kind}\nstatus: {status}\n"
+          f"theme: {theme}\nopened: 2026-01-01\n")
+    if part_of:
+        fm += f"part_of: {part_of}\n"
+    if status == "done":
+        fm += "closed: 2026-01-02\nevidence:\n  commits: [abc123]\n"
+    (d / f"{key}.md").write_text(f"---\n{fm}---\n\nBody for {key}.\n", encoding="utf-8")
+
+
+class TestWorkPayload:
+    """mct-Context-Studio-Vollausbau Etappe A: the viewer's Work tab reads
+    this shape, so its fields are load-bearing, not incidental."""
+
+    def test_stats_and_item_fields(self, tmp_path: Path):
+        _write_work_item(tmp_path, "a", theme="engine", status="open")
+        _write_work_item(tmp_path, "b", theme="engine", status="done", part_of="a")
+        _write_work_item(tmp_path, "c", theme="infra", status="active")
+
+        payload = _work_payload(tmp_path)
+        assert payload["kind"] == "context-studio/work"
+        assert payload["stats"]["items"] == 3
+        assert payload["stats"]["by_theme"] == {"engine": 2, "infra": 1}
+        assert payload["stats"]["by_status"] == {"open": 1, "done": 1, "active": 1}
+        assert payload["stats"]["edges"] == 1
+
+        by_key = {i["key"]: i for i in payload["items"]}
+        assert by_key["a"]["status"] == "open"
+        assert by_key["a"]["has_evidence"] is False
+        assert by_key["b"]["status"] == "done"
+        assert by_key["b"]["has_evidence"] is True
+        assert by_key["b"]["part_of"] == "a"
+        assert payload["edges"] == [{"source": "b", "target": "a"}]
+
+    def test_include_archived_so_the_browse_tab_sees_everything(self, tmp_path: Path):
+        # list(include_archived=True) is the deliberate choice (see the
+        # function's docstring) — a `dropped` item must still show up so
+        # the viewer, not the export step, decides what to filter.
+        _write_work_item(tmp_path, "gone", status="dropped")
+        payload = _work_payload(tmp_path)
+        assert payload["stats"]["by_status"] == {"dropped": 1}
+        assert [i["key"] for i in payload["items"]] == ["gone"]
+
+    def test_load_errors_surface_instead_of_vanishing(self, tmp_path: Path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "broken.md").write_text(
+            "---\nkey: broken\ntitle: X\ntheme: not_a_real_theme\nopened: 2026-01-01\n---\n",
+            encoding="utf-8",
+        )
+        payload = _work_payload(tmp_path)
+        assert payload["stats"]["items"] == 0
+        assert len(payload["load_errors"]) == 1
+
+
+class TestDocsPayload:
+    def test_stats_and_section_fields(self, tmp_path: Path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "a.md").write_text(
+            "Lead-in text.\n\n## First\nbody one\n\n## Second\nbody two\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "b.md").write_text("## Only\nsomething\n", encoding="utf-8")
+
+        payload = _docs_payload(tmp_path)
+        assert payload["kind"] == "context-studio/docs"
+        assert payload["stats"] == {"sections": 4, "files": 2}
+        headings = sorted(s["heading"] for s in payload["sections"])
+        assert headings == ["", "First", "Only", "Second"]
+        first = next(s for s in payload["sections"] if s["heading"] == "First")
+        assert first["path"] == "a.md"
+        assert first["line"] == 3
+
+    def test_empty_dir_yields_zero_sections(self, tmp_path: Path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        payload = _docs_payload(tmp_path)
+        assert payload["stats"] == {"sections": 0, "files": 0}
+        assert payload["sections"] == []
+
+
+class TestExportStudioIncludesWorkAndDocs:
+    """Etappe A's actual "Fertig = Beobachtung": all four domains reach
+    out_dir when their store dirs are supplied — and are correctly SKIPPED
+    (not crash) when absent, matching the pre-existing memory/rules
+    behaviour in `_cmd_export_studio`."""
+
+    def test_writes_work_and_docs_json_when_dirs_given(self, tmp_path: Path, capsys):
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+        work_dir = tmp_path / "work"
+        _write_work_item(work_dir, "a")
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "x.md").write_text("## Heading\ntext\n", encoding="utf-8")
+        out_dir = tmp_path / "out"
+
+        rc = _cmd_export_studio(rules_dir, None, out_dir, work_dir=work_dir, docs_dir=docs_dir)
+        assert rc == 0
+        written = json.loads(capsys.readouterr().out)["written"]
+        assert "work.json" in written
+        assert "docs.json" in written
+        assert json.loads((out_dir / "work.json").read_text())["stats"]["items"] == 1
+        assert json.loads((out_dir / "docs.json").read_text())["stats"]["sections"] == 1
+
+    def test_missing_work_and_docs_dirs_are_skipped_not_fatal(self, tmp_path: Path, capsys):
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+        out_dir = tmp_path / "out"
+
+        rc = _cmd_export_studio(rules_dir, None, out_dir, work_dir=None, docs_dir=None)
+        assert rc == 0
+        written = json.loads(capsys.readouterr().out)["written"]
+        assert "work.json" not in written
+        assert "docs.json" not in written
+        assert not (out_dir / "work.json").exists()
+        assert not (out_dir / "docs.json").exists()
+
+
+class TestLogHaikuCompareArgvWiring:
+    """W8-Reviewer-Fund (Runde 2, D-1): a prior test called
+    `_cmd_log_haiku_compare` directly with Python lists, so it never exercised
+    `--haiku-mechanical`/`--haiku-names` as repeated argparse flags nor
+    `main()`'s own positional wiring — a swapped `args.haiku_mechanical`/
+    `args.haiku_names` in that wiring would pass every other test while
+    silently mislabeling the exact comparison data this feature exists to
+    produce. This test goes through `main()` with real argv."""
+
+    def test_main_wires_log_haiku_compare_with_repeated_flags(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ):
+        memory_dir = tmp_path / ".claude" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "a.md").write_text(
+            "---\nname: alpha_pkg\ntier: project\n---\n\nbody\n", encoding="utf-8",
+        )
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+
+        monkeypatch.setattr("sys.argv", [
+            "context-toolkit-query", "--memory-dir", str(memory_dir),
+            "--log-haiku-compare", "1",
+            "--haiku-query", "shared topic keyword",
+            "--haiku-mechanical", "MECH_A", "--haiku-mechanical", "MECH_B",
+            "--haiku-names", "HAIKU_X",
+            "--haiku-duration-ms", "789",
+        ])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 0
+
+        state_dir = tmp_path / ".claude" / ".session_state"
+        log_files = list(state_dir.glob("*.recall_events.jsonl"))
+        assert len(log_files) == 1
+        entry = json.loads(log_files[0].read_text(encoding="utf-8").splitlines()[0])
+        assert entry["event"] == "haiku_compare"
+        assert entry["turn"] == 1
+        # The tell-tale for a swapped wiring: mechanical vs. haiku land in the
+        # WRONG field but the run still exits 0 and writes valid JSON — only
+        # asserting the exact field<->flag pairing catches that.
+        assert entry["mechanical_names"] == ["MECH_A", "MECH_B"]
+        assert entry["haiku_names"] == ["HAIKU_X"]
+        assert entry["duration_ms"] == 789
+
+    def test_main_log_haiku_compare_turn_zero_is_reachable(
+        self, tmp_path: Path, monkeypatch, capsys,
+    ):
+        # `--log-haiku-compare 0` must not be swallowed by an `if args.x:`
+        # truthiness check — turn 0 is a real value (log_opened uses it
+        # before the first recall of a session).
+        memory_dir = tmp_path / ".claude" / "memory"
+        memory_dir.mkdir(parents=True)
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        monkeypatch.setattr("sys.argv", [
+            "context-toolkit-query", "--memory-dir", str(memory_dir),
+            "--log-haiku-compare", "0", "--haiku-query", "q",
+        ])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 0
+        state_dir = tmp_path / ".claude" / ".session_state"
+        entry = json.loads(next(state_dir.glob("*.recall_events.jsonl")).read_text(encoding="utf-8").splitlines()[0])
+        assert entry["turn"] == 0

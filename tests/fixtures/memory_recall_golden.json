@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "corpus_fingerprint": "sha256:d33a9a9eacd82836e550d15f35b30103186e3f3167812f526f33a0dc2764ac71",
+  "memories": [
+    {
+      "name": "git_workflow",
+      "tier": "feedback",
+      "body": "Commits contain only files owned by the current session."
+    },
+    {
+      "name": "langdock_provider_note",
+      "tier": "project",
+      "bausteine": ["py:llm.providers.google_langdock"],
+      "kontexte": {"taetigkeiten": ["implement"]},
+      "body": "Integration note retained for the provider implementation."
+    },
+    {
+      "name": "activity_only_note",
+      "tier": "project",
+      "kontexte": {"taetigkeiten": ["implement"]},
+      "body": "General implementation routine without a module binding."
+    },
+    {
+      "name": "unrelated_ui_note",
+      "tier": "project",
+      "body": "Chat rendering uses theme-aware tokens."
+    }
+  ],
+  "cases": [
+    {
+      "id": "owner_git_workflow_phrase",
+      "provenance": "curated paraphrase of owner prompt, 2026-09-06",
+      "prompt": "wie war das mit dem git workflo und den eigenen files?",
+      "limit": 3,
+      "context": {},
+      "baseline_names": ["git_workflow"],
+      "must_include": ["git_workflow"],
+      "must_exclude": ["langdock_provider_note"]
+    },
+    {
+      "id": "owner_provider_activity_phrase",
+      "provenance": "curated paraphrase of owner prompt, 2026-09-07",
+      "prompt": "mach das jetzt weiter",
+      "limit": 3,
+      "context": {
+        "bausteine": ["py:llm.providers.google_langdock"],
+        "taetigkeiten": ["implement"]
+      },
+      "baseline_names": [],
+      "expected_first": "langdock_provider_note",
+      "must_include": ["langdock_provider_note"],
+      "must_exclude": ["unrelated_ui_note", "activity_only_note"]
+    }
+  ]
+}

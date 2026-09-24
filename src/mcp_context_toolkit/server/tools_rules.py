@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from mcp_context_toolkit.engine import rules_for_file_payload
+
 from .serializers import _rule_full, _rule_summary
 
 
@@ -30,37 +32,18 @@ def register(mcp_tool, rules_reloader, work_reloader=None) -> None:
         items is skimmed and a handful is read.
         """
         engine = rules_reloader.current()
-        matches = engine.query_for_file_tiered(file_path)
-        rules_out = [_rule_summary(r) for r in matches]
-
-        decisions = engine.query_decisions_for_file(file_path)
-        decisions_out = [d.model_dump(mode="json") for d in decisions]
-
-        deps = engine.query_dependencies(file_path)
-
-        # Vierte Auskunft: was hat jemand fuer GENAU diese Datei notiert und noch
-        # nicht erledigt. Aus "hier sind deine Regeln" wird "hier sind deine
-        # Regeln und die N offenen Punkte dazu". Fail-soft: fehlt der Work-Store
-        # oder bricht das Laden, entfaellt der Abschnitt still — eine Zugabe
-        # darf einen Edit nie aufhalten.
-        arbeit_out: list[dict] = []
+        # Fail-soft (W8-Reviewer-Fund ERROR-1): `.current()` re-loads on a
+        # changed mtime and can raise (deleted dir, permission error) — a
+        # broken work store must never take the rules/decisions/dependencies
+        # answer down with it, same contract `rules_for_file_payload`'s own
+        # internal `for_file()` try/except already promises.
+        work_engine = None
         if work_reloader is not None:
             try:
-                for w in work_reloader.current().for_file(file_path):
-                    arbeit_out.append({
-                        "key": w.key, "title": w.title, "status": w.status,
-                        "theme": w.theme, "kind": w.kind,
-                        "reuse": w.reuse is not None,
-                    })
+                work_engine = work_reloader.current()
             except Exception:
-                arbeit_out = []
-
-        out = {
-            "rules": rules_out,
-            "decisions": decisions_out,
-            "dependencies": deps,
-            "offene_arbeit": arbeit_out,
-        }
+                work_engine = None
+        out = rules_for_file_payload(engine, file_path, work_engine=work_engine)
         return json.dumps(out, indent=2)
 
     @mcp_tool("rules")

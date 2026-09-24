@@ -3,8 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from mcp_context_toolkit.engine import RulesEngine, _compile_glob, fingerprint_rules
+from mcp_context_toolkit.engine import (
+    RulesEngine,
+    _compile_glob,
+    fingerprint_rules,
+    rules_for_file_payload,
+)
 from mcp_context_toolkit.models import Decision, DecisionAppliesTo, Rule, RuleApplyTo
+from mcp_context_toolkit.work import WorkEngine
 
 
 def _make_rule(key: str, files: list[str], **overrides) -> Rule:
@@ -920,3 +926,60 @@ class TestDecisionLoaderMeldetFehler:
         # liefert None -> gemeldet als Fremd-kind, nicht als Crash.
         assert len(e.load_errors) == 1, e.load_errors
         assert "kind=" in e.load_errors[0]
+
+
+class TestRulesForFilePayload:
+    """`rules_for_file_payload` — extracted (S8) from `tools_rules.py`'s
+    `query_rules_for_file` closure so a second consumer (Etappe E's chat
+    tool) shares the exact aggregation + fail-soft behavior instead of
+    reimplementing it. These tests cover what a naive reimplementation would
+    most likely drop: the `work_engine=None` case and the fail-soft
+    exception-swallow when the work store itself is broken."""
+
+    def _write_work(self, d: Path, name: str, fm: str) -> None:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(f"---\n{fm}\n---\n\nBody\n", encoding="utf-8")
+
+    def test_work_engine_none_yields_empty_offene_arbeit_but_keeps_rules(self):
+        rule = _make_rule("r1", ["backend/**/*.py"])
+        engine = RulesEngine([rule])
+
+        out = rules_for_file_payload(engine, "backend/app/x.py", work_engine=None)
+
+        assert [r["key"] for r in out["rules"]] == ["r1"]
+        assert out["offene_arbeit"] == []
+
+    def test_work_engine_raising_is_fail_soft_not_propagated(self):
+        engine = RulesEngine([_make_rule("r1", ["backend/**/*.py"])])
+
+        class _BrokenWorkEngine:
+            def for_file(self, file_path, limit=8):
+                raise RuntimeError("store kaputt")
+
+        out = rules_for_file_payload(
+            engine, "backend/app/x.py", work_engine=_BrokenWorkEngine()
+        )
+
+        assert out["offene_arbeit"] == []
+        assert [r["key"] for r in out["rules"]] == ["r1"], (
+            "ein kaputter Work-Store darf die Regel-Auskunft nie mitreissen"
+        )
+
+    def test_real_matches_span_rules_decisions_and_work(self, tmp_path: Path):
+        rule = _make_rule("r1", ["backend/**/*.py"])
+        decision = _make_decision("d1", ["backend/**/*.py"])
+        engine = RulesEngine([rule], decisions=[decision])
+
+        work_dir = tmp_path / "work"
+        self._write_work(
+            work_dir, "w1.md",
+            "key: w1\ntitle: W1\nkind: step\nstatus: open\ntheme: engine\n"
+            "opened: 2026-07-01\nevidence: {files: [backend/app/x.py]}",
+        )
+        work_engine = WorkEngine.from_directory(work_dir)
+
+        out = rules_for_file_payload(engine, "backend/app/x.py", work_engine=work_engine)
+
+        assert [r["key"] for r in out["rules"]] == ["r1"]
+        assert [d["key"] for d in out["decisions"]] == ["d1"]
+        assert [w["key"] for w in out["offene_arbeit"]] == ["w1"]

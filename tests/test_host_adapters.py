@@ -77,3 +77,50 @@ class TestHostAdapterProtocol:
         adapter.has_symbol_index()
         # If `bestand()` ran again, the marker file would have reappeared.
         assert not marker.is_file()
+
+    def _stub_plan_graph(self, tmp_path: Path) -> None:
+        """A fake `scripts/plan_graph.py` whose `_zustand` echoes back the
+        `typ` it actually received — isolates the adapter's own type
+        translation from the real plan_graph.py's behavior."""
+        scripts = tmp_path / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "plan_graph.py").write_text(
+            "SCAN_WURZELN = ()\n"
+            "TYP_BAUT = 'baut'\n"
+            "def bestand(w, p='.'):\n"
+            "    return {}\n"
+            "def nach_namen(b):\n"
+            "    return {}\n"
+            "def _zustand(t, z, b, n):\n"
+            "    if t == TYP_BAUT:\n"
+            "        return 'geplant', None\n"
+            "    return 'gebrochen', f'typ war {t!r}'\n"
+            "def _modul_vorhanden(n, p):\n"
+            "    return True\n",
+            encoding="utf-8",
+        )
+
+    def test_creates_wird_vor_zustand_auf_baut_uebersetzt(self, tmp_path: Path):
+        # WorkItem.reuse traegt "creates" (englisch), plan_graph.py kennt nur
+        # "baut" (deutsch) fuer die geplant/gebrochen-Weiche. Ohne Uebersetzung
+        # sah jedes noch nicht gebaute `creates:`-Ziel wie eine gebrochene
+        # Kante aus (Reviewer-Fund 2026-09-05, `host_adapters.py::symbol_check`
+        # gab den rohen englischen Typ unveraendert an `_zustand()` durch).
+        self._stub_plan_graph(tmp_path)
+        work_dir = tmp_path / ".claude" / "work"
+        work_dir.mkdir(parents=True)
+        adapter = TalosDiscoveryAdapter(work_dir)
+        assert adapter.resolve_symbol("creates", "x::NochNichtGebaut") == ("geplant", None)
+
+    def test_uses_und_extends_bleiben_unuebersetzt(self, tmp_path: Path):
+        # Der Stub-`_zustand` echot den erhaltenen Typ zurueck, wenn er NICHT
+        # "baut" ist — belegt, dass nur "creates" uebersetzt wird, "uses"/
+        # "extends" unveraendert ankommen (dieselbe Grenze wie vor dem Fix).
+        self._stub_plan_graph(tmp_path)
+        work_dir = tmp_path / ".claude" / "work"
+        work_dir.mkdir(parents=True)
+        adapter = TalosDiscoveryAdapter(work_dir)
+        for typ in ("uses", "extends"):
+            state, hint = adapter.resolve_symbol(typ, "x::y")
+            assert state == "gebrochen"
+            assert hint == f"typ war {typ!r}"

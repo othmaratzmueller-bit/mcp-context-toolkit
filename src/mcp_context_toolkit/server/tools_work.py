@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from mcp_context_toolkit.host_adapters import discover_host_adapter
+from mcp_context_toolkit.work import RECALL_DEFAULT_EXCLUDED_KINDS, work_status_payload
 
 from .serializers import _work_summary
 
@@ -132,7 +133,7 @@ def register(mcp_tool, work_reloader, work_dir=None) -> None:
         found was 100% changelog, 0% decision)."""
         engine = work_reloader.current()
         hits = engine.recall(query, limit=limit,
-                             exclude_kinds=frozenset({"changelog"}))
+                             exclude_kinds=RECALL_DEFAULT_EXCLUDED_KINDS)
         return json.dumps(
             [_work_summary(w) for w in hits], indent=2, ensure_ascii=False
         )
@@ -156,9 +157,10 @@ def register(mcp_tool, work_reloader, work_dir=None) -> None:
         theme: str | None = None,
         status: str | None = None,
         kind: str | None = None,
+        category: str | None = None,
         include_archived: bool = False,
     ) -> str:
-        """List work items, optionally filtered by theme/status/kind.
+        """List work items, optionally filtered by theme/status/kind/category.
         Default view is the LIVE backlog — `done`/`dropped`/`superseded`
         are excluded unless `status` names one of them explicitly or
         `include_archived=True` is passed (closed items are never
@@ -166,15 +168,23 @@ def register(mcp_tool, work_reloader, work_dir=None) -> None:
         Each row includes an x/y rollup when the item has children —
         computed on the fly, never a maintained field.
 
-        Any call with NO theme/status/kind filter has no natural size
-        bound — even the plain default (live backlog, no `include_archived`)
-        measured at 1272 items serializes to ~91K tokens in one response,
-        and the fully-archived case (5124 items) to ~326K, larger than the
-        docs_recall incident (Etappe 7) that closed the same gap for the
-        recall-style tools. An unfiltered call returns a per-theme topic
-        overview instead of the raw dump, with a hint to narrow with
-        `theme=` — `include_archived` still controls whether the overview
-        itself counts the live backlog or the full archive.
+        `category` (bug/feature/debt/research) is the axis `theme` (domain)
+        and `kind` (granularity) don't cover: "what KIND of work is this" —
+        e.g. `list_work(category="bug")` for open problems across every
+        theme, without guessing from titles. `None` on an item means
+        genuinely uncategorized (not yet triaged), not a fifth value to
+        filter on.
+
+        Any call with NO theme/status/kind/category filter has no natural
+        size bound — even the plain default (live backlog, no
+        `include_archived`) measured at 1272 items serializes to ~91K
+        tokens in one response, and the fully-archived case (5124 items)
+        to ~326K, larger than the docs_recall incident (Etappe 7) that
+        closed the same gap for the recall-style tools. An unfiltered call
+        returns a per-theme topic overview instead of the raw dump, with a
+        hint to narrow with `theme=` — `include_archived` still controls
+        whether the overview itself counts the live backlog or the full
+        archive.
 
         A FILTERED call is not automatically safe either — a single value
         is not a reliable size bound on a large store: `status="done"`
@@ -184,13 +194,13 @@ def register(mcp_tool, work_reloader, work_dir=None) -> None:
         `_LIST_WORK_MAX_CHARS`); once exceeded, the result is capped with
         a `truncated`/`omitted` marker rather than growing without limit."""
         engine = work_reloader.current()
-        if theme is None and status is None and kind is None:
+        if theme is None and status is None and kind is None and category is None:
             return json.dumps(
                 _topic_overview(engine, include_archived=include_archived),
                 indent=2, ensure_ascii=False,
             )
         items = engine.list(
-            theme=theme, status=status, kind=kind,
+            theme=theme, status=status, kind=kind, category=category,
             include_archived=include_archived,
         )
         out = []
@@ -252,38 +262,4 @@ def register(mcp_tool, work_reloader, work_dir=None) -> None:
         of a wrong closeable_goals reading.
         """
         lint = work_reloader.current().lint()
-        closeable = len(lint["closeable_goals"])
-        dangling = len(lint["dangling_refs"])
-        no_evidence = len(lint["missing_evidence"])
-        half_closed = len(lint["unclosed_pairs"])
-        dropped = len(lint["load_errors"])
-        # Die zwei juengeren Pruefungen MUSSEN mitzaehlen. Sonst stand
-        # `reuse_not_checked: 130` neben der Empfehlung "kleine Reste" —
-        # genau die Zahl, fuer die der Store umgebaut wurde, fehlte in
-        # seinem eigenen Statusbericht (Reviewer-Fund 2026-08-04).
-        plan_tot = len(lint.get("plan_path_broken", {}))
-        ungeprueft = len(lint.get("reuse_not_checked", []))
-        total_issues = (closeable + dangling + no_evidence + half_closed
-                        + dropped + plan_tot + ungeprueft)
-        if dropped:
-            recommendation = "🚨 Records wurden beim Laden verworfen — Zahlen oben ggf. unvollstaendig"
-        elif closeable or dangling or plan_tot:
-            recommendation = "🧹 Aufraeumen faellig"
-        elif ungeprueft:
-            recommendation = (f"🔎 {ungeprueft} Records arbeiten ohne aufgezeichnete "
-                              f"Reuse-Suche (`reuse:` fehlt)")
-        elif total_issues:
-            recommendation = "💡 kleine Reste"
-        else:
-            recommendation = "✅ kein dringender Bedarf"
-        return json.dumps({
-            "total_items": lint["total"],
-            "closeable_goals": closeable,
-            "dangling_refs": dangling,
-            "missing_evidence": no_evidence,
-            "unclosed_pairs": half_closed,
-            "plan_path_broken": plan_tot,
-            "reuse_not_checked": ungeprueft,
-            "load_errors": dropped,
-            "recommendation": recommendation,
-        }, indent=2, ensure_ascii=False)
+        return json.dumps(work_status_payload(lint), indent=2, ensure_ascii=False)

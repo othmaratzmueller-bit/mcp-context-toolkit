@@ -3,7 +3,9 @@
 Same on-disk shape as rules (a directory of frontmatter files that grows over
 time), different query semantics: rules match by file-path glob, memories are
 recalled by relevance. Read-only — this engine never writes memory content.
-The host agent owns writes; a consolidation pass curates.
+The host agent owns writes; a consolidation pass curates. The one gated
+exception lives outside this class: ``recall_learning`` appends replay-proven
+bridge terms to a memory's ``tags``.
 
 Multi-tier from the start: load several roots, each tagged with a tier
 ("user" = cross-project, "project" = locked to one repo). Load order is
@@ -14,11 +16,15 @@ precedence — load the project tier first so it wins on name collision
 from __future__ import annotations
 
 import datetime as _dt
+import math
 import re
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from mcp_context_toolkit.usage import RecallEventLog
 
 from mcp_context_toolkit.core import LINK_RE as _LINK_RE
 from mcp_context_toolkit.core import (
@@ -43,10 +49,8 @@ _NON_MEMORY = {"MEMORY.md"}
 
 # Recall field weights — name hit counts most, body least. Used as BM25F field
 # multipliers on the term frequency (a hit in the name counts triple). Floats,
-# not ints: build_bm25_index's fields_by_key is typed as list[tuple[str,
-# float]] (shared across content types, some of which may want fractional
-# weights), and a dict value type is invariant in Pyright — ints wouldn't
-# widen at the call site even though the runtime arithmetic doesn't care.
+# because build_bm25_index types a field weight as float (shared across content
+# types, some of which want fractional weights).
 _W_NAME, _W_DESC, _W_TAGS, _W_BODY = 3.0, 2.0, 2.0, 1.0
 
 # BM25 parameters, prefix-matching cutoff and the snake_case tokenizer live in
@@ -67,6 +71,17 @@ _W_NAME, _W_DESC, _W_TAGS, _W_BODY = 3.0, 2.0, 2.0, 1.0
 _RECALL_FLOOR_RATIO = 0.25
 
 
+class MemoryContexts(BaseModel):
+    """Curated, additive context axes for a memory.
+
+    Context is data for a later, explicit recall lane; it is deliberately not
+    indexed as free text. Missing axes mean "no claim", never a mismatch.
+    """
+
+    themen: list[str] = Field(default_factory=list)
+    taetigkeiten: list[str] = Field(default_factory=list)
+
+
 class Memory(BaseModel):
     name: str
     description: str = ""
@@ -76,6 +91,13 @@ class Memory(BaseModel):
     links: list[str] = []           # [[name]] references found in the body
     members: list[str] = []         # for bundled packages: the slugs merged in
     tags: list[str] = []
+    learned_tags: list[str] = []    # written only by recall_learning; ranked like tags, kept
+                                    # apart so a re-bundle can rebuild tags from its members
+    bausteine: list[str] = []       # optional links to code Bausteine (site_kit.py::path_to_id()
+                                    # IDs) — NOT a _bm25_index() field on an atomic memory (see below);
+                                    # the bundler DOES carry it into a package's body text today, which
+                                    # body is BM25-indexed — harmless only while nothing calls the bundler live
+    kontexte: MemoryContexts = Field(default_factory=MemoryContexts)
     resource: str | None = None  # OKF: URI/path of the asset this concept describes
     timestamp: str | None = None  # OKF: ISO 8601 last meaningful change (display/tiebreak only)
     source_path: str | None = None
@@ -124,6 +146,18 @@ def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
     raw_type = _meta_get(meta, "type")
     tags = _meta_get(meta, "tags")
     tags = [str(t) for t in tags] if isinstance(tags, list) else []
+    learned_tags = _meta_get(meta, "learned_tags")
+    learned_tags = [str(t) for t in learned_tags] if isinstance(learned_tags, list) else []
+    bausteine = _meta_get(meta, "bausteine")
+    bausteine = [str(b) for b in bausteine] if isinstance(bausteine, list) else []
+    raw_kontexte = _meta_get(meta, "kontexte")
+    raw_kontexte = raw_kontexte if isinstance(raw_kontexte, dict) else {}
+    kontexte = MemoryContexts(
+        themen=[str(value) for value in raw_kontexte.get("themen", [])]
+        if isinstance(raw_kontexte.get("themen"), list) else [],
+        taetigkeiten=[str(value) for value in raw_kontexte.get("taetigkeiten", [])]
+        if isinstance(raw_kontexte.get("taetigkeiten"), list) else [],
+    )
     members = _meta_get(meta, "members")
     members = [str(x).strip() for x in members] if isinstance(members, list) else []
     # A frontmatter `tier:` (e.g. a bundled package's core/user/project) overrides
@@ -139,6 +173,9 @@ def _parse_memory(path: Path, tier: MemoryTier) -> Memory:
         links=sorted(set(_LINK_RE.findall(body))),
         members=members,
         tags=tags,
+        learned_tags=learned_tags,
+        bausteine=bausteine,
+        kontexte=kontexte,
         resource=_coerce_scalar(_meta_get(meta, "resource")),
         timestamp=_coerce_scalar(_meta_get(meta, "timestamp")),
         source_path=str(path),
@@ -220,6 +257,64 @@ class MemoryEngine:
     @property
     def memories(self) -> list[Memory]:
         return list(self._memories)
+
+    def with_memory(self, replacement: Memory) -> MemoryEngine:
+        """A shadow engine: same roots and records, the memory named
+        ``replacement.name`` swapped for ``replacement``. Nothing is written
+        and this engine's caches stay untouched — the shadow builds its own.
+        Recall learning replays a proposed tag change through the real ranking
+        path on this copy before a single byte reaches the file."""
+        if all(m.name != replacement.name for m in self._memories):
+            raise KeyError(replacement.name)
+        shadow = MemoryEngine()
+        shadow._roots = list(self._roots)
+        shadow._memories = [
+            replacement if m.name == replacement.name else m for m in self._memories
+        ]
+        return shadow
+
+    def context_candidates(
+        self,
+        *,
+        bausteine: list[str] | None = None,
+        themen: list[str] | None = None,
+        taetigkeiten: list[str] | None = None,
+    ) -> list[tuple[Memory, dict[str, list[str]]]]:
+        """Return curated context matches without changing text recall.
+
+        Each axis is an OR-set. A memory appears once even when it matches
+        several values; callers can therefore apply a per-axis maximum rather
+        than accidentally rewarding broad memories for their number of links.
+        """
+        wanted = {
+            "bausteine": {value.strip() for value in bausteine or [] if value.strip()},
+            "themen": {value.strip() for value in themen or [] if value.strip()},
+            "taetigkeiten": {value.strip() for value in taetigkeiten or [] if value.strip()},
+        }
+        if not any(wanted.values()):
+            return []
+        matches: list[tuple[Memory, dict[str, list[str]]]] = []
+        for memory in self._memories:
+            by_axis = {
+                "bausteine": sorted(wanted["bausteine"] & set(memory.bausteine)),
+                "themen": sorted(wanted["themen"] & set(memory.kontexte.themen)),
+                "taetigkeiten": sorted(wanted["taetigkeiten"] & set(memory.kontexte.taetigkeiten)),
+            }
+            present = {axis: values for axis, values in by_axis.items() if values}
+            if present:
+                matches.append((memory, present))
+        # A concrete, observed module is more specific than a broad activity
+        # label.  Axes remain OR alternatives for membership, but their
+        # deterministic order must not let alphabetically early activity-only
+        # memories consume the bounded two-slot context lane first.
+        return sorted(
+            matches,
+            key=lambda item: (
+                "bausteine" not in item[1],
+                "themen" not in item[1],
+                item[0].name,
+            ),
+        )
 
     def _member_owners(self) -> dict[str, str]:
         """Normalized member slug -> owning package name (built once, cached;
@@ -343,6 +438,37 @@ class MemoryEngine:
         silently truncate the candidate pool BEFORE the exclude filter runs,
         under-filling the response with no error.
         """
+        kept, _floor, _all_scored = self._recall_scored(
+            query, limit, boost, backlink_boost, max_limit=max_limit)
+        return [m for _, _, m in kept]
+
+    def _recall_scored(
+        self, query: str, limit: int = 8,
+        boost: dict[str, float] | None = None,
+        backlink_boost: dict[str, float] | None = None,
+        *, max_limit: int = MAX_RECALL_LIMIT,
+    ) -> tuple[list[tuple[float, float, Memory]], float, list[tuple[float, float, Memory]]]:
+        """``recall()``'s ranking, with the intermediate steps exposed for
+        observability (Etappe 0 of the "Sumpf+Baum" memory concept,
+        `memory_sumpf_und_baum_lebensechtes_recall.md` — an append-only
+        per-session event log that records what was OFFERED and at what
+        score, without changing the ranking itself). Never used for a
+        ranking DECISION outside this class — ``recall()`` stays the only
+        public entry point callers rank by.
+
+        Returns ``(kept, floor, all_scored)``:
+
+        - ``kept``: ``(score, heat, memory)`` tuples, post-floor, post-limit
+          — exactly what ``recall()`` would return, just not yet stripped
+          to bare ``Memory`` objects.
+        - ``floor``: the relevance-floor cutoff value used (0.0 if no
+          candidate scored above 0, i.e. nothing to floor).
+        - ``all_scored``: the full ``(score, heat, memory)`` list, sorted,
+          BEFORE the floor cut and BEFORE the limit slice — the honest
+          denominator a caller needs to log "how many candidates existed on
+          each side of the floor," which cannot be reconstructed from
+          ``kept`` alone once ``limit`` has truncated it.
+        """
         boost = boost or {}
         backlink_boost = backlink_boost or {}
 
@@ -354,7 +480,7 @@ class MemoryEngine:
         # the relevance floor layer on top of the base score.
         bases = bm25_scores(self._bm25_index(), query)
         if not bases:
-            return []
+            return [], 0.0, []
 
         by_name = {m.name: m for m in self._memories}
         scored: list[tuple[float, float, Memory]] = []
@@ -368,15 +494,17 @@ class MemoryEngine:
                 scored.append((base * (1.0 + heat) + bl_boost, heat, by_name[name]))
         # final score desc, then warmer-on-tie, then name for determinism
         scored.sort(key=lambda s: (-s[0], -s[1], s[2].name))
+        all_scored = list(scored)
         # Relevance floor: drop the tail that scores below _RECALL_FLOOR_RATIO of
         # the best hit. Done BEFORE the limit slice (and the caller's exclude),
         # anchored to the absolute top — so the per-prompt hook's exclude-backfill
         # can never walk past it into weak near-misses. See _RECALL_FLOOR_RATIO.
+        floor = 0.0
         if scored:
             floor = scored[0][0] * _RECALL_FLOOR_RATIO
             scored = [s for s in scored if s[0] >= floor]
         limit = clamp_limit(limit, maximum=max_limit)
-        return [m for _, _, m in scored[:limit]]
+        return scored[:limit], floor, all_scored
 
     def _bm25_index(self) -> dict:
         """Inverted index for BM25F scoring (built once, cached; invalidated on
@@ -384,10 +512,11 @@ class MemoryEngine:
 
         Shape::
 
-            {"postings": {token: {memory_name: weighted_tf}},
-             "tokens":   [sorted vocabulary],
-             "lengths":  {memory_name: weighted_length},
-             "avg_len":  float}
+            {"postings":      {token: {memory_name: weighted_tf}},
+             "flat_postings": {token: {memory_name: weighted_tf}},  # tags
+             "tokens":        [sorted vocabulary],
+             "lengths":       {memory_name: weighted_length},
+             "avg_len":       float}
 
         ``weighted_tf`` already carries the field weights (a term in the name
         counts _W_NAME times), which is what makes this BM25F rather than plain
@@ -395,14 +524,18 @@ class MemoryEngine:
         moves into the term frequency instead of being the whole score.
 
         Index construction itself is core.build_bm25_index — this method's job
-        is only to say WHICH fields feed it and at what weight.
+        is only to say WHICH fields feed it and at what weight. ``tags`` is
+        the one field that is NOT length-normalised (BM25F per-field b = 0):
+        it is a short curated list naming what the record is about — the
+        signal recall learning writes — and in a large bundled package the
+        body length otherwise dilutes it to nothing.
         """
         if self._bm25_cache is None:
-            fields_by_key: dict[str, list[tuple[str, float]]] = {
+            fields_by_key: dict[str, list[tuple[str, float] | tuple[str, float, bool]]] = {
                 m.name: [
                     (m.name, _W_NAME),
                     (m.description, _W_DESC),
-                    (" ".join(m.tags), _W_TAGS),
+                    (" ".join([*m.tags, *m.learned_tags]), _W_TAGS, False),
                     (m.body, _W_BODY),
                 ]
                 for m in self._memories
@@ -481,9 +614,173 @@ class MemoryEngine:
 
         return {
             "total": len(self._memories),
+            # Key set from the MEMORIES themselves, not from `self._roots` —
+            # a caller that loads a single root under `tier="project"` (the
+            # backend KPI wrapper does) still has memories whose OWN `.tier`
+            # differs (e.g. a `core`-tagged package folded into that root),
+            # and the roots-based key set silently dropped those from the
+            # breakdown while `total` still counted them (W8-Reviewer-Fund,
+            # mct-Context-Studio-Vollausbau Etappe B: `total: 223` next to
+            # `tiers: {project: 198}` on the new Status tile — 25 memories
+            # invisible in their own breakdown).
             "tiers": {t: sum(1 for m in self._memories if m.tier == t)
-                      for t in {tier for _, tier in self._roots}},
+                      for t in {m.tier for m in self._memories}},
             "broken_links": broken,
             "orphans": sorted(set(orphans)),
             "stale_pointers": sorted(set(stale)),
         }
+
+
+def memory_recall_hits(
+    engine: MemoryEngine, query: str, limit: int = 8, usage=None,
+    event_log: RecallEventLog | None = None,
+    bausteine: list[str] | None = None,
+    themen: list[str] | None = None,
+    taetigkeiten: list[str] | None = None,
+    exclude: set[str] | None = None,
+    boosts: dict[str, float] | None = None,
+    breadcrumbs: list[Memory] | None = None,
+) -> list[Memory]:
+    """The real `recall` MCP tool's ranking + side effects, as a plain
+    function — pulled out of `server/tools_memory.py`'s `recall()` closure
+    (mct-Context-Studio-Vollausbau Etappe E) so a second consumer (a
+    BRIAREOS chat tool letting an admin ask the store questions) gets the
+    IDENTICAL ranking instead of a reimplementation that silently drifts —
+    the S8 lesson from Etappe A generalizes here too: `recall()` is not
+    just `engine.recall(query, limit)`, it also computes a backlink boost
+    from the memory graph and records frecency usage as a side effect. A
+    caller that skipped this and called `engine.recall()` directly would
+    rank hits differently (no backlink boost) and never warm up a memory's
+    "hot" score, silently diverging from what the MCP tool's own callers
+    see for the exact same query.
+
+    Backlink boost: log-dampened, ``log1p(inbound_links) * 0.1`` — a memory
+    with 10 inbound links gets ~+0.24 to its score, so structurally
+    important knowledge surfaces without explicit usage while the boost
+    never dominates the base relevance. `usage` (frecency sidecar) is
+    optional — `None` skips both the boost lookup and the recall record.
+
+    `event_log` (Etappe 0, optional — `None` logs nothing, no behaviour
+    change) records an `offered` event after the keyword and bounded-context
+    lanes have been combined. This keeps source provenance and the context
+    candidate denominator available for later evaluation without changing
+    this function's return type or keyword ranking at all.
+
+    `breadcrumbs` (optional out-parameter, `None` = collect nothing) — pass
+    a list and this function `extend()`s it with the memories that scored
+    above the floor but were suppressed by `exclude` (already injected
+    earlier in the session), in score order. Unbounded and never cleared by
+    this call: a caller reusing the same list across several invocations
+    accumulates across all of them, and the exclude/breadcrumbs sets are
+    disjoint by construction (`hits` keeps `not in excluded`, breadcrumbs
+    keeps `in excluded`) so nothing here can double-count against `hits`.
+    Trimming to a caller-facing size (e.g. the CLI's top-3) is the caller's
+    job, not this function's."""
+    effective_limit = clamp_limit(limit)
+    excluded = exclude or set()
+    ranking_boosts = usage.boosts() if usage is not None else (boosts or {})
+    # ONE engine snapshot for both the graph and the ranking: calling a
+    # reloader's current() twice could straddle a reload, scoring hits from
+    # one store against link counts from another — not a concern here since
+    # the caller already hands us a single `engine`, but the invariant is
+    # preserved by construction (one `engine` object, used for both below).
+    backlink_boosts: dict[str, float] = {}
+    inbound: dict[str, int] = {}
+    for _src, tgt in engine.edges():
+        inbound[tgt] = inbound.get(tgt, 0) + 1
+    for name, count in inbound.items():
+        backlink_boosts[name] = math.log1p(count) * 0.1
+    keyword_scores: dict[str, float] = {}
+    floor_candidates_above = 0
+    floor_candidates_below = 0
+    # The prompt hook excludes an ever-growing injected set.  Fetch exactly
+    # enough extra ranked candidates to fill its requested output *after*
+    # filtering; the public response remains clamped to ``effective_limit``.
+    # This replaces the hook's former private scorer and keeps that contract
+    # in the one shared recall path.
+    candidate_limit = effective_limit + len(excluded)
+    if event_log is not None or excluded:
+        kept, floor, all_scored = engine._recall_scored(
+            query, limit=candidate_limit, boost=ranking_boosts,
+            backlink_boost=backlink_boosts, max_limit=candidate_limit)
+        hits = [m for _, _, m in kept if m.name not in excluded][:effective_limit]
+        if breadcrumbs is not None:
+            # A suppressed but still relevant hit is not a new injection.  It
+            # is a compact reference the caller may render separately, so a
+            # long session does not turn the exclude set into silent amnesia.
+            breadcrumbs.extend(
+                memory for _score, _heat, memory in kept
+                if memory.name in excluded
+            )
+        above = sum(1 for s in all_scored if s[0] >= floor)
+        keyword_scores = {
+            memory.name: score for score, _hint, memory in kept
+            if memory.name not in excluded
+        }
+        floor_candidates_above = above
+        floor_candidates_below = len(all_scored) - above
+    else:
+        hits = engine.recall(
+            query, limit=effective_limit, boost=ranking_boosts, backlink_boost=backlink_boosts,
+        )
+    # Context is a separate, deliberately narrow candidate lane.  It can fill
+    # an otherwise unused part of the response but never displaces a keyword
+    # hit, and absent context is byte-for-byte the established recall path.
+    context_matches = engine.context_candidates(
+        bausteine=bausteine, themen=themen, taetigkeiten=taetigkeiten,
+    )
+    # An observed module is direct evidence.  When it has curated matches,
+    # broad activity/topic alternatives remain visible to explainability but
+    # may not consume a bounded delivery slot ahead of (or beside) that exact
+    # code context.  If no module match exists, the other OR axes retain their
+    # established fallback role.
+    delivered_context_matches = context_matches
+    if bausteine:
+        baustein_matches = [
+            item for item in context_matches if "bausteine" in item[1]
+        ]
+        if baustein_matches:
+            delivered_context_matches = baustein_matches
+    if delivered_context_matches and len(hits) < effective_limit:
+        context_limit = min(2, effective_limit - len(hits))
+        known = {memory.name for memory in hits}
+        additions = [
+            memory for memory, _axes in delivered_context_matches
+            if memory.name not in known and memory.name not in excluded
+        ][:context_limit]
+        hits.extend(additions)
+    if event_log is not None:
+        # Event scores describe only memories actually offered to the caller.
+        # Exclude-overfetch and the output limit may both leave legitimate
+        # keyword candidates outside that final set.
+        keyword_scores = {
+            name: score for name, score in keyword_scores.items()
+            if name in {memory.name for memory in hits}
+        }
+        requested_context = {
+            axis: values for axis, values in {
+                "bausteine": bausteine or [],
+                "themen": themen or [],
+                "taetigkeiten": taetigkeiten or [],
+            }.items() if values
+        }
+        matched_context = {memory.name for memory, _axes in context_matches}
+        sources = {
+            memory.name: (
+                (["keyword"] if memory.name in keyword_scores else [])
+                + (["context"] if memory.name in matched_context else [])
+            )
+            for memory in hits
+        }
+        event_log.log_offered(
+            query, [memory.name for memory in hits], keyword_scores,
+            floor_candidates_above=floor_candidates_above,
+            floor_candidates_below=floor_candidates_below,
+            sources=sources,
+            context_query=requested_context,
+            context_candidates_total=len(context_matches),
+            excluded=len(excluded),
+        )
+    if usage is not None:
+        usage.record_recall([m.name for m in hits])
+    return hits

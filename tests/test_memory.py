@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import multiprocessing
 from pathlib import Path
@@ -7,8 +8,16 @@ import pytest
 
 from mcp_context_toolkit import cli
 from mcp_context_toolkit.core import parse_frontmatter
-from mcp_context_toolkit.memory import _W_NAME, MemoryEngine
-from mcp_context_toolkit.usage import UsageStore
+from mcp_context_toolkit.memory import _W_NAME, MemoryEngine, memory_recall_hits
+from mcp_context_toolkit.usage import (
+    LockUnavailable,
+    RecallEventLog,
+    UsageStore,
+    exclusive_file_lock,
+    resolve_session_id,
+)
+
+_GOLDEN_RECALL_CORPUS = Path(__file__).parent / "fixtures" / "memory_recall_golden.json"
 
 
 def _hammer_opens(path_str: str, n: int) -> None:
@@ -42,6 +51,42 @@ class TestParseFrontmatter:
 
 
 class TestMemoryEngine:
+    def test_loads_curated_context_axes_without_indexing_them(self, tmp_path: Path):
+        _write(
+            tmp_path, "context.md",
+            "name: review_note\nkontexte:\n  themen: [memory_recall]\n  taetigkeiten: [review]",
+            "ordinary prose without the context words",
+        )
+        e = MemoryEngine.from_directory(tmp_path)
+        memory = e.get("review_note")
+        assert memory is not None
+        assert memory.kontexte.model_dump() == {
+            "themen": ["memory_recall"], "taetigkeiten": ["review"],
+        }
+        assert e.recall("memory recall") == []
+
+    def test_context_candidates_report_matching_axes_once(self, tmp_path: Path):
+        _write(
+            tmp_path, "a.md",
+            "name: a\nbausteine: [py:memory.engine]\nkontexte:\n  themen: [memory_recall]\n  taetigkeiten: [review, test]",
+            "body",
+        )
+        _write(
+            tmp_path, "b.md",
+            "name: b\nkontexte:\n  themen: [git_workflow]\n  taetigkeiten: [review]",
+            "body",
+        )
+        e = MemoryEngine.from_directory(tmp_path)
+        found = e.context_candidates(
+            bausteine=["py:memory.engine"],
+            themen=["memory_recall"],
+            taetigkeiten=["review"],
+        )
+        assert [(m.name, axes) for m, axes in found] == [
+            ("a", {"bausteine": ["py:memory.engine"], "themen": ["memory_recall"], "taetigkeiten": ["review"]}),
+            ("b", {"taetigkeiten": ["review"]}),
+        ]
+
     def test_load_skips_memory_md(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a\ntype: feedback", "alpha content")
         (tmp_path / "MEMORY.md").write_text("# index\n- [a](a.md)\n", encoding="utf-8")
@@ -419,6 +464,207 @@ class TestUsageStore:
         assert u2.report()[0]["name"] == "x"
 
 
+class TestRecallEventLog:
+    """Etappe 0 ("Messen") of the "Sumpf+Baum" memory concept — pure
+    observation, no ranking behaviour under test here (that's covered by
+    TestRecallBoost below and MemoryEngine.recall's own tests)."""
+
+    def test_offered_event_has_scores_and_floor_counts(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        log.log_offered("query text", ["a", "b"], {"a": 3.0, "b": 1.5},
+                         floor_candidates_above=2, floor_candidates_below=1)
+        lines = log.log_file.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["session_id"] == "sess-1"
+        assert entry["event"] == "offered"
+        assert entry["query"] == "query text"
+        assert entry["names"] == ["a", "b"]
+        assert entry["scores"] == {"a": 3.0, "b": 1.5}
+        assert entry["floor_candidates_above"] == 2
+        assert entry["floor_candidates_below"] == 1
+        assert entry["excluded"] == 0                # default — no caller-side exclude set
+        assert entry["turn"] == 1
+        assert "ts" in entry
+        assert entry["v"] == RecallEventLog.SCHEMA_VERSION
+
+    def test_offered_event_records_excluded_count_when_given(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        log.log_offered("q", ["a"], {"a": 1.0}, floor_candidates_above=3,
+                         floor_candidates_below=0, excluded=2)
+        entry = json.loads(log.log_file.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["excluded"] == 2
+
+    def test_turn_counter_increments_across_offered_calls(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        log.log_offered("q1", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        log.log_offered("q2", ["b"], {"b": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        turns = [json.loads(line)["turn"]
+                 for line in log.log_file.read_text(encoding="utf-8").splitlines()]
+        assert turns == [1, 2]
+
+    def test_log_offered_returns_the_turn_it_just_wrote(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        first = log.log_offered("q1", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        second = log.log_offered("q2", ["b"], {"b": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        assert (first, second) == (1, 2)
+
+    def test_current_turn_reflects_the_last_offered_call(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        assert log.current_turn() == 0                # nothing offered yet
+        log.log_offered("q", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        assert log.current_turn() == 1
+        log.log_offered("q2", ["b"], {"b": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        assert log.current_turn() == 2
+
+    def test_haiku_compare_event_carries_all_fields_and_the_given_turn(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        turn = log.log_offered("q", ["a", "b"], {"a": 2.0, "b": 1.0},
+                                floor_candidates_above=2, floor_candidates_below=0)
+        log.log_haiku_compare("q", ["a", "b"], ["a", "c"], duration_ms=1234, turn=turn)
+        entries = [json.loads(line) for line in log.log_file.read_text(encoding="utf-8").splitlines()]
+        entry = entries[1]
+        assert entry["event"] == "haiku_compare"
+        assert entry["turn"] == turn
+        assert entry["query"] == "q"
+        assert entry["mechanical_names"] == ["a", "b"]
+        assert entry["haiku_names"] == ["a", "c"]
+        assert entry["duration_ms"] == 1234
+
+    def test_haiku_compare_does_not_advance_the_offered_turn_counter(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        first_turn = log.log_offered("q", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        log.log_haiku_compare("q", ["a"], ["a"], duration_ms=1, turn=first_turn)
+        log.log_haiku_compare("q", ["a"], ["a"], duration_ms=1, turn=first_turn)
+        next_offered_turn = log.log_offered("q2", ["b"], {"b": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        assert next_offered_turn == 2                 # two haiku_compare events in between did not count
+
+    def test_opened_belongs_to_the_current_turn_not_a_new_one(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        log.log_offered("q", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        log.log_opened("a")
+        entries = [json.loads(line) for line in log.log_file.read_text(encoding="utf-8").splitlines()]
+        assert entries[0]["turn"] == 1               # the offered event
+        assert entries[1]["event"] == "opened"
+        assert entries[1]["names"] == ["a"]
+        assert entries[1]["turn"] == 1                # same turn, not turn 2
+
+    def test_opened_before_any_offered_is_turn_zero(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        log.log_opened("work_style")
+        entry = json.loads(log.log_file.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["turn"] == 0
+
+    def test_user_tier_event_is_a_distinct_event_type_at_turn_zero(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        log.log_user_tier_event(["work_style"])
+        entry = json.loads(log.log_file.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["event"] == "user_tier_event"
+        assert entry["turn"] == 0
+        assert entry["names"] == ["work_style"]
+        # Does NOT count toward the offered-turn counter.
+        log.log_offered("q", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        offered = json.loads(log.log_file.read_text(encoding="utf-8").splitlines()[1])
+        assert offered["turn"] == 1
+
+    def test_sessions_write_to_separate_files_no_cross_contamination(self, tmp_path: Path):
+        log_a = RecallEventLog(tmp_path, "sess-a")
+        log_b = RecallEventLog(tmp_path, "sess-b")
+        log_a.log_offered("qa", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        log_b.log_offered("qb", ["b"], {"b": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        assert log_a.log_file != log_b.log_file
+        assert json.loads(log_a.log_file.read_text().splitlines()[0])["session_id"] == "sess-a"
+        assert json.loads(log_b.log_file.read_text().splitlines()[0])["session_id"] == "sess-b"
+
+    def test_for_memory_dir_derives_sibling_session_state_directory(self, tmp_path: Path):
+        memory_dir = tmp_path / ".claude" / "memory"
+        memory_dir.mkdir(parents=True)
+        log = RecallEventLog.for_memory_dir(memory_dir, session_id="sess-x")
+        assert log.session_dir == tmp_path / ".claude" / ".session_state"
+        assert log.log_file.name == "sess-x.recall_events.jsonl"
+
+    def test_corrupt_line_does_not_break_the_turn_counter(self, tmp_path: Path):
+        log = RecallEventLog(tmp_path, "sess-1")
+        log.log_offered("q1", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        with open(log.log_file, "a", encoding="utf-8") as f:
+            f.write("{ not json\n")
+        log.log_offered("q2", ["b"], {"b": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        lines = log.log_file.read_text(encoding="utf-8").splitlines()
+        last = json.loads(lines[-1])
+        assert last["turn"] == 2                     # the corrupt line was skipped, not counted or fatal
+
+    def test_write_failure_is_fail_soft(self, tmp_path: Path):
+        # session_dir points AT a file, not a directory — mkdir() must raise,
+        # and log_offered() must swallow it rather than propagate (observation
+        # must never break the actual recall response it is piggy-backing on).
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x", encoding="utf-8")
+        log = RecallEventLog(blocker / "nested", "sess-1")
+        log.log_offered("q", ["a"], {"a": 1.0}, floor_candidates_above=1, floor_candidates_below=0)
+        assert not log.log_file.exists()
+
+    def test_resolve_session_id_prefers_claude_over_codex(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-id")
+        monkeypatch.setenv("CODEX_SESSION_ID", "codex-id")
+        assert resolve_session_id() == "claude-id"
+
+    def test_resolve_session_id_falls_back_to_codex(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("CODEX_SESSION_ID", "codex-id")
+        assert resolve_session_id() == "codex-id"
+
+    def test_resolve_session_id_falls_back_to_unknown(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
+        assert resolve_session_id() == "unknown"
+
+
+class TestMemoryRecallHitsEventLog:
+    """`memory_recall_hits(..., event_log=...)` — the MCP `recall` tool's
+    wrapper (server/tools_memory.py:recall). `None` (the default) must not
+    change behaviour at all; passing a log must not change the RETURNED
+    hits either, only add a side-effect log entry."""
+
+    def test_none_event_log_is_unchanged_behaviour(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback", "shared topic word")
+        e = MemoryEngine.from_directory(tmp_path)
+        assert [m.name for m in memory_recall_hits(e, "shared topic")] == \
+               [m.name for m in memory_recall_hits(e, "shared topic", event_log=None)]
+
+    def test_passing_event_log_logs_offered_without_changing_hits(self, tmp_path: Path):
+        _write(tmp_path, "a.md", "name: a\ntype: feedback", "shared topic word")
+        e = MemoryEngine.from_directory(tmp_path)
+        log = RecallEventLog(tmp_path, "sess-1")
+        without_log = [m.name for m in memory_recall_hits(e, "shared topic")]
+        with_log = [m.name for m in memory_recall_hits(e, "shared topic", event_log=log)]
+        assert with_log == without_log
+        entry = json.loads(log.log_file.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["event"] == "offered"
+        assert entry["names"] == with_log
+        assert set(entry["scores"]) == set(with_log)
+
+    def test_context_only_hit_is_logged_with_its_source_and_denominator(self, tmp_path: Path):
+        _write(
+            tmp_path, "context.md",
+            "name: context_note\nkontexte:\n  themen: [memory_recall]",
+            "ordinary prose",
+        )
+        engine = MemoryEngine.from_directory(tmp_path)
+        log = RecallEventLog(tmp_path, "sess-context")
+
+        hits = memory_recall_hits(
+            engine, "unrelated query", event_log=log, themen=["memory_recall"],
+        )
+
+        assert [memory.name for memory in hits] == ["context_note"]
+        entry = json.loads(log.log_file.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["names"] == ["context_note"]
+        assert entry["scores"] == {}
+        assert entry["sources"] == {"context_note": ["context"]}
+        assert entry["context_query"] == {"themen": ["memory_recall"]}
+        assert entry["context_candidates_total"] == 1
+
+
 class TestRecallBoost:
     def test_no_boost_is_backward_compatible(self, tmp_path: Path):
         _write(tmp_path, "a.md", "name: a\ntype: feedback", "x y")
@@ -460,18 +706,37 @@ class TestRecallFloor:
     def test_exclude_backfill_stops_at_floor(self, tmp_path: Path, capsys, monkeypatch):
         # The user's exact scenario: exclude the strong hit; the hook must NOT
         # backfill the weak near-miss — it goes silent instead.
+        # A realistic `.claude/memory` shape (not bare tmp_path) — RecallEventLog
+        # derives its `.session_state` sibling from the memory dir's PARENT, so a
+        # flat memory_dir would leak its event log past tmp_path's own sandbox.
         monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
-        _write(tmp_path, "s.md", "name: alpha_beta_topic\ntier: project", "alpha beta topic")
-        _write(tmp_path, "w.md", "name: gamma_note\ntier: project", "unrelated alpha mention")
-        cli._cmd_memory_recall(tmp_path, "alpha beta topic", 5, set())
+        memory_dir = tmp_path / ".claude" / "memory"
+        _write(memory_dir, "s.md", "name: alpha_beta_topic\ntier: project", "alpha beta topic")
+        _write(memory_dir, "w.md", "name: gamma_note\ntier: project", "unrelated alpha mention")
+        cli._cmd_memory_recall(memory_dir, "alpha beta topic", 5, set())
         out = json.loads(capsys.readouterr().out)
         assert out["names"] == ["alpha_beta_topic"]            # weak floored from the start
-        cli._cmd_memory_recall(tmp_path, "alpha beta topic", 5, {"alpha_beta_topic"})
+        cli._cmd_memory_recall(memory_dir, "alpha beta topic", 5, {"alpha_beta_topic"})
         out = json.loads(capsys.readouterr().out)
-        assert out["names"] == [] and out["markdown"] is None  # no backfill into the weak tail
+        assert out["names"] == []
+        assert out["breadcrumbs"] == ["alpha_beta_topic"]
+        assert "Already seen in this session" in out["markdown"]
 
 
 class TestUsageStoreConcurrency:
+    def test_required_lock_fails_closed_without_fcntl(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("mcp_context_toolkit.usage.fcntl", None)
+        entered = False
+        with (pytest.raises(LockUnavailable),
+              exclusive_file_lock(tmp_path / "required.lock", required=True)):
+            entered = True
+        assert not entered
+
+    def test_optional_lock_remains_best_effort_without_fcntl(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("mcp_context_toolkit.usage.fcntl", None)
+        with exclusive_file_lock(tmp_path / "optional.lock"):
+            assert True
+
     def test_parallel_opens_not_lost(self, tmp_path: Path):
         # Four processes hammer the same _usage.json. With the fcntl lock the
         # read-modify-write cycles serialize, so every hit is counted; without
@@ -498,14 +763,24 @@ class TestCliMemoryCommands:
     the session-start user-memory, --recall + --exclude for the per-prompt hook)."""
 
     def test_memory_tier_dump_with_bodies(self, tmp_path: Path, capsys, monkeypatch):
+        # Nested `.claude/memory` shape — see test_exclude_backfill_stops_at_floor
+        # for why a bare tmp_path would leak the event log past the sandbox.
         monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
-        _write(tmp_path, "u.md", "name: u_fact\ntype: user\ntier: user", "user body line")
-        _write(tmp_path, "p.md", "name: p_topic\ntype: project\ntier: project", "alpha beta")
-        rc = cli._cmd_memory_tier(tmp_path, "user", True)
+        memory_dir = tmp_path / ".claude" / "memory"
+        _write(memory_dir, "u.md", "name: u_fact\ntype: user\ntier: user", "user body line")
+        _write(memory_dir, "p.md", "name: p_topic\ntype: project\ntier: project", "alpha beta")
+        rc = cli._cmd_memory_tier(memory_dir, "user", True)
         out = json.loads(capsys.readouterr().out)
         assert rc == 0
         assert out["names"] == ["u_fact"] and out["count"] == 1   # only the user tier
         assert "user body line" in out["markdown"]                # --with-bodies
+        # a `user_tier_event` landed in the session_state sibling dir, not "offered"
+        state_dir = tmp_path / ".claude" / ".session_state"
+        log_files = list(state_dir.glob("*.recall_events.jsonl"))
+        assert len(log_files) == 1
+        entry = json.loads(log_files[0].read_text(encoding="utf-8").splitlines()[0])
+        assert entry["event"] == "user_tier_event"
+        assert entry["names"] == ["u_fact"]
 
     def test_method_block_prints_full_arbeitsweise(self, capsys):
         # The always-on method block ships as a package resource; the CLI dumps it
@@ -518,20 +793,82 @@ class TestCliMemoryCommands:
 
     def test_memory_recall_and_exclude_dedup(self, tmp_path: Path, capsys, monkeypatch):
         monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
-        _write(tmp_path, "a.md", "name: alpha_pkg\ntier: project", "shared topic keyword")
-        _write(tmp_path, "b.md", "name: beta_pkg\ntier: project", "shared topic keyword")
-        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, set())
+        memory_dir = tmp_path / ".claude" / "memory"
+        _write(memory_dir, "a.md", "name: alpha_pkg\ntier: project", "shared topic keyword")
+        _write(memory_dir, "b.md", "name: beta_pkg\ntier: project", "shared topic keyword")
+        cli._cmd_memory_recall(memory_dir, "shared topic keyword", 5, set())
         out = json.loads(capsys.readouterr().out)
         assert set(out["names"]) == {"alpha_pkg", "beta_pkg"}
         assert "Auto-recalled" in out["markdown"]
         # exclude one -> only the other survives (dedup), backfill within limit
-        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, {"alpha_pkg"})
+        cli._cmd_memory_recall(memory_dir, "shared topic keyword", 5, {"alpha_pkg"})
         out = json.loads(capsys.readouterr().out)
         assert out["names"] == ["beta_pkg"]
-        # all excluded -> empty bundle, markdown None (hook stays silent)
-        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 5, {"alpha_pkg", "beta_pkg"})
+        # all excluded -> empty `names`, but NOT silent: the two suppressed hits
+        # surface as breadcrumbs instead of vanishing (that's the whole point).
+        cli._cmd_memory_recall(memory_dir, "shared topic keyword", 5, {"alpha_pkg", "beta_pkg"})
         out = json.loads(capsys.readouterr().out)
-        assert out["names"] == [] and out["markdown"] is None
+        assert out["names"] == []
+        assert out["breadcrumbs"] == ["alpha_pkg", "beta_pkg"]
+        assert "Already seen in this session" in out["markdown"]
+        # three `offered` events landed in the session_state sibling dir, turn
+        # 1..3, the third with an EMPTY names list (exclude ate everything —
+        # still logged, so an evaluation pass can see the hits ran dry, even
+        # though the hook itself stays informative via breadcrumbs).
+        state_dir = tmp_path / ".claude" / ".session_state"
+        log_files = list(state_dir.glob("*.recall_events.jsonl"))
+        assert len(log_files) == 1
+        entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
+        assert [e["event"] for e in entries] == ["offered", "offered", "offered"]
+        assert [e["turn"] for e in entries] == [1, 2, 3]
+        assert set(entries[0]["names"]) == {"alpha_pkg", "beta_pkg"}
+        assert entries[1]["names"] == ["beta_pkg"]
+        assert entries[2]["names"] == []
+        # `excluded` disambiguates the third call's empty `names`: NOT "the
+        # floor rejected everything" but "both floor-survivors were already
+        # injected earlier this session" (W8-Reviewer-Fund).
+        assert [e["excluded"] for e in entries] == [0, 1, 2]
+
+    def test_memory_recall_breadcrumbs_capped_at_three(self, tmp_path: Path, capsys, monkeypatch):
+        # Four suppressed hits, cap is 3 — pins the CLI-level truncation itself
+        # (not just memory_recall_hits' unbounded out-parameter), in both the
+        # JSON field and the rendered markdown section.
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        memory_dir = tmp_path / ".claude" / "memory"
+        names = ["pkg_a", "pkg_b", "pkg_c", "pkg_d"]
+        for n in names:
+            _write(memory_dir, f"{n}.md", f"name: {n}\ntier: project", "shared cap keyword")
+        cli._cmd_memory_recall(memory_dir, "shared cap keyword", 10, set())
+        capsys.readouterr()
+        cli._cmd_memory_recall(memory_dir, "shared cap keyword", 10, set(names))
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == []
+        assert len(out["breadcrumbs"]) == 3
+        assert set(out["breadcrumbs"]) <= set(names)
+        assert out["markdown"].count("reload with `get_memory(") == 3
+
+    def test_memory_recall_accepts_context_axes_on_the_shared_path(
+        self, tmp_path: Path, capsys, monkeypatch,
+    ):
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        memory_dir = tmp_path / ".claude" / "memory"
+        _write(
+            memory_dir, "provider.md",
+            "name: provider_note\ntier: project\nbausteine: [py:llm.providers.google_langdock]",
+            "curated provider implementation note",
+        )
+        cli._cmd_memory_recall(
+            memory_dir, "unrelated words", 6, set(),
+            bausteine=["py:llm.providers.google_langdock"],
+            taetigkeiten=["implement"],
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["names"] == ["provider_note"]
+        event = json.loads(next((tmp_path / ".claude" / ".session_state").glob("*.jsonl")).read_text().splitlines()[0])
+        assert event["sources"] == {"provider_note": ["context"]}
+        assert event["context_query"] == {
+            "bausteine": ["py:llm.providers.google_langdock"], "taetigkeiten": ["implement"],
+        }
 
     def test_large_exclude_set_does_not_starve_the_result_below_limit(
         self, tmp_path: Path, capsys, monkeypatch,
@@ -545,14 +882,86 @@ class TestCliMemoryCommands:
         # candidate pool to exactly those 50 and filter every one of them
         # out — an empty result despite 10 real, unexcluded candidates.
         monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        memory_dir = tmp_path / ".claude" / "memory"
         for i in range(60):
-            _write(tmp_path, f"m{i:02d}.md", f"name: m{i:02d}\ntier: project",
+            _write(memory_dir, f"m{i:02d}.md", f"name: m{i:02d}\ntier: project",
                    "shared topic keyword")
         excluded = {f"m{i:02d}" for i in range(50)}
-        cli._cmd_memory_recall(tmp_path, "shared topic keyword", 6, excluded)
+        cli._cmd_memory_recall(memory_dir, "shared topic keyword", 6, excluded)
         out = json.loads(capsys.readouterr().out)
         assert out["count"] == 6
         assert set(out["names"]) == {f"m{i:02d}" for i in range(50, 56)}
+
+    def test_memory_recall_reports_the_turn_it_just_logged(
+        self, tmp_path: Path, capsys, monkeypatch,
+    ):
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        memory_dir = tmp_path / ".claude" / "memory"
+        _write(memory_dir, "a.md", "name: alpha_pkg\ntier: project", "shared topic keyword")
+        cli._cmd_memory_recall(memory_dir, "shared topic keyword", 5, set())
+        first = json.loads(capsys.readouterr().out)
+        assert first["turn"] == 1
+        cli._cmd_memory_recall(memory_dir, "shared topic keyword", 5, set())
+        second = json.loads(capsys.readouterr().out)
+        assert second["turn"] == 2
+
+
+class TestGoldenMemoryRecallReplay:
+    """Replay owner prompt forms through the real engine and CLI adapters."""
+
+    @staticmethod
+    def _fingerprint(corpus: dict) -> str:
+        canonical = json.dumps(
+            {key: value for key, value in corpus.items() if key != "corpus_fingerprint"},
+            sort_keys=True, separators=(",", ":"),
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+    @staticmethod
+    def _write_corpus(memory_dir: Path, corpus: dict) -> None:
+        for memory in corpus["memories"]:
+            lines = [f"name: {memory['name']}", f"tier: {memory['tier']}"]
+            if memory.get("bausteine"):
+                lines.append(f"bausteine: {json.dumps(memory['bausteine'])}")
+            if memory.get("kontexte"):
+                lines.append("kontexte:")
+                for axis, values in memory["kontexte"].items():
+                    lines.append(f"  {axis}: {json.dumps(values)}")
+            _write(memory_dir, f"{memory['name']}.md", "\n".join(lines), memory["body"])
+
+    def test_replays_versioned_owner_cases_through_engine_and_cli(
+        self, tmp_path: Path, capsys, monkeypatch,
+    ):
+        corpus = json.loads(_GOLDEN_RECALL_CORPUS.read_text(encoding="utf-8"))
+        assert self._fingerprint(corpus) == corpus["corpus_fingerprint"]
+        monkeypatch.delenv("CONTEXT_USER_MEMORY_DIR", raising=False)
+        memory_dir = tmp_path / ".claude" / "memory"
+        self._write_corpus(memory_dir, corpus)
+
+        for case in corpus["cases"]:
+            context = case["context"]
+            engine = MemoryEngine.from_directory(memory_dir)
+            baseline_names = [memory.name for memory in memory_recall_hits(
+                engine, case["prompt"], limit=case["limit"],
+            )]
+            assert baseline_names == case["baseline_names"], case["id"]
+            engine_names = [memory.name for memory in memory_recall_hits(
+                engine, case["prompt"], limit=case["limit"],
+                bausteine=context.get("bausteine"),
+                themen=context.get("themen"),
+                taetigkeiten=context.get("taetigkeiten"),
+            )]
+            cli._cmd_memory_recall(
+                memory_dir, case["prompt"], case["limit"], set(),
+                bausteine=context.get("bausteine"), themen=context.get("themen"),
+                taetigkeiten=context.get("taetigkeiten"),
+            )
+            cli_names = json.loads(capsys.readouterr().out)["names"]
+            assert cli_names == engine_names, case["id"]
+            if "expected_first" in case:
+                assert cli_names[0] == case["expected_first"], case["id"]
+            assert set(case["must_include"]).issubset(cli_names), case["id"]
+            assert not set(case["must_exclude"]) & set(cli_names), case["id"]
 
 
 class TestBacklinkBoostInRecall:
@@ -639,6 +1048,127 @@ class TestBacklinkBoostInRecall:
         # B should be in results (matches "b")
         names = [r.name for r in results]
         assert "b" in names
+
+
+class TestMemoryRecallHits:
+    """`memory_recall_hits` — pulled out of `server/tools_memory.py`'s
+    `recall()` closure (mct-Context-Studio-Vollausbau Etappe E) so a
+    second consumer (a BRIAREOS chat tool) gets the identical ranking +
+    frecency side effect instead of a reimplementation. These tests target
+    exactly what a naive `engine.recall(query, limit)` call would miss."""
+
+    def _write(self, d: Path, name: str, body: str) -> None:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(f"---\nname: {name}\n---\n\n{body}\n", encoding="utf-8")
+
+    def test_applies_log1p_damping_not_raw_inbound_count(self, tmp_path: Path):
+        # Ein naiver Aufrufer koennte auf die Idee kommen, die rohen
+        # Inbound-Counts direkt als Boost zu nehmen — das waere eine
+        # andere Rangfolge als die echte log1p*0.1-Daempfung.
+        ms = tmp_path / "memories"
+        self._write(ms, "a", "Concept A")
+        self._write(ms, "b", "[[a]] Concept B")
+        self._write(ms, "c", "[[a]] Concept C")
+        engine = MemoryEngine.from_directory(ms)
+        hits = memory_recall_hits(engine, "concept", limit=3)
+        assert hits[0].name == "a"  # a hat 2 Backlinks, muss vorne stehen
+
+    def test_usage_none_skips_boost_and_recording_without_error(self, tmp_path: Path):
+        ms = tmp_path / "memories"
+        self._write(ms, "a", "Concept A")
+        engine = MemoryEngine.from_directory(ms)
+        hits = memory_recall_hits(engine, "concept", limit=3, usage=None)
+        assert [h.name for h in hits] == ["a"]
+
+    def test_usage_provided_records_recall_and_uses_boosts(self, tmp_path: Path):
+        ms = tmp_path / "memories"
+        self._write(ms, "a", "Concept A")
+        self._write(ms, "b", "Concept B")
+        engine = MemoryEngine.from_directory(ms)
+
+        calls = {"boosts": 0, "recorded": None}
+
+        class FakeUsage:
+            def boosts(self):
+                calls["boosts"] += 1
+                return {}
+            def record_recall(self, names):
+                calls["recorded"] = list(names)
+
+        hits = memory_recall_hits(engine, "concept", limit=3, usage=FakeUsage())
+        assert calls["boosts"] == 1
+        assert calls["recorded"] == [h.name for h in hits]
+
+    def test_context_lane_fills_only_unused_slots_and_never_displaces_keywords(self, tmp_path: Path):
+        ms = tmp_path / "memories"
+        _write(ms, "text.md", "name: text_hit", "querytoken")
+        _write(ms, "a.md", "name: context_a\nkontexte:\n  themen: [memory_recall]", "other")
+        _write(ms, "b.md", "name: context_b\nkontexte:\n  themen: [memory_recall]", "other")
+        _write(ms, "c.md", "name: context_c\nkontexte:\n  themen: [memory_recall]", "other")
+        engine = MemoryEngine.from_directory(ms)
+        assert [m.name for m in memory_recall_hits(engine, "querytoken", limit=4)] == ["text_hit"]
+        assert [m.name for m in memory_recall_hits(
+            engine, "querytoken", limit=4, themen=["memory_recall"],
+        )] == ["text_hit", "context_a", "context_b"]
+
+    def test_context_lane_respects_the_global_limit_after_clamping(self, tmp_path: Path):
+        ms = tmp_path / "memories"
+        for number in range(50):
+            _write(ms, f"kw{number:02d}.md", f"name: kw{number:02d}", "querytoken")
+        _write(ms, "ctx0.md", "name: ctx0\nkontexte:\n  themen: [memory_recall]", "other")
+        _write(ms, "ctx1.md", "name: ctx1\nkontexte:\n  themen: [memory_recall]", "other")
+        engine = MemoryEngine.from_directory(ms)
+
+        hits = memory_recall_hits(
+            engine, "querytoken", limit=999, themen=["memory_recall"],
+        )
+
+        assert len(hits) == 50
+        assert [memory.name for memory in hits] == [f"kw{number:02d}" for number in range(50)]
+
+
+class TestMemoryContextCandidatesTool:
+    def test_reports_context_axes_without_recalling(self, tmp_path: Path):
+        memory_dir = tmp_path / "memories"
+        _write(
+            memory_dir, "review.md",
+            "name: review_note\nkontexte:\n  themen: [memory_recall]\n  taetigkeiten: [review]",
+            "ordinary prose",
+        )
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _Reloader, build_server
+
+        engine = MemoryEngine.from_directory(memory_dir)
+        server = build_server(RulesEngine.from_directory(rules_dir), _Reloader(lambda: engine, [memory_dir]))
+        result = asyncio.run(server.call_tool("memory_context_candidates", {"themen": ["memory_recall"]}))
+        rows = json.loads(result[0][0].text)
+        assert rows == [{
+            "name": "review_note", "type": "misc", "tier": "project",
+            "description": "", "source_path": str(memory_dir / "review.md"),
+            "matches": {"themen": ["memory_recall"]},
+        }]
+
+    def test_recall_explain_marks_context_only_candidate(self, tmp_path: Path):
+        memory_dir = tmp_path / "memories"
+        _write(memory_dir, "text.md", "name: text_hit", "querytoken")
+        _write(memory_dir, "context.md", "name: context_hit\nkontexte:\n  themen: [memory_recall]", "other")
+        rules_dir = tmp_path / "rules"
+        rules_dir.mkdir()
+        from mcp_context_toolkit.engine import RulesEngine
+        from mcp_context_toolkit.mcp_server import _Reloader, build_server
+
+        engine = MemoryEngine.from_directory(memory_dir)
+        server = build_server(RulesEngine.from_directory(rules_dir), _Reloader(lambda: engine, [memory_dir]))
+        result = asyncio.run(server.call_tool(
+            "memory_recall_explain", {"query": "querytoken", "themen": ["memory_recall"]},
+        ))
+        payload = json.loads(result[0][0].text)
+        assert payload["baseline"] == ["text_hit"]
+        assert [(row["name"], row["sources"]) for row in payload["candidates"]] == [
+            ("text_hit", ["keyword"]), ("context_hit", ["context"]),
+        ]
 
 
 class TestMemoryDreamStatus:

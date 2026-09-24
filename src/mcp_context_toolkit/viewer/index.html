@@ -96,6 +96,17 @@
                       transition:color .12s ease,border-color .12s ease; }
     .subtabs button:hover { color:var(--fg); }
     .subtabs button.active { color:var(--fg); border-color:var(--accent-dim); }
+    .kpi-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
+    .kpi-tile { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+    .kpi-value { font-size:26px; font-weight:600; color:var(--fg); line-height:1.1; }
+    .kpi-label { font-size:12px; color:var(--muted); margin-top:4px; }
+    .kpi-sub { font-size:11px; color:var(--muted); margin-top:6px; opacity:.8; }
+    .edit-form { display:flex; flex-direction:column; gap:12px; margin-bottom:14px; }
+    .field-row { display:flex; flex-direction:column; gap:4px; }
+    .field-label { font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+    .edit-form textarea.search { resize:vertical; font-family:inherit; }
+    .edit-form select.search { cursor:pointer; }
+    .field-row input[type="checkbox"] { width:16px; height:16px; accent-color:var(--accent); }
     .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
             padding:13px 15px; margin-bottom:10px; box-shadow:var(--shadow);
             transition:border-color .12s ease,box-shadow .12s ease; }
@@ -117,6 +128,10 @@
     .prio-non_negotiable { background:rgba(217,123,134,.16); color:var(--danger); }
     .prio-mandatory { background:rgba(224,177,90,.16); color:var(--warn); }
     .prio-recommended { background:rgba(139,148,166,.16); color:var(--info); }
+    .status-open { background:rgba(139,148,166,.16); color:var(--info); }
+    .status-active { background:rgba(124,156,240,.16); color:var(--accent); }
+    .status-done { background:rgba(84,193,184,.16); color:var(--ok); }
+    .status-dropped,.status-superseded { background:rgba(217,123,134,.16); color:var(--danger); }
     .meta { color:var(--muted); font-size:11.5px; flex:none; }
     .chk { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; flex:none; }
     .diff { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:9px; }
@@ -212,6 +227,7 @@
       <button id="tab-browse">Browse</button>
       <button id="tab-graph">Graph</button>
       <button id="tab-pending">Pending</button>
+      <button id="tab-status">Status</button>
     </div>
     <span class="spacer"></span>
     <input id="search" class="search" placeholder="Filter…" autocomplete="off">
@@ -279,6 +295,30 @@
       if (out[key]) continue;
       try { const r = await fetch(file, { cache:"no-store" }); if (r.ok) out[key] = await r.json(); }
       catch (_) { /* file:// or missing — fall through to drop zone */ }
+    }
+    // work/docs metadata is NOT a safe static-file default the way memory/
+    // rules is (a work-item title or a docs/ heading tree can itself be the
+    // sensitive content) — so there is no bare `fetch(file)` fallback here.
+    // A host that wants the Work/Docs tabs populated must inject an ASYNC
+    // loader (`fetchWorkIndex`/`fetchDocsIndex`, awaited at boot, same shape
+    // as `--export-studio`'s work.json/docs.json) behind its own auth — see
+    // talos-data.js. Without one, the tabs just show "no data" (same empty
+    // state as a missing rules.json), never an unauthenticated file guess.
+    for (const [key, loaderKey] of [["work","fetchWorkIndex"],["docs","fetchDocsIndex"]]) {
+      if (out[key] || typeof out[loaderKey] !== "function") continue;
+      try { out[key] = await out[loaderKey](); }
+      catch (e) {
+        // A host DID wire this loader, so a throw here means the request
+        // actually failed (401 from an expired session, 500, network) —
+        // not "no data source configured", which is the case skipped by
+        // the `typeof ... !== "function"` check above. Surfacing the
+        // message (console + the tab's own empty-state text below) keeps
+        // "host never configured this" and "host configured it and it
+        // broke" visually distinct instead of both reading as an
+        // identical blank tab.
+        out[key + "Error"] = (e && e.message) ? String(e.message) : String(e);
+        console.error("[context-studio] " + loaderKey + "() failed:", e);
+      }
     }
     return out;
   }
@@ -400,8 +440,13 @@
     const st = el("div", { class:"subtabs" });
     st.appendChild(subtabBtn("memory", "Memory"));
     st.appendChild(subtabBtn("rules", "Rules"));
+    st.appendChild(subtabBtn("work", "Work"));
+    st.appendChild(subtabBtn("docs", "Docs"));
     c.appendChild(st);
-    if (STATE.browseTab === "memory") renderMemory(c); else renderRules(c);
+    if (STATE.browseTab === "memory") renderMemory(c);
+    else if (STATE.browseTab === "rules") renderRules(c);
+    else if (STATE.browseTab === "work") renderWork(c);
+    else renderDocs(c);
   }
   function subtabBtn(key, label) {
     const b = el("button", { class:STATE.browseTab === key ? "active" : "", text:label });
@@ -487,6 +532,31 @@
     holder.appendChild(btn);
   }
 
+  // Generic on-demand-content drawer section for domains without an inline
+  // body in their metadata snapshot (work/docs — see `appendBodySection`
+  // above for memory's variant, which additionally supports a pre-injected
+  // `p.body` string). `fetcher` is null when the host supplies no hook
+  // (pure offline export) — the section is simply omitted, same as memory's.
+  function appendFetchedSection(b, fetcher) {
+    if (!fetcher) return;
+    b.appendChild(el("div", { class:"group-title", text:"content" }));
+    const holder = el("div", {});
+    b.appendChild(holder);
+    const btn = el("button", { class:"btn ghost" }, "Show content");
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = "Loading…";
+      try {
+        const text = await fetcher();
+        clear(holder);
+        holder.appendChild(el("pre", { text: (text && text.trim()) ? text : "(empty)" }));
+      } catch (err) {
+        clear(holder);
+        holder.appendChild(el("div", { class:"empty", text:"Could not load: " + err.message }));
+      }
+    };
+    holder.appendChild(btn);
+  }
+
   function renderRules(c) {
     const rl = STATE.data.rules;
     if (!rl || !Array.isArray(rl.rules)) { c.appendChild(el("div", { class:"empty", text:"No rules.json — run: context-toolkit-query --export-studio <dir>" })); return; }
@@ -533,6 +603,332 @@
     openDrawer();
   }
 
+  function renderWork(c) {
+    const wk = STATE.data.work;
+    if (!wk || !Array.isArray(wk.items)) {
+      const msg = STATE.data.workError
+        ? "Could not load work items: " + STATE.data.workError
+        : "No work.json — run: context-toolkit-query --export-studio <dir>";
+      c.appendChild(el("div", { class:"empty", text: msg }));
+      return;
+    }
+    const items = (wk.items || []).filter(matchWork);
+    if (wk.stats) {
+      const s = el("div", { class:"summary" });
+      s.appendChild(el("span", {}, el("b", { text:String(wk.stats.items) }), " items"));
+      for (const k in (wk.stats.by_status||{})) s.appendChild(el("span", { class:"badge status-"+k, text:k+" "+wk.stats.by_status[k] }));
+      c.appendChild(s);
+    }
+    const byTheme = {}; for (const i of items) (byTheme[i.theme] = byTheme[i.theme] || []).push(i);
+    let shown = 0;
+    for (const t of Object.keys(byTheme).sort()) {
+      c.appendChild(el("div", { class:"group-title", text:t + " · " + byTheme[t].length }));
+      for (const i of byTheme[t]) { c.appendChild(workRow(i)); shown++; }
+    }
+    if (!shown) c.appendChild(el("div", { class:"empty", text:"No work items match the filter." }));
+  }
+  function workRow(i) {
+    const row = el("div", { class:"row", onclick:()=>openWorkItem(i) });
+    row.appendChild(el("span", { class:"badge status-"+i.status, text:i.status }));
+    row.appendChild(el("span", { class:"nm", text:i.title }));
+    row.appendChild(el("span", { class:"desc", text:i.key }));
+    row.appendChild(el("span", { class:"meta", text:i.kind + (i.has_evidence?" · evidence":"") }));
+    return row;
+  }
+  function openWorkItem(i) {
+    const b = $("drawer-body"); clear(b);
+    b.appendChild(el("h2", { text:i.title }));
+    b.appendChild(el("div", { class:"sub", text:i.key + " · " + i.theme + "/" + i.kind + " · opened " + i.opened + (i.closed?(" · closed "+i.closed):"") }));
+    b.appendChild(el("div", { class:"chips" },
+      el("span", { class:"badge status-"+i.status, text:i.status }),
+      el("span", { class:"chip", text:i.has_evidence?"has evidence":"no evidence" }),
+      el("span", { class:"chip", text:i.has_reuse?"kanten recorded":"kanten not recorded" }),
+    ));
+    if (i.part_of) { b.appendChild(el("div", { class:"group-title", text:"part of" })); b.appendChild(el("div", { class:"chips" }, el("span", { class:"chip", text:i.part_of }))); }
+    if (i.blocked_by && i.blocked_by.length) {
+      b.appendChild(el("div", { class:"group-title", text:"blocked by" }));
+      const ch = el("div", { class:"chips" });
+      for (const k of i.blocked_by) ch.appendChild(el("span", { class:"chip", text:k }));
+      b.appendChild(ch);
+    }
+    if (typeof STATE.data.fetchWorkFields === "function") {
+      const editBar = el("div", { class:"chips" });
+      const editBtn = el("button", { class:"btn ghost", text:"Bearbeiten" });
+      editBtn.onclick = () => _startWorkEdit(i.key);
+      editBar.appendChild(editBtn);
+      b.appendChild(editBar);
+    }
+    appendFetchedSection(b, typeof STATE.data.fetchWorkBody === "function" ? () => STATE.data.fetchWorkBody(i.key) : null);
+    openDrawer();
+  }
+
+  // ---------------- WORK ITEM EDIT (Etappe D — the one write path) ----------------
+  // Host-optional the same way fetchWorkIndex/fetchWorkStatus are: the
+  // "Bearbeiten" button above only appears when fetchWorkFields exists, and
+  // every function below assumes it was called because that check passed.
+  const _WORK_KIND_OPTIONS = ["goal", "step", "note", "decision", "changelog"];
+  const _WORK_STATUS_OPTIONS = ["open", "active", "done", "dropped", "superseded"];
+  const _EMPTY_EVIDENCE = { commits: [], files: [] };
+  const _EMPTY_REUSE = { searched_for: [], found: [], conclusion: "", uses: [], extends: [], creates: [], modules: [] };
+
+  // Flat field spec for the edit form. `path` addresses either a top-level
+  // WorkItem field ("title") or a nested one ("evidence.commits") — nested
+  // paths are re-grouped into {evidence:{...}}/{reuse:{...}} objects by
+  // _collectWorkUpdates before they ever reach the backend, because
+  // WorkEngine.apply_update REPLACES a nested object wholesale rather than
+  // merging it field-by-field — sending only the touched sub-field would
+  // silently blank out every sibling the form didn't render a change for.
+  const _WORK_EDIT_FIELDS = [
+    { path:"title", label:"Titel", type:"text" },
+    { path:"kind", label:"Kind", type:"select", options:_WORK_KIND_OPTIONS },
+    { path:"status", label:"Status", type:"select", options:_WORK_STATUS_OPTIONS },
+    { path:"theme", label:"Theme", type:"text" },
+    { path:"opened", label:"Opened", type:"date" },
+    { path:"closed", label:"Closed", type:"date", nullable:true },
+    { path:"part_of", label:"Part of", type:"text", nullable:true },
+    { path:"amends", label:"Amends", type:"text", nullable:true },
+    { path:"supersedes", label:"Supersedes", type:"text", nullable:true },
+    { path:"blocked_by", label:"Blocked by (ein Key pro Zeile)", type:"list" },
+    { path:"plan_path", label:"Plan path", type:"text", nullable:true },
+    { path:"unblocked_by", label:"Unblocked by", type:"text", nullable:true },
+    { path:"requires_owner", label:"Requires owner", type:"checkbox" },
+    { path:"migrated", label:"Migrated", type:"checkbox" },
+    { path:"evidence.commits", label:"Evidence — Commits (ein Hash pro Zeile)", type:"list" },
+    { path:"evidence.files", label:"Evidence — Files (ein Pfad pro Zeile)", type:"list" },
+    { path:"reuse.searched_for", label:"Kanten — gesucht (ein Begriff pro Zeile)", type:"list" },
+    { path:"reuse.found", label:"Kanten — gefunden (ein Eintrag pro Zeile)", type:"list" },
+    { path:"reuse.conclusion", label:"Kanten — Entscheidung", type:"textarea" },
+    { path:"reuse.uses", label:"Kanten — nutzt (datei.py::Symbol pro Zeile)", type:"list" },
+    { path:"reuse.extends", label:"Kanten — erweitert", type:"list" },
+    { path:"reuse.creates", label:"Kanten — baut", type:"list" },
+    { path:"reuse.modules", label:"Kanten — Module", type:"list" },
+    { path:"body", label:"Body", type:"textarea", large:true },
+  ];
+
+  function _getPath(obj, path) {
+    let v = obj;
+    for (const p of path.split(".")) v = (v == null) ? undefined : v[p];
+    return v;
+  }
+
+  function _buildSelectInput(spec, value) {
+    const input = el("select", { class:"search" });
+    for (const opt of spec.options) {
+      const o = el("option", { value:opt, text:opt });
+      if (opt === value) o.setAttribute("selected", "selected");
+      input.appendChild(o);
+    }
+    return { input, getValue:() => input.value };
+  }
+  function _buildCheckboxInput(_spec, value) {
+    const input = el("input", { type:"checkbox" });
+    if (value) input.checked = true;
+    return { input, getValue:() => input.checked };
+  }
+  function _buildListInput(_spec, value) {
+    const input = el("textarea", { class:"search", rows:"3" });
+    input.value = Array.isArray(value) ? value.join("\n") : "";
+    return { input, getValue:() => input.value.split("\n").map(s => s.trim()).filter(Boolean) };
+  }
+  function _buildTextareaInput(spec, value) {
+    const input = el("textarea", { class:"search", rows: spec.large ? "10" : "3" });
+    input.value = value || "";
+    return { input, getValue:() => input.value };
+  }
+  function _buildDateInput(_spec, value) {
+    const input = el("input", { class:"search", type:"date" });
+    input.value = value || "";
+    return { input, getValue:() => input.value || null };
+  }
+  function _buildTextInput(spec, value) {
+    const input = el("input", { class:"search", type:"text" });
+    input.value = (value == null) ? "" : value;
+    const getValue = spec.nullable ? (() => input.value.trim() || null) : (() => input.value);
+    return { input, getValue };
+  }
+  const _WORK_EDIT_INPUT_BUILDERS = {
+    select: _buildSelectInput, checkbox: _buildCheckboxInput, list: _buildListInput,
+    textarea: _buildTextareaInput, date: _buildDateInput,
+  };
+
+  // Builds one labeled form row for `spec`, seeded from `value`. Returns
+  // the row DOM node, a getValue() reading the CURRENT input state back
+  // out in the field's native type, and the raw input element (so the
+  // caller can attach a single shared "this form is dirty" listener).
+  function _workEditFieldRow(spec, value) {
+    const row = el("div", { class:"field-row" });
+    row.appendChild(el("label", { class:"field-label", text:spec.label }));
+    const build = _WORK_EDIT_INPUT_BUILDERS[spec.type] || _buildTextInput;
+    const { input, getValue } = build(spec, value);
+    row.appendChild(input);
+    return { row, input, getValue };
+  }
+
+  // Reads every field row back into an updates object shaped for the
+  // backend. Only a field/group whose CURRENT value actually differs from
+  // `original` is included — an untouched evidence/reuse form must not
+  // manufacture an empty-but-present block where none existed (the whole
+  // store treats "kanten: {}" as meaningfully different from "no kanten
+  // block" — see WorkEdges.searched()'s own docstring). Both sides of the
+  // comparison are normalized through the same empty-defaults shape so
+  // "never had reuse" and "form left at its untouched defaults" compare
+  // equal instead of a phantom diff.
+  function _collectWorkUpdates(fieldStates, original) {
+    const flat = {};
+    for (const fs of fieldStates) flat[fs.spec.path] = fs.getValue();
+    const updates = {};
+    const groups = {};
+    for (const fs of fieldStates) {
+      const parts = fs.spec.path.split(".");
+      if (parts.length === 2) {
+        const [top, sub] = parts;
+        groups[top] = groups[top] || {};
+        groups[top][sub] = flat[fs.spec.path];
+      } else {
+        const before = _getPath(original, fs.spec.path);
+        const after = flat[fs.spec.path];
+        if (JSON.stringify(before) !== JSON.stringify(after)) updates[fs.spec.path] = after;
+      }
+    }
+    for (const top in groups) {
+      const defaults = top === "evidence" ? _EMPTY_EVIDENCE : _EMPTY_REUSE;
+      const before = { ...defaults, ..._getPath(original, top) };
+      const after = groups[top];
+      if (JSON.stringify(before) !== JSON.stringify(after)) updates[top] = after;
+    }
+    return updates;
+  }
+
+  async function _startWorkEdit(key) {
+    const b = $("drawer-body"); clear(b);
+    b.appendChild(el("div", { class:"empty", text:"Lade Felder…" }));
+    let fields;
+    try { fields = await STATE.data.fetchWorkFields(key); }
+    catch (e) {
+      clear(b);
+      b.appendChild(el("div", { class:"empty", text:"Konnte Felder nicht laden: " + ((e && e.message) || e) }));
+      return;
+    }
+    _renderWorkEditForm(key, fields);
+  }
+
+  function _renderWorkEditForm(key, fields) {
+    const b = $("drawer-body"); clear(b);
+    b.appendChild(el("h2", { text:"Bearbeiten: " + fields.title }));
+    b.appendChild(el("div", { class:"sub", text:key }));
+
+    const form = el("div", { class:"edit-form" });
+    const fieldStates = [];
+    let lastPreviewedUpdates = null;
+
+    const previewOut = el("div", {});
+    const previewBtn = el("button", { class:"btn", text:"Vorschau" });
+    const saveBtn = el("button", { class:"btn", text:"Speichern" });
+    saveBtn.disabled = true;
+
+    function markDirty() { lastPreviewedUpdates = null; saveBtn.disabled = true; }
+
+    for (const spec of _WORK_EDIT_FIELDS) {
+      const value = _getPath(fields, spec.path);
+      const fs = _workEditFieldRow(spec, value);
+      fs.spec = spec;
+      fieldStates.push(fs);
+      fs.input.addEventListener("input", markDirty);
+      fs.input.addEventListener("change", markDirty);
+      form.appendChild(fs.row);
+    }
+    b.appendChild(form);
+
+    previewBtn.onclick = async () => {
+      const updates = _collectWorkUpdates(fieldStates, fields);
+      clear(previewOut);
+      if (Object.keys(updates).length === 0) {
+        previewOut.appendChild(el("div", { class:"empty", text:"Keine Änderungen." }));
+        return;
+      }
+      previewOut.appendChild(el("div", { class:"empty", text:"Prüfe…" }));
+      try {
+        const result = await STATE.data.previewWorkUpdate(key, updates);
+        clear(previewOut);
+        previewOut.appendChild(el("pre", { class:"ledger", text: result.diff || "(keine textuelle Änderung)" }));
+        lastPreviewedUpdates = updates;
+        saveBtn.disabled = false;
+      } catch (e) {
+        clear(previewOut);
+        previewOut.appendChild(el("div", { class:"empty", text:"Validierung fehlgeschlagen: " + ((e && e.message) || e) }));
+      }
+    };
+
+    saveBtn.onclick = async () => {
+      if (!lastPreviewedUpdates) return;
+      saveBtn.disabled = true;
+      try {
+        await STATE.data.saveWorkUpdate(key, lastPreviewedUpdates);
+        clear(previewOut);
+        previewOut.appendChild(el("div", { class:"empty",
+          text:"Gespeichert. Die Work-Liste zeigt die Änderung erst nach einem Neuladen der Seite." }));
+      } catch (e) {
+        previewOut.appendChild(el("div", { class:"empty", text:"Speichern fehlgeschlagen: " + ((e && e.message) || e) }));
+        saveBtn.disabled = false;
+      }
+    };
+
+    const cancelBtn = el("button", { class:"btn ghost", text:"Abbrechen" });
+    cancelBtn.onclick = () => { const item = STATE.data.work && STATE.data.work.items.find(x => x.key === key); if (item) openWorkItem(item); };
+
+    b.appendChild(el("div", { class:"chips" }, previewBtn, saveBtn, cancelBtn));
+    b.appendChild(previewOut);
+  }
+  function matchWork(i) {
+    if (!STATE.q) return true;
+    return ((i.key||"")+(i.title||"")+(i.theme||"")+(i.kind||"")).toLowerCase().includes(STATE.q);
+  }
+
+  function renderDocs(c) {
+    const dc = STATE.data.docs;
+    if (!dc || !Array.isArray(dc.sections)) {
+      const msg = STATE.data.docsError
+        ? "Could not load doc sections: " + STATE.data.docsError
+        : "No docs.json — run: context-toolkit-query --export-studio <dir>";
+      c.appendChild(el("div", { class:"empty", text: msg }));
+      return;
+    }
+    const sections = (dc.sections || []).filter(matchDoc);
+    if (dc.stats) {
+      const s = el("div", { class:"summary" });
+      s.appendChild(el("span", {}, el("b", { text:String(dc.stats.sections) }), " sections"));
+      s.appendChild(el("span", {}, el("b", { text:String(dc.stats.files) }), " files"));
+      c.appendChild(s);
+    }
+    const byPath = {}; for (const s of sections) (byPath[s.path] = byPath[s.path] || []).push(s);
+    let shown = 0;
+    for (const p of Object.keys(byPath).sort()) {
+      c.appendChild(el("div", { class:"group-title", text:p + " · " + byPath[p].length }));
+      for (const s of byPath[p]) { c.appendChild(docRow(s)); shown++; }
+    }
+    if (!shown) c.appendChild(el("div", { class:"empty", text:"No sections match the filter." }));
+  }
+  function docRow(s) {
+    const row = el("div", { class:"row", onclick:()=>openDocSection(s) });
+    row.appendChild(el("span", { class:"nm", text:s.heading || "(lead-in)" }));
+    row.appendChild(el("span", { class:"meta", text:"line " + s.line + " · " + fmtBytes(s.bytes) }));
+    return row;
+  }
+  function openDocSection(s) {
+    const b = $("drawer-body"); clear(b);
+    b.appendChild(el("h2", { text:s.heading || "(lead-in)" }));
+    b.appendChild(el("div", { class:"sub", text:s.path + " · line " + s.line }));
+    // fetchDocBody returns the WHOLE file (sections aren't individually
+    // addressable server-side, see admin_context_studio.py's docstring) —
+    // the drawer shows it in full; `line` above is the scroll/search hint.
+    appendFetchedSection(b, typeof STATE.data.fetchDocBody === "function" ? () => STATE.data.fetchDocBody(s.path) : null);
+    openDrawer();
+  }
+  function matchDoc(s) {
+    if (!STATE.q) return true;
+    return ((s.path||"")+(s.heading||"")).toLowerCase().includes(STATE.q);
+  }
+
   // ---------------- PENDING (consolidation flag-ledger) ----------------
   // The persistent "human decides" backlog a consolidation pass writes but does
   // NOT auto-resolve. Host-injectable: window.CONTEXT_DATA.pending (a string) or
@@ -557,6 +953,107 @@
     }
     if (!text.trim()) { body.appendChild(el("div", { class:"empty", text:"Nothing pending — the ledger is empty." })); return; }
     body.appendChild(el("pre", { class:"ledger", text:text }));
+  }
+
+  // ---------------- STATUS (KPI tiles — store health without an MCP call) ----------------
+  // Fetched on demand (like Pending), not at boot — most sessions never open this tab, so
+  // loadData() does not pay for it unconditionally. Cached in STATE.data once fetched;
+  // undefined = not yet successfully fetched (still worth retrying — a transient error is
+  // NOT cached as a permanent "unavailable", unlike a missing loader function, which never
+  // becomes available mid-session and is checked separately below).
+  function kpiTile(label, value, sub) {
+    return el("div", { class:"kpi-tile" },
+      el("div", { class:"kpi-value", text:value }),
+      el("div", { class:"kpi-label", text:label }),
+      el("div", { class:"kpi-sub", text:sub || "" }),
+    );
+  }
+
+  async function _fetchStatusSource(dataKey, loaderKey, errorKey) {
+    if (STATE.data[dataKey] !== undefined) return;
+    if (typeof STATE.data[loaderKey] !== "function") return;
+    // Cache the IN-FLIGHT PROMISE, not just its eventual result — a rapid
+    // tab-switch-away-and-back while the first fetch is still running must
+    // reuse it, not fire a second ~2.5s request against the same source
+    // (W8-Reviewer-Fund, mct-Context-Studio-Vollausbau Etappe B WARNING-4).
+    const promiseKey = dataKey + "Promise";
+    if (!STATE.data[promiseKey]) {
+      // Loader call wrapped in .then(), not passed directly to
+      // Promise.resolve() — a host loader is only CONTRACTUALLY required to
+      // be "a function in window.CONTEXT_DATA", not an async one; a plain
+      // function that throws SYNCHRONOUSLY would escape Promise.resolve()
+      // before it has a chance to wrap the call, and .catch() below would
+      // never see it (W8-Reviewer-Fund NEU-1: caught via a synchronous-throw
+      // test case the delta review added specifically for this).
+      STATE.data[promiseKey] = Promise.resolve().then(() => STATE.data[loaderKey]())
+        .then(result => { STATE.data[dataKey] = result; delete STATE.data[errorKey]; })
+        .catch(e => {
+          // dataKey stays undefined on error (WARNING-3) — a transient
+          // failure (network blip, an expired session mid-fetch) must not
+          // be cached as permanently unavailable; the NEXT tab-open retries.
+          STATE.data[errorKey] = (e && e.message) ? String(e.message) : String(e);
+          console.error("[context-studio] " + loaderKey + "() failed:", e);
+        })
+        .finally(() => { delete STATE.data[promiseKey]; });
+    }
+    await STATE.data[promiseKey];
+  }
+
+  function _renderWorkStatusTiles(grid) {
+    const ws = STATE.data.workStatus;
+    if (!ws) {
+      grid.appendChild(el("div", { class:"empty",
+        text: STATE.data.workStatusError ? "Work-Status: " + STATE.data.workStatusError : "Kein Work-Status verfügbar (kein Host-Loader konfiguriert)." }));
+      return;
+    }
+    grid.appendChild(kpiTile("Work-Items gesamt", String(ws.total_items), ws.recommendation));
+    grid.appendChild(kpiTile("Aufräumen fällig", String(ws.closeable_goals + ws.dangling_refs + ws.plan_path_broken),
+      "abschließbare Ziele + hängende Referenzen + kaputte Plan-Pfade"));
+    grid.appendChild(kpiTile("Reuse ungeprüft", String(ws.reuse_not_checked), "Records ohne aufgezeichnete Reuse-Suche"));
+    grid.appendChild(kpiTile("Ladefehler", String(ws.load_errors), "Dateien beim Laden verworfen"));
+  }
+
+  function _renderMemoryStatusTiles(grid) {
+    const ms = STATE.data.memoryStatus;
+    if (!ms) {
+      grid.appendChild(el("div", { class:"empty",
+        text: STATE.data.memoryStatusError ? "Memory-Status: " + STATE.data.memoryStatusError : "Kein Memory-Status verfügbar (kein Host-Loader konfiguriert)." }));
+      return;
+    }
+    grid.appendChild(kpiTile("Memory — Ledger-Größe", String(ms.total),
+      Object.entries(ms.tiers || {}).map(([t, n]) => t + ": " + n).join(" · ")));
+    const brokenLinks = Object.values(ms.broken_links || {}).reduce((a, b) => a + b.length, 0);
+    grid.appendChild(kpiTile("Kaputte Links", String(brokenLinks), "[[link]]-Ziele ohne Treffer"));
+    grid.appendChild(kpiTile("Orphans", String((ms.orphans || []).length), "nicht in MEMORY.md referenziert"));
+    grid.appendChild(kpiTile("Stale Pointers", String((ms.stale_pointers || []).length), "MEMORY.md verweist auf fehlende Datei"));
+  }
+
+  async function renderStatus() {
+    const c = $("content"); clear(c);
+    c.appendChild(el("div", { class:"summary" }, el("span", {
+      text:"Status — store health at a glance (work_status + memory_lint), no MCP tool call needed." })));
+    const grid = el("div", { class:"kpi-grid" });
+    c.appendChild(grid);
+
+    // Measured at ~2.5s for the work-store source on the real TALOS tree —
+    // an empty grid for that long reads as broken, not slow (W8-Reviewer-
+    // Fund WARNING-5). Shown only when a fetch is actually about to happen.
+    const _statusSources = [["workStatus", "fetchWorkStatus"], ["memoryStatus", "fetchMemoryStatus"]];
+    const willFetch = _statusSources.some(([dataKey, loaderKey]) =>
+      STATE.data[dataKey] === undefined && typeof STATE.data[loaderKey] === "function");
+    if (willFetch) grid.appendChild(el("div", { class:"empty", text:"Loading…" }));
+
+    await Promise.all([
+      _fetchStatusSource("workStatus", "fetchWorkStatus", "workStatusError"),
+      _fetchStatusSource("memoryStatus", "fetchMemoryStatus", "memoryStatusError"),
+    ]);
+    // Re-check STATE.mode: the fetches above can straddle a tab switch — a
+    // slow fetch resolving after the user already left the Status tab must
+    // not clear/repopulate whatever tab is showing now.
+    if (STATE.mode !== "status") return;
+    clear(grid);
+    _renderWorkStatusTiles(grid);
+    _renderMemoryStatusTiles(grid);
   }
 
   // ---------------- GRAPH (memory link graph via Cytoscape) ----------------
@@ -658,13 +1155,15 @@
     $("tab-browse").classList.toggle("active", STATE.mode === "browse");
     $("tab-graph").classList.toggle("active", STATE.mode === "graph");
     $("tab-pending").classList.toggle("active", STATE.mode === "pending");
+    $("tab-status").classList.toggle("active", STATE.mode === "status");
     $("export").style.display = STATE.mode === "review" ? "" : "none";
     // Search only drives review/browse; hide it where it does nothing (graph
-    // would re-layout on every keystroke, pending is a plain text dump).
+    // would re-layout on every keystroke, pending/status are plain summaries).
     $("search").style.display = (STATE.mode === "review" || STATE.mode === "browse") ? "" : "none";
     if (STATE.mode === "review") renderReview();
     else if (STATE.mode === "browse") renderBrowse();
     else if (STATE.mode === "graph") renderGraph();
+    else if (STATE.mode === "status") renderStatus();
     else renderPending();
   }
 
@@ -672,6 +1171,7 @@
   $("tab-browse").onclick = () => { STATE.mode = "browse"; render(); };
   $("tab-graph").onclick = () => { STATE.mode = "graph"; render(); };
   $("tab-pending").onclick = () => { STATE.mode = "pending"; render(); };
+  $("tab-status").onclick = () => { STATE.mode = "status"; render(); };
   $("search").addEventListener("input", e => { STATE.q = e.target.value.trim().toLowerCase(); render(); });
   $("export").onclick = exportDecision;
   $("drawer-close").onclick = closeDrawer;
@@ -692,13 +1192,15 @@
   // ---------------- boot ----------------
   (async function () {
     STATE.data = await loadData();
-    const has = k => STATE.data[k] && (STATE.data[k].items || STATE.data[k].packages || STATE.data[k].rules);
+    const has = k => STATE.data[k] && (STATE.data[k].items || STATE.data[k].packages || STATE.data[k].rules || STATE.data[k].sections);
     // Open on whichever mode has data; default review.
-    if (!has("diff") && (has("memory") || has("rules"))) STATE.mode = "browse";
+    if (!has("diff") && (has("memory") || has("rules") || has("work") || has("docs"))) STATE.mode = "browse";
     const parts = [];
     if (STATE.data.diff && STATE.data.diff.items) parts.push(STATE.data.diff.items.length + " proposals");
     if (STATE.data.memory && STATE.data.memory.packages) parts.push(STATE.data.memory.packages.length + " packages");
     if (STATE.data.rules && STATE.data.rules.rules) parts.push(STATE.data.rules.rules.length + " rules");
+    if (STATE.data.work && STATE.data.work.items) parts.push(STATE.data.work.items.length + " work items");
+    if (STATE.data.docs && STATE.data.docs.sections) parts.push(STATE.data.docs.sections.length + " doc sections");
     setStatus(parts.join(" · "));
     render();
   })();
